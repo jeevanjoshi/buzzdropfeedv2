@@ -12,10 +12,10 @@ Production-grade, zero-human-intervention **Customized Storytelling Video Genera
    ├── main.py                          <-- Main Pipeline Entrypoint
    ├── src/                             <-- All Agents & Engine Modules
    │   ├── agents/                      (Orchestrator, FactRetriever, StoryDesigner, Observer, MediaProducer, Publisher)
-   │   ├── engine/                      (TOPSIS Math, EMA Velocity, Cosine RPM, RSS Ingestion, Logger, Tracer, APINinjas)
+   │   ├── engine/                      (TOPSIS Math, EMA Velocity, Cosine RPM, RSS Ingestion, Logger, Tracer, APINinjas, ExternalAPIs, SpaceCinema, GIFRetriever)
    │   └── schemas/                     (GlobalState, A2AMessage)
    ├── mcp_servers/media_cloud/         <-- Cloud Media MCP Server (Port 8001)
-   │   └── server.py                    (Flux.1 16:9, Ken Burns, Dynamic Charts, Playwright SVG, Thumbnails, FFmpeg Timeline)
+   │   └── server.py                    (Flux.1 16:9, Ken Burns, Dynamic Charts, Playwright SVG, GIPHY Reactions, Thumbnails, FFmpeg Timeline)
    └── mcp_servers/youtube_cloud/       <-- YouTube Publishing MCP Server (Port 8002)
        └── server.py                    (Headless OAuth2 Upload & Quota Guard)
 
@@ -55,45 +55,42 @@ Structural data, public datasets, economics, demographics, and trivia.
 
 *   **[Data.gov.in OGD Platform API](https://data.gov.in)**: *India-Specific / Free (HIGH PRIORITY).* Open data initiative by the Govt of India (230,000+ datasets). Excellent for Indian macroeconomic, agricultural, and infrastructure Infotainment videos.
 *   **[API Setu India](https://apisetu.gov.in)**: *India-Specific / Free.* Official Open API platform from MeitY for public data utilities.
-*   **[World Bank Data API](https://data.worldbank.org)**: *Free (HIGH PRIORITY).* Global macroeconomic indicators, GDP growth, inflation, and demographic statistics.
+*   **[World Bank Data API](https://data.worldbank.org)**: *Integrated in `src/engine/external_apis.py`.* Global macroeconomic indicators, GDP growth, inflation, and demographic statistics.
 *   **[API-Ninjas Facts & Business API](https://api-ninjas.com)**: *Integrated in `src/engine/api_ninjas.py`.* Business news and interesting facts data provider.
 *   **[Bureau of Labor Statistics (BLS) API](https://www.bls.gov/developers/)**: Structured US economic data, inflation, employment, and wage indicators.
 *   **[Public APIs Repository](https://github.com/public-apis/public-apis)**: Community-curated collection of free public APIs across various niches.
 
 ---
 
-### 2. Research Papers APIs
-Programmatic discovery of scientific literature, citations, and open-access metadata.
+### 2. Research Papers, Space & Historical APIs
+Open-access metadata catalogs, space telemetry, historical archives, and entertainment data.
 
+*   **[NASA Open APIs & Image Library](https://api.nasa.gov)**: *Integrated in `src/engine/space_cinema_apis.py`.* 140,000+ public domain 8k space imagery and APOD cosmic telemetry.
+*   **[Wikipedia & OnThisDay Historical API](https://wikipedia.org)**: *Integrated in `src/engine/space_cinema_apis.py`.* Chronological historical events for date context.
+*   **[TMDB Movie Data API](https://developer.themoviedb.org)**: *Integrated in `src/engine/space_cinema_apis.py`.* Movie box-office budgets, revenues, and ratings.
+*   **[GIPHY & Tenor GIF Reaction APIs](https://giphy.com)**: *Integrated in `src/engine/gif_retriever.py`.* Trending comedic reaction clips and meme inserts.
 *   **[OpenAlex API](https://openalex.org)**: *Free CC0.* Catalog aggregating Crossref, arXiv, and PubMed. Perfect for deep-dive AI / Science documentaries.
 *   **[Semantic Scholar Academic Graph API](https://semanticscholar.org)**: AI-driven API for retrieving paper metadata and influential citations.
-*   **[arXiv API](https://arxiv.org)**: Non-commercial access to preprints in physics, AI, computer science, and mathematics.
-*   **[Springer Nature Open Access API](https://springernature.com)**: Access for open-access articles from thousands of scientific journals.
-*   **[Unpaywall API](https://unpaywall.org)**: Tracking for over 30 million open-access scholarly articles.
-*   **[CORE API](https://core.ac.uk)**: The world's largest aggregator of open-access research papers.
 
 ---
 
 ### 3. News APIs
 Live breaking headlines, historical articles, and text-mining global media.
 
-*   **[Marketaux API](https://marketaux.com)**: *Generous Free Tier (HIGH PRIORITY).* Dedicated stock market & global financial news API with integrated AI ticker sentiment analysis.
+*   **[Marketaux API](https://marketaux.com)**: *Integrated in `src/engine/external_apis.py`.* Dedicated stock market & global financial news API with integrated AI ticker sentiment analysis.
 *   **[NewsAPI.org (India Endpoint)](https://newsapi.org)**: *HIGH PRIORITY.* Dedicated `country=in` parameter to isolate real-time breaking headlines across India.
 *   **[World News API (India Track)](https://worldnewsapi.com)**: Monitors 300+ primary regional and national Indian media sources.
 *   **[Firecrawl News Search](https://firecrawl.dev)**: Converts live web search results into clean Markdown for LLMs.
-*   **[NewsAPI.ai (Event Registry)](https://newsapi.ai)**: Multilingual indexer tracking 150,000+ global publishers.
-*   **[Currents News API](https://currentsapi.services)**: Free tier offering regional and category-filtered news feeds.
 
 ---
 
 ### 4. Trends & Financial APIs
 Market momentum, search interest, real-time public curiosity, and stock metrics.
 
-*   **[Alpha Vantage API](https://www.alphavantage.co/)**: *Generous Free Tier (HIGH PRIORITY).* Global stock quotes, forex, crypto, and 50+ technical indicators. Directly powers `/tools/generate_dynamic_chart`.
+*   **[Alpha Vantage API](https://www.alphavantage.co/)**: *Integrated in `src/engine/external_apis.py`.* Global stock quotes, forex, crypto, and technical indicators. Directly powers `/tools/generate_dynamic_chart`.
 *   **[Indian Stock Market API](https://indianapi.in)**: *India-Specific (HIGH PRIORITY).* Granular NSE/BSE stock quotes, market trends, and technical metrics for listed Indian corporations.
 *   **[Database on Indian Economy (DBIE - RBI)](https://rbi.org.in)**: *India-Specific / Free.* Reserve Bank of India macroeconomic trends across public finance and financial markets.
-*   **[Exa Search API](https://exa.ai)**: *Built for AI Agents ($10/mo free credit).* Semantic web search and real-time trend discovery.
-*   **[Google Trends API / SerpAPI](https://serpapi.com)**: scaled search interest data and "Interest Over Time" tables.
+*   **[Exa Search API](https://exa.ai)**: *Integrated in `src/engine/external_apis.py`.* Semantic web search and real-time trend discovery.
 
 ---
 
@@ -155,7 +152,7 @@ python3 main.py --global
 python3 main.py --offline
 ```
 
-### Run Comprehensive Automated Test Suite (12 Unit & Integration Tests):
+### Run Comprehensive Automated Test Suite (16 Unit & Integration Tests):
 ```bash
 python3 run_tests.py
 ```
