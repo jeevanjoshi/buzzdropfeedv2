@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+.env
+token.json
+client_secret.json
+logs/*.log
+logs/*.json
+/tmp/
+*.wav
+*.mp4
+*.ass
+*.png
+.DS_Store
