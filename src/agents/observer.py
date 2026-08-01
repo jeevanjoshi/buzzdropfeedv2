@@ -10,7 +10,7 @@ class ObserverAgent:
     """
     Observer Critic Agent responsible for validating script quality, word count pacing,
     10-15 minute runtime boundaries, 16:9 visual aesthetic criteria (AQA), YouTube policy safety,
-    and Automated Fact Verification & Anti-Hallucination Audits.
+    and Dynamic Temporal Fact Verification & Anti-Hallucination Audits.
     """
 
     def __init__(self, name: str = "Observer"):
@@ -22,16 +22,21 @@ class ObserverAgent:
         """
         Audits narration text to ensure financial figures, percentages, dates, and entities are grounded in verified_facts.
         Returns list of hallucination / temporal violations if unverified figures or outdated temporal anchors are introduced.
+        Dynamically computes current year (e.g. 2026) and past historical years to enforce strict temporal context awareness.
         """
         violations = []
         if not verified_facts:
             return violations
 
+        # Dynamic System Date Context
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        current_year_int = now_utc.year
+        current_year = str(current_year_int)
+        past_years = [str(y) for y in range(current_year_int - 5, current_year_int)]
+
         # Ground truth corpus built from verified sources
         ground_truth_corpus = " ".join([f"{f.headline} {f.summary}" for f in verified_facts]).lower()
         gt_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', ground_truth_corpus))
-
-        current_year = "2026"
 
         for shot in script.shots:
             narration_lower = shot.narration_text.lower()
@@ -46,12 +51,13 @@ class ObserverAgent:
                             f"Shot #{shot.shot_id} Fact Audit: Unverified numerical claim '{num}' detected in narration. Not supported by source facts."
                         )
 
-            # 2. Temporal Anchor Check (Preventing outdated 2024/2025 facts presented as current 2026 events)
-            if "2024" in narration_lower or "2025" in narration_lower:
-                if "2024" not in ground_truth_corpus and "2025" not in ground_truth_corpus:
-                    violations.append(
-                        f"Shot #{shot.shot_id} Temporal Audit: Outdated temporal anchor detected in narration. Ground truth specifies current 2026 facts."
-                    )
+            # 2. Dynamic Temporal Anchor Check (Preventing outdated past years presented as present events)
+            for past_y in past_years:
+                if past_y in narration_lower:
+                    if past_y not in ground_truth_corpus:
+                        violations.append(
+                            f"Shot #{shot.shot_id} Temporal Audit: Outdated temporal anchor '{past_y}' detected in narration. Ground truth specifies current {current_year} facts."
+                        )
 
         return violations
 

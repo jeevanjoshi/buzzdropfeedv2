@@ -1,3 +1,4 @@
+import datetime
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
@@ -64,3 +65,15 @@ class GlobalState(BaseModel):
     script_data: Optional[ScriptData] = None
     asset_paths: AssetPaths = Field(default_factory=AssetPaths)
     upload_metadata: UploadMetadata = Field(default_factory=UploadMetadata)
+
+    @property
+    def current_year(self) -> str:
+        return str(datetime.datetime.now(datetime.timezone.utc).year)
+
+    @property
+    def current_date_str(self) -> str:
+        return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+    @property
+    def current_month_year(self) -> str:
+        return datetime.datetime.now(datetime.timezone.utc).strftime("%B %Y")

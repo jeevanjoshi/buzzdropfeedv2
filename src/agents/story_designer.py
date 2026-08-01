@@ -11,8 +11,8 @@ from src.engine.llm_client import LLMClient
 class StoryDesignerAgent:
     """
     Story Designer Agent responsible for expanding a selected topic into a 10-15 minute,
-    6-Act dramatic arc narrative script. Enforces region-appropriate demographic visual prompts
-    (e.g., Indian demographic framing for Indian market topics) and strict fact grounding.
+    6-Act dramatic arc narrative script. Enforces dynamic date/time awareness, region-appropriate
+    demographic visual prompts, and strict fact grounding.
     """
 
     def __init__(self, name: str = "StoryDesigner", llm_client: Optional[LLMClient] = None):
@@ -36,8 +36,13 @@ class StoryDesignerAgent:
     ) -> ScriptData:
         """
         Expands the topic candidate into a 6-Act dramatic narrative script.
-        Enforces region-appropriate demographic visuals (Indian visual framing if region=='india').
+        Dynamically derives current date/year context and enforces region-appropriate visual framing.
         """
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        current_year = str(now_utc.year)
+        current_month_year = now_utc.strftime("%B %Y")
+        current_date_str = now_utc.strftime("%Y-%m-%d")
+
         headline = topic.headline
         summary = topic.summary
         gt_context = self.extract_ground_truth_context(verified_facts)
@@ -52,27 +57,29 @@ class StoryDesignerAgent:
             people_tag = "a professional financial analyst"
             exchange_tag = "stock exchange trading floor"
 
-        # Attempt Live LLM Generation if API key is present
+        # Attempt Live LLM Generation if API key or Local Ollama is present
         if self.llm_client.is_available():
             prompt = f"""
             Generate a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
             Summary: '{summary}'
+            DYNAMIC TEMPORAL ANCHOR: Current Date is {current_date_str} ({current_month_year}). Year: {current_year}.
             REGION: '{region}' (Use {people_tag} and {location_tag} in visual prompts).
             GROUND TRUTH FACTS: '{gt_context['full_context']}'
 
             Requirements:
             1. Exactly 15 shots spanning 6 Acts.
             2. Each shot must have narration_text (approx 40-50 words) grounded strictly in ground truth facts.
-            3. Each shot must have visual_prompt specifying '16:9 widescreen' and 'cinematic 8k photorealistic' lighting matching region demographics ({people_tag}).
+            3. Strict Temporal Grounding: Frame current market developments within {current_month_year}.
+            4. Each shot must have visual_prompt specifying '16:9 widescreen' and 'cinematic 8k photorealistic' lighting matching region demographics ({people_tag}).
             """
-            system_prompt = "You are a master YouTube financial/tech documentary scriptwriter."
+            system_prompt = f"You are a master YouTube financial/tech documentary scriptwriter operating in {current_year}."
             llm_result = self.llm_client.generate_json(prompt, system_prompt)
             if llm_result and "shots" in llm_result:
                 try:
                     shots = [ShotData(**s) for s in llm_result["shots"]]
                     runtime = sum(s.duration_estimate for s in shots)
                     return ScriptData(
-                        title=llm_result.get("title", f"The Truth Behind {headline[:40]}"),
+                        title=llm_result.get("title", f"The Truth Behind {headline[:35]}... ({current_month_year})"),
                         target_shots=len(shots),
                         shots=shots,
                         estimated_runtime_seconds=round(runtime, 1)
@@ -80,14 +87,14 @@ class StoryDesignerAgent:
                 except Exception:
                     pass
 
-        # Fallback Deterministic 6-Act Template Engine (Grounded in Verified Facts & Region Demographics)
+        # Fallback Deterministic 6-Act Template Engine (Grounded in Verified Facts & Dynamic Date Context)
         acts_blueprint = [
             (1, "The Hook & Inciting Incident", 
-             f"A massive wave of volatility hit the markets today as {headline}. Institutional portfolios and retail investors were caught completely off guard as market values shifted across major exchanges.",
+             f"A massive wave of market volatility hit trading desks in {current_month_year} as {headline}. Institutional portfolios and retail investors reacted as market values shifted across major exchanges.",
              f"Cinematic 16:9 widescreen macro shot of a dark moody {exchange_tag} with glowing red and green ticker screens, 8k resolution, photorealistic."),
             
             (1, "The Immediate Stakes",
-             f"According to verified market reports: {summary[:120]}. Intraday trading volumes surged as active traders reacted to the news.",
+             f"According to verified market reports for {current_month_year}: {summary[:120]}. Intraday trading volumes surged as active traders reacted to the news.",
              f"Cinematic 16:9 widescreen closeup of {people_tag} looking at multi-monitor chart displays reflecting red market numbers, dark moody lighting, 8k resolution."),
 
             (2, "The Pre-Collapse Dominance",
@@ -95,7 +102,7 @@ class StoryDesignerAgent:
              f"Cinematic 16:9 widescreen wide angle shot of a sleek modern corporate skyscraper {location_tag} during golden hour, photorealistic 8k."),
 
             (2, "The Record Highs",
-             "For consecutive quarters, major institutional buyers drove valuations to historic peaks, creating an aura of momentum and economic expansion.",
+             "For consecutive quarters leading up to this cycle, major institutional buyers drove valuations to historic peaks, creating an aura of momentum and economic expansion.",
              f"Cinematic 16:9 widescreen financial chart animation rising dramatically against a glowing cyberpunk grid background, 8k photorealistic lighting."),
 
             (3, "The Hidden Vulnerability",
@@ -119,7 +126,7 @@ class StoryDesignerAgent:
              f"Cinematic 16:9 widescreen macro shot of high-frequency trading server racks with flashing LED lights in a cold dark data center, 8k resolution."),
 
             (5, "What This Means for Smart Money",
-             "For retail investors and wealth managers, this verified market event alters the strategic allocation playbook for the upcoming quarter.",
+             f"For retail investors and wealth managers navigating {current_year}, this verified market event alters the strategic allocation playbook for the upcoming quarter.",
              f"Cinematic 16:9 widescreen shot of {people_tag} analyzing portfolio risk metrics on a sleek tablet computer, professional office background, 8k."),
 
             (5, "Navigating Sector Rotations",
@@ -131,11 +138,11 @@ class StoryDesignerAgent:
              f"Cinematic 16:9 widescreen wide shot of a central bank headquarters building at twilight with moody dramatic sky, 8k photorealistic."),
 
             (6, "The Unsolved Market Question",
-             f"The critical question facing investors remains: Is this market shift a temporary tactical correction or the opening salvo of a prolonged structural cycle shift?",
+             f"The critical question facing investors in {current_year} remains: Is this market shift a temporary tactical correction or the opening salvo of a prolonged structural cycle shift?",
              f"Cinematic 16:9 widescreen sunset over a major financial hub city skyline {location_tag} with dark storm clouds clearing, dramatic 8k photorealistic lighting."),
 
             (6, "Actionable Takeaways",
-             "Monitoring institutional order flow, foreign capital movements, and upcoming central bank rate guidance will be paramount as new verified data releases hit the wire.",
+             f"Monitoring institutional order flow, foreign capital movements, and upcoming central bank rate guidance in {current_month_year} will be paramount as new verified data releases hit the wire.",
              f"Cinematic 16:9 widescreen close up of a financial report summary document on a sleek executive desk, warm professional lighting, 8k resolution."),
 
             (6, "Call to Action",
@@ -161,7 +168,7 @@ class StoryDesignerAgent:
             shots.append(shot)
 
         script = ScriptData(
-            title=f"The Hidden Truth Behind {headline[:50]}...",
+            title=f"The Hidden Truth Behind {headline[:35]}... ({current_month_year})",
             target_shots=len(shots),
             shots=shots,
             estimated_runtime_seconds=round(total_runtime, 1)
@@ -172,7 +179,7 @@ class StoryDesignerAgent:
         """
         Executes Story Designer workflow:
         1. Reads selected topic and verified_facts from GlobalState
-        2. Generates 6-Act dramatic script with region-appropriate visual framing
+        2. Generates 6-Act dramatic script with dynamic date context & region-appropriate visual framing
         3. Updates state.script_data
         4. Emits A2AMessage to Observer Agent
         """
@@ -193,6 +200,7 @@ class StoryDesignerAgent:
                 "total_shots": script.target_shots,
                 "estimated_runtime_minutes": round(script.estimated_runtime_seconds / 60.0, 2),
                 "fact_grounding": "ENFORCED",
+                "temporal_context": state.current_month_year,
                 "region": region,
                 "llm_mode": "LIVE_LLM" if self.llm_client.is_available() else "FALLBACK_GROUNDED_TEMPLATE"
             },

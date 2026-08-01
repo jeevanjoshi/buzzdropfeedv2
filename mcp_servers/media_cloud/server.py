@@ -1,5 +1,6 @@
 import os
 import subprocess
+import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -30,7 +31,7 @@ class ChartRequest(BaseModel):
 
 class ThumbnailRequest(BaseModel):
     headline_text: str
-    subtitle_text: str = "EXPLAINED"
+    subtitle_text: str = ""
     output_thumbnail_path: str
 
 
@@ -97,10 +98,13 @@ async def generate_flux_image(req: ImageGenRequest):
 @app.post("/tools/generate_thumbnail")
 async def generate_thumbnail(req: ThumbnailRequest):
     """
-    Generates high-CTR 16:9 YouTube Thumbnail (1280x720) with bold high-contrast text overlay.
+    Generates high-CTR 16:9 YouTube Thumbnail (1280x720) with dynamic date text overlay and high-contrast styling.
     """
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_thumbnail_path)), exist_ok=True)
+        current_month_year = datetime.datetime.now(datetime.timezone.utc).strftime("%B %Y").upper()
+        sub_text = req.subtitle_text.upper() if req.subtitle_text else f"EXPLAINED ({current_month_year})"
+
         try:
             import matplotlib.pyplot as plt
             import cv2
@@ -112,7 +116,7 @@ async def generate_thumbnail(req: ThumbnailRequest):
             # Glowing border & high-contrast yellow/white text overlay
             cv2.rectangle(img, (20, 20), (1260, 700), (0, 215, 255), 6)
             cv2.putText(img, req.headline_text[:30].upper(), (60, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 4)
-            cv2.putText(img, req.subtitle_text.upper(), (60, 440), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3)
+            cv2.putText(img, sub_text, (60, 440), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3)
 
             cv2.imwrite(req.output_thumbnail_path, img)
             return {"status": "success", "engine": "high_ctr_thumbnail", "path": req.output_thumbnail_path}
@@ -126,12 +130,15 @@ async def generate_thumbnail(req: ThumbnailRequest):
 @app.post("/tools/generate_dynamic_chart")
 async def generate_dynamic_chart(req: ChartRequest):
     """
-    Renders an animated 16:9 financial stock / market trend data chart video clip with explicit units
-    (e.g., '$ Billion', '₹ Crores', '%') and high-contrast styling.
+    Renders an animated 16:9 financial stock / market trend data chart video clip with dynamic date context,
+    explicit units (e.g., '$ Billion', '₹ Crores', '%'), and high-contrast styling.
     """
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_mp4_path)), exist_ok=True)
         chart_png = req.output_mp4_path.replace(".mp4", "_chart.png")
+
+        current_month_year = datetime.datetime.now(datetime.timezone.utc).strftime("%B %Y").upper()
+        chart_title = f"{req.title.upper()} ({current_month_year})"
 
         try:
             import matplotlib.pyplot as plt
@@ -143,7 +150,7 @@ async def generate_dynamic_chart(req: ChartRequest):
             ax.plot(req.labels, req.values, color='#00ffcc', linewidth=5, marker='o', markersize=12, markerfacecolor='#ff0055')
             
             # Title & Explicit Unit Y-Label
-            ax.set_title(req.title.upper(), fontsize=26, color='white', pad=25, fontweight='bold')
+            ax.set_title(chart_title, fontsize=24, color='white', pad=25, fontweight='bold')
             ax.set_ylabel(f"Value ({req.unit_symbol})", fontsize=20, color='#00ffcc', labelpad=15, fontweight='bold')
             ax.tick_params(axis='both', which='major', labelsize=18, colors='white')
             ax.grid(True, color='#333333', linestyle='--', linewidth=1.5)
