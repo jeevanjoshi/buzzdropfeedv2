@@ -38,6 +38,12 @@ class PlaywrightSVGRequest(BaseModel):
     output_mp4_path: str
 
 
+class GIFRequest(BaseModel):
+    query: str = "shocked reaction"
+    duration: float = 3.0
+    output_mp4_path: str
+
+
 class ThumbnailRequest(BaseModel):
     headline_text: str
     subtitle_text: str = ""
@@ -102,6 +108,50 @@ async def generate_flux_image(req: ImageGenRequest):
 
     generate_synthetic_png(req.output_image_path, title=req.prompt[:30])
     return {"status": "success", "engine": "synthetic_png_fallback", "path": req.output_image_path}
+
+
+@app.post("/tools/fetch_reaction_gif_clip")
+async def fetch_reaction_gif_clip(req: GIFRequest):
+    """
+    Queries GIPHY / Tenor APIs for comedic reaction clips (e.g. 'shocked face', 'money rain')
+    and converts them to strict 16:9 1080p MP4 clips for video insertion.
+    """
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(req.output_mp4_path)), exist_ok=True)
+        from src.engine.gif_retriever import gif_retriever
+        import requests
+
+        clips = gif_retriever.search_giphy_reaction(query=req.query)
+        if clips:
+            mp4_url = clips[0].get("mp4_url")
+            if mp4_url:
+                tmp_download = req.output_mp4_path.replace(".mp4", "_raw.mp4")
+                r = requests.get(mp4_url, timeout=5)
+                with open(tmp_download, "wb") as f:
+                    f.write(r.content)
+
+                cmd = [
+                    "ffmpeg", "-y", "-i", tmp_download,
+                    "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+                    "-t", str(req.duration), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    req.output_mp4_path
+                ]
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return {"status": "success", "engine": "giphy_clip_processed", "path": req.output_mp4_path}
+    except Exception:
+        pass
+
+    # Fallback to synthetic image clip
+    chart_png = req.output_mp4_path.replace(".mp4", "_gif_fallback.png")
+    generate_synthetic_png(chart_png, title=f"REACTION: {req.query.upper()}")
+    cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", chart_png,
+        "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+        "-t", str(req.duration), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        req.output_mp4_path
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"status": "success", "engine": "fallback_reaction_clip", "path": req.output_mp4_path}
 
 
 @app.post("/tools/render_playwright_svg_animation")
