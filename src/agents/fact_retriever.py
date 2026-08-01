@@ -6,13 +6,14 @@ from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.rss_ingestion import LiveRSSIngestionEngine
 from src.engine.topic_topsis import TopicTOPSISEngine
 from src.engine.api_ninjas import APINinjasRetriever
+from src.engine.external_apis import external_api_manager
 
 
 class FactRetrieverAgent:
     """
     Fact Retriever Agent responsible for Phase 1:
     1. Ingesting live RSS feeds from Global & Indian English news sources.
-    2. Optionally enriching facts via API Ninjas News endpoint.
+    2. Enriching facts via World Bank, Marketaux, API Ninjas, and Exa Search APIs.
     3. Evaluating candidates using 7-Criteria TOPSIS Decision Engine.
     4. Selecting #1 topic candidate and populating GlobalState.
     """
@@ -33,15 +34,30 @@ class FactRetrieverAgent:
         self, use_live_rss: bool = True, region: str = "all"
     ) -> tuple[List[TopicCandidate], List[VerifiedFact]]:
         """
-        Fetches topic candidates and verified facts from RSS feeds and optional API Ninjas endpoints.
+        Fetches topic candidates and verified facts from RSS feeds, World Bank Data API, Marketaux, and API Ninjas.
         """
         if use_live_rss:
             candidates, facts = self.rss_engine.fetch_all_feeds(region=region)
             if candidates and facts:
-                # Optionally enrich facts with API Ninjas business news
+                # 1. Enrich with World Bank Macro Economic Indicators (GDP & Inflation)
+                country_code = "IND" if region == "india" else "USA"
+                wb_data = external_api_manager.fetch_world_bank_gdp_inflation(country_code=country_code)
+                facts.append(VerifiedFact(
+                    source_id="wb-macro-01",
+                    headline=f"World Bank Official Economic Data ({country_code})",
+                    summary=f"Official World Bank indicators record GDP Growth at {wb_data['gdp_growth']} and Inflation rate at {wb_data['inflation']}.",
+                    url="https://data.worldbank.org"
+                ))
+
+                # 2. Enrich with Marketaux financial news if API token present
+                m_facts = external_api_manager.fetch_marketaux_sentiment_news()
+                facts.extend(m_facts)
+
+                # 3. Enrich with API Ninjas facts if API key present
                 if self.ninjas_retriever.is_available():
                     ninja_facts = self.ninjas_retriever.fetch_market_news()
                     facts.extend(ninja_facts)
+
                 return candidates, facts
 
         # Fallback Offline Fixture Data for deterministic testing

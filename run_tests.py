@@ -9,11 +9,13 @@ from tests.test_trend_velocity import (
 from tests.test_script_designer import (
     test_story_designer_script_generation,
     test_observer_approval,
-    test_anti_hallucination_audit_rejection
+    test_anti_hallucination_audit_rejection,
+    test_temporal_anchor_rejection
 )
 from tests.test_phase3_mcp import test_phase3_media_producer_mcp_workflow
 from tests.test_end_to_end import test_full_pipeline_end_to_end
 from tests.test_logger_tracer import test_logger_and_tracer_diagnostics
+from tests.test_external_apis import test_world_bank_gdp_inflation_api, test_alpha_vantage_fallback_quote
 from src.agents.fact_retriever import FactRetrieverAgent
 from src.agents.story_designer import StoryDesignerAgent
 from src.agents.observer import ObserverAgent
@@ -63,6 +65,15 @@ class TestCSVGPipeline(unittest.TestCase):
     def test_phase2_anti_hallucination_audit(self):
         test_anti_hallucination_audit_rejection()
         print("✓ ObserverAgent Anti-Hallucination & Fact Audit Test Passed")
+
+    def test_phase2_temporal_anchor_rejection(self):
+        test_temporal_anchor_rejection()
+        print("✓ ObserverAgent Temporal Anchor Audit Test Passed")
+
+    def test_external_api_manager(self):
+        test_world_bank_gdp_inflation_api()
+        test_alpha_vantage_fallback_quote()
+        print("✓ ExternalAPIManager World Bank & Stock Quote Test Passed")
 
     def test_phase3_mcp_media_producer(self):
         test_phase3_media_producer_mcp_workflow()
