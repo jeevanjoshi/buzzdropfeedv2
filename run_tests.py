@@ -16,6 +16,7 @@ from tests.test_phase3_mcp import test_phase3_media_producer_mcp_workflow
 from tests.test_end_to_end import test_full_pipeline_end_to_end
 from tests.test_logger_tracer import test_logger_and_tracer_diagnostics
 from tests.test_external_apis import test_world_bank_gdp_inflation_api, test_alpha_vantage_fallback_quote
+from tests.test_space_cinema_apis import test_nasa_image_library_search, test_tmdb_movie_fallback_data, test_wikipedia_on_this_day_history
 from src.agents.fact_retriever import FactRetrieverAgent
 from src.agents.story_designer import StoryDesignerAgent
 from src.agents.observer import ObserverAgent
@@ -74,6 +75,12 @@ class TestCSVGPipeline(unittest.TestCase):
         test_world_bank_gdp_inflation_api()
         test_alpha_vantage_fallback_quote()
         print("✓ ExternalAPIManager World Bank & Stock Quote Test Passed")
+
+    def test_space_cinema_history_apis(self):
+        test_nasa_image_library_search()
+        test_tmdb_movie_fallback_data()
+        test_wikipedia_on_this_day_history()
+        print("✓ SpaceCinemaHistoryAPIManager NASA, TMDB & Wikipedia History Test Passed")
 
     def test_phase3_mcp_media_producer(self):
         test_phase3_media_producer_mcp_workflow()

@@ -7,13 +7,14 @@ from src.engine.rss_ingestion import LiveRSSIngestionEngine
 from src.engine.topic_topsis import TopicTOPSISEngine
 from src.engine.api_ninjas import APINinjasRetriever
 from src.engine.external_apis import external_api_manager
+from src.engine.space_cinema_apis import space_cinema_api_manager
 
 
 class FactRetrieverAgent:
     """
     Fact Retriever Agent responsible for Phase 1:
     1. Ingesting live RSS feeds from Global & Indian English news sources.
-    2. Enriching facts via World Bank, Marketaux, API Ninjas, and Exa Search APIs.
+    2. Enriching facts via World Bank, Marketaux, API Ninjas, NASA Open APIs, TMDB Cinema, and Wikipedia Historical Archives.
     3. Evaluating candidates using 7-Criteria TOPSIS Decision Engine.
     4. Selecting #1 topic candidate and populating GlobalState.
     """
@@ -34,7 +35,7 @@ class FactRetrieverAgent:
         self, use_live_rss: bool = True, region: str = "all"
     ) -> tuple[List[TopicCandidate], List[VerifiedFact]]:
         """
-        Fetches topic candidates and verified facts from RSS feeds, World Bank Data API, Marketaux, and API Ninjas.
+        Fetches topic candidates and verified facts from RSS feeds, World Bank Data API, Marketaux, NASA, and History APIs.
         """
         if use_live_rss:
             candidates, facts = self.rss_engine.fetch_all_feeds(region=region)
@@ -46,14 +47,24 @@ class FactRetrieverAgent:
                     source_id="wb-macro-01",
                     headline=f"World Bank Official Economic Data ({country_code})",
                     summary=f"Official World Bank indicators record GDP Growth at {wb_data['gdp_growth']} and Inflation rate at {wb_data['inflation']}.",
-                    url="https://data.worldbank.org"
+                    url="https://data.worldbank.org",
+                    source_name="The World Bank"
                 ))
 
-                # 2. Enrich with Marketaux financial news if API token present
+                # 2. Enrich with Historical Date Archives (On This Day)
+                hist_facts = space_cinema_api_manager.fetch_on_this_day_history()
+                facts.extend(hist_facts)
+
+                # 3. Enrich with NASA APOD Space Telemetry Fact
+                nasa_fact = space_cinema_api_manager.fetch_nasa_apod()
+                if nasa_fact:
+                    facts.append(nasa_fact)
+
+                # 4. Enrich with Marketaux financial news if API token present
                 m_facts = external_api_manager.fetch_marketaux_sentiment_news()
                 facts.extend(m_facts)
 
-                # 3. Enrich with API Ninjas facts if API key present
+                # 5. Enrich with API Ninjas facts if API key present
                 if self.ninjas_retriever.is_available():
                     ninja_facts = self.ninjas_retriever.fetch_market_news()
                     facts.extend(ninja_facts)
@@ -95,13 +106,15 @@ class FactRetrieverAgent:
             source_id="fact-101",
             headline="Nvidia Market Cap Surge",
             summary="Nvidia market capitalization reached record highs following new architecture announcement, boosting market cap by $150B.",
-            url="https://example.com/tech/nvidia-ai-chip"
+            url="https://example.com/tech/nvidia-ai-chip",
+            source_name="TechCrunch"
         )
         f2 = VerifiedFact(
             source_id="fact-102",
             headline="Intel Process Node Delays",
             summary="Intel delayed 7nm process nodes causing key foundry customers to transition order volume to TSMC.",
-            url="https://example.com/tech/intel-tsmc-downfall"
+            url="https://example.com/tech/intel-tsmc-downfall",
+            source_name="The Wall Street Journal"
         )
 
         return [c1, c2], [f1, f2]
