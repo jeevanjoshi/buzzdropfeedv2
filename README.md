@@ -12,10 +12,10 @@ Production-grade, zero-human-intervention **Customized Storytelling Video Genera
    ├── main.py                          <-- Main Pipeline Entrypoint
    ├── src/                             <-- All Agents & Engine Modules
    │   ├── agents/                      (Orchestrator, FactRetriever, StoryDesigner, Observer, MediaProducer, Publisher)
-   │   ├── engine/                      (TOPSIS Math, EMA Velocity, Cosine RPM, RSS Ingestion, Logger, Tracer)
+   │   ├── engine/                      (TOPSIS Math, EMA Velocity, Cosine RPM, RSS Ingestion, Logger, Tracer, APINinjas)
    │   └── schemas/                     (GlobalState, A2AMessage)
    ├── mcp_servers/media_cloud/         <-- Cloud Media MCP Server (Port 8001)
-   │   └── server.py                    (Flux.1 16:9, Ken Burns, Dynamic Charts, Thumbnails, FFmpeg Timeline)
+   │   └── server.py                    (Flux.1 16:9, Ken Burns, Dynamic Charts, Playwright SVG, Thumbnails, FFmpeg Timeline)
    └── mcp_servers/youtube_cloud/       <-- YouTube Publishing MCP Server (Port 8002)
        └── server.py                    (Headless OAuth2 Upload & Quota Guard)
 
@@ -44,11 +44,56 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-What `deploy.sh` does automatically:
-1. Syncs edge audio files to Raspberry Pi 5 (`/opt/csvg_edge`) over SSH (`pi@172.198.1.30`).
-2. Installs virtual environment & dependencies on Pi 5, restarting `kokoro_tts.service`.
-3. Syncs master pipeline & cloud MCP servers to OCI Cloud (`/opt/csvg_pipeline`) via Pi 5 SSH hop (`oci-prod`).
-4. Installs dependencies on OCI and registers daily cron automation (`0 4 * * *`).
+---
+
+## 🌐 Master API Resource Directory & Evaluation Matrix
+
+Below is the curated directory of external APIs, evaluated for integration into our CSVG Topic Engine, RAG Fact Grounding, and Dynamic Chart Generator:
+
+### 1. Facts & Figures APIs
+Structural data, public datasets, economics, demographics, and trivia.
+
+*   **[Data.gov.in OGD Platform API](https://data.gov.in)**: *India-Specific / Free (HIGH PRIORITY).* Open data initiative by the Govt of India (230,000+ datasets). Excellent for Indian macroeconomic, agricultural, and infrastructure Infotainment videos.
+*   **[API Setu India](https://apisetu.gov.in)**: *India-Specific / Free.* Official Open API platform from MeitY for public data utilities.
+*   **[World Bank Data API](https://data.worldbank.org)**: *Free (HIGH PRIORITY).* Global macroeconomic indicators, GDP growth, inflation, and demographic statistics.
+*   **[API-Ninjas Facts & Business API](https://api-ninjas.com)**: *Integrated in `src/engine/api_ninjas.py`.* Business news and interesting facts data provider.
+*   **[Bureau of Labor Statistics (BLS) API](https://www.bls.gov/developers/)**: Structured US economic data, inflation, employment, and wage indicators.
+*   **[Public APIs Repository](https://github.com/public-apis/public-apis)**: Community-curated collection of free public APIs across various niches.
+
+---
+
+### 2. Research Papers APIs
+Programmatic discovery of scientific literature, citations, and open-access metadata.
+
+*   **[OpenAlex API](https://openalex.org)**: *Free CC0.* Catalog aggregating Crossref, arXiv, and PubMed. Perfect for deep-dive AI / Science documentaries.
+*   **[Semantic Scholar Academic Graph API](https://semanticscholar.org)**: AI-driven API for retrieving paper metadata and influential citations.
+*   **[arXiv API](https://arxiv.org)**: Non-commercial access to preprints in physics, AI, computer science, and mathematics.
+*   **[Springer Nature Open Access API](https://springernature.com)**: Access for open-access articles from thousands of scientific journals.
+*   **[Unpaywall API](https://unpaywall.org)**: Tracking for over 30 million open-access scholarly articles.
+*   **[CORE API](https://core.ac.uk)**: The world's largest aggregator of open-access research papers.
+
+---
+
+### 3. News APIs
+Live breaking headlines, historical articles, and text-mining global media.
+
+*   **[Marketaux API](https://marketaux.com)**: *Generous Free Tier (HIGH PRIORITY).* Dedicated stock market & global financial news API with integrated AI ticker sentiment analysis.
+*   **[NewsAPI.org (India Endpoint)](https://newsapi.org)**: *HIGH PRIORITY.* Dedicated `country=in` parameter to isolate real-time breaking headlines across India.
+*   **[World News API (India Track)](https://worldnewsapi.com)**: Monitors 300+ primary regional and national Indian media sources.
+*   **[Firecrawl News Search](https://firecrawl.dev)**: Converts live web search results into clean Markdown for LLMs.
+*   **[NewsAPI.ai (Event Registry)](https://newsapi.ai)**: Multilingual indexer tracking 150,000+ global publishers.
+*   **[Currents News API](https://currentsapi.services)**: Free tier offering regional and category-filtered news feeds.
+
+---
+
+### 4. Trends & Financial APIs
+Market momentum, search interest, real-time public curiosity, and stock metrics.
+
+*   **[Alpha Vantage API](https://www.alphavantage.co/)**: *Generous Free Tier (HIGH PRIORITY).* Global stock quotes, forex, crypto, and 50+ technical indicators. Directly powers `/tools/generate_dynamic_chart`.
+*   **[Indian Stock Market API](https://indianapi.in)**: *India-Specific (HIGH PRIORITY).* Granular NSE/BSE stock quotes, market trends, and technical metrics for listed Indian corporations.
+*   **[Database on Indian Economy (DBIE - RBI)](https://rbi.org.in)**: *India-Specific / Free.* Reserve Bank of India macroeconomic trends across public finance and financial markets.
+*   **[Exa Search API](https://exa.ai)**: *Built for AI Agents ($10/mo free credit).* Semantic web search and real-time trend discovery.
+*   **[Google Trends API / SerpAPI](https://serpapi.com)**: scaled search interest data and "Interest Over Time" tables.
 
 ---
 
@@ -61,11 +106,9 @@ What `deploy.sh` does automatically:
 
 ---
 
-## 📥 Installation & Manual Setup Guide
+## 📥 Installation & Setup Guide
 
 ### 1. System Dependencies (Linux / Ubuntu / Raspberry Pi OS)
-Install FFmpeg, Python 3.9+, git, and build tools:
-
 ```bash
 sudo apt update && sudo apt upgrade -y
 sudo apt install python3-pip python3-venv ffmpeg git curl -y
@@ -94,41 +137,21 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Environment Configuration (`.env`)
-Create a `.env` file in the project root on OCI:
-
-```ini
-# Local LLM Endpoint (Ollama on OCI or Raspberry Pi 5)
-OLLAMA_URL=http://localhost:11434
-
-# Cloud Fallback API Keys (Optional)
-OPENROUTER_API_KEY=your_openrouter_key_here
-FAL_KEY=your_fal_ai_key_here
-
-# YouTube OAuth & Hardware Endpoints
-YOUTUBE_CLIENT_SECRET=client_secret.json
-YOUTUBE_TOKEN_FILE=token.json
-PI5_IP=172.198.1.30
-```
-
 ---
 
-## 🏃 Running the Autonomous Pipeline
+## 🚀 Running the Autonomous Pipeline
 
-### Run Full End-to-End Autonomous Pipeline (Live RSS Feeds):
 ```bash
+# Run End-to-End Autonomous Pipeline (Live RSS & RAG Feeds)
 python3 main.py
-```
 
-### Run Pipeline for Specific Target Regions:
-```bash
-# Target Indian English Business & Tech News Feeds (ET, Livemint, Moneycontrol, YourStory, Inc42)
+# Target Indian English Business & Tech News Feeds
 python3 main.py --india
 
-# Target Global Finance & Tech Feeds (CNBC, TechCrunch, NYT)
+# Target Global Finance & Tech Feeds
 python3 main.py --global
 
-# Offline Dry-Run Mode (Testing without live API calls)
+# Offline Dry-Run Mode
 python3 main.py --offline
 ```
 
@@ -139,55 +162,11 @@ python3 run_tests.py
 
 ---
 
-## ⚙️ Systemd Persistent Services & Cron Automation
-
-### 1. Raspberry Pi 5 Edge Audio MCP Service (`/etc/systemd/system/kokoro_tts.service`)
-```ini
-[Unit]
-Description=Raspberry Pi 5 Edge Audio & Local Model Service
-After=network.target
-
-[Service]
-User=pi
-WorkingDirectory=/opt/csvg_edge
-ExecStart=/opt/csvg_edge/venv/bin/python3 /opt/csvg_edge/mcp_servers/audio_edge/server.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service on Pi 5:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable kokoro_tts.service
-sudo systemctl start kokoro_tts.service
-```
-
-### 2. OCI Cron Job Automation
-Schedule the pipeline on OCI to run daily at 04:00 AM server time (ahead of peak Tier-1 viewing hours):
-
-```bash
-crontab -e
-# Add the following job:
-0 4 * * * /opt/csvg_pipeline/venv/bin/python3 /opt/csvg_pipeline/main.py >> /var/log/csvg.log 2>&1
-```
-
----
-
 ## 📊 TOPSIS 7-Criteria Topic Selection Math
 
 Given candidate stories $i \in \mathcal{S}$, TOPSIS calculates relative closeness score $C_i^* \in [0, 1.0]$:
 
 $$V_i = w_1 \text{TVS}_i + w_2 \text{RPM}_i + w_3 \text{IDI}_i + w_4 \text{SDI}_i + w_5 \text{SHM}_i + w_6 \text{VPH}_i - w_7 \text{SAT}_i$$
-
-- **TVS**: 7-Day Exponential Moving Average search query acceleration.
-- **RPM**: Cosine similarity against High-RPM Finance/Tech advertiser taxonomy.
-- **IDI**: Semantic novelty distance vs previously published channel history.
-- **SDI**: Sentiment variance & conflict index for comment velocity.
-- **SHM**: X/Twitter & Reddit post momentum multiplier.
-- **VPH**: YouTube competitor Views-Per-Hour recommendation wave.
-- **SAT**: Competition saturation penalty.
 
 ---
 
