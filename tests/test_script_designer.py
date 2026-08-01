@@ -111,3 +111,29 @@ def test_anti_hallucination_audit_rejection():
 
     assert is_approved is False
     assert any("unverified numerical claim" in v.lower() for v in violations)
+
+
+def test_temporal_anchor_rejection():
+    facts = [
+        VerifiedFact(
+            source_id="f4",
+            headline="2026 Market Dynamics",
+            summary="Verified market data recorded in 2026.",
+            url="https://example.com/f4"
+        )
+    ]
+
+    # Script referencing outdated 2024 temporal anchor as present event
+    outdated_shot = ShotData(
+        shot_id=1, act_index=1,
+        narration_text="In this breaking report for 2024, markets fell sharply.",
+        visual_prompt="Cinematic 16:9 widescreen dark lighting, 8k resolution.",
+        duration_estimate=45.0
+    )
+    outdated_script = ScriptData(title="Outdated Script", target_shots=12, shots=[outdated_shot]*12, estimated_runtime_seconds=650.0)
+
+    observer = ObserverAgent()
+    is_approved, violations = observer.evaluate_script(outdated_script, facts)
+
+    assert is_approved is False
+    assert any("temporal audit" in v.lower() for v in violations)

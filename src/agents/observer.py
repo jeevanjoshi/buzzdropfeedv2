@@ -20,8 +20,8 @@ class ObserverAgent:
         self, script: ScriptData, verified_facts: List[VerifiedFact]
     ) -> List[str]:
         """
-        Audits narration text to ensure financial figures, percentages, and entities are grounded in verified_facts.
-        Returns list of hallucination / fact violations if unverified figures are introduced.
+        Audits narration text to ensure financial figures, percentages, dates, and entities are grounded in verified_facts.
+        Returns list of hallucination / temporal violations if unverified figures or outdated temporal anchors are introduced.
         """
         violations = []
         if not verified_facts:
@@ -31,18 +31,27 @@ class ObserverAgent:
         ground_truth_corpus = " ".join([f"{f.headline} {f.summary}" for f in verified_facts]).lower()
         gt_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', ground_truth_corpus))
 
+        current_year = "2026"
+
         for shot in script.shots:
             narration_lower = shot.narration_text.lower()
             shot_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', narration_lower))
 
-            # Check if narration invents specific numbers not supported by ground truth
+            # 1. Numerical Grounding Check
             for num in shot_numbers:
                 if num not in gt_numbers:
                     cleaned_num = re.sub(r'[^\d.]', '', num)
-                    if cleaned_num and float(cleaned_num) > 10 and cleaned_num not in ["2026", "2025", "100"]:
+                    if cleaned_num and float(cleaned_num) > 10 and cleaned_num not in [current_year, "100"]:
                         violations.append(
                             f"Shot #{shot.shot_id} Fact Audit: Unverified numerical claim '{num}' detected in narration. Not supported by source facts."
                         )
+
+            # 2. Temporal Anchor Check (Preventing outdated 2024/2025 facts presented as current 2026 events)
+            if "2024" in narration_lower or "2025" in narration_lower:
+                if "2024" not in ground_truth_corpus and "2025" not in ground_truth_corpus:
+                    violations.append(
+                        f"Shot #{shot.shot_id} Temporal Audit: Outdated temporal anchor detected in narration. Ground truth specifies current 2026 facts."
+                    )
 
         return violations
 
@@ -128,7 +137,7 @@ class ObserverAgent:
                     "status": "REJECTED",
                     "violations": violations,
                     "violation_count": len(violations),
-                    "fact_audit": "FAILED" if any("Fact Audit" in v for v in violations) else "PASSED"
+                    "fact_audit": "FAILED" if any("Fact Audit" in v or "Temporal Audit" in v for v in violations) else "PASSED"
                 },
                 timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
             )
