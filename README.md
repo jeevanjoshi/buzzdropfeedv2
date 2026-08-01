@@ -21,7 +21,7 @@ Production-grade, zero-human-intervention **Customized Storytelling Video Genera
 
                                │
                        HTTP / SSE REST Bridge
-                    (http://<PI5_IP>:8000/tools/...)
+                    (http://172.198.1.30:8000/tools/...)
                                │
                                v
 
@@ -35,6 +35,23 @@ Production-grade, zero-human-intervention **Customized Storytelling Video Genera
 
 ---
 
+## 🚀 One-Command Multi-Node Remote Deployment (`deploy.sh`)
+
+Deploy all code, dependencies, systemd services, and cron jobs to both **Raspberry Pi 5 (`172.198.1.30`)** and **OCI Cloud (`oci-prod`)** with a single command:
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+What `deploy.sh` does automatically:
+1. Syncs edge audio files to Raspberry Pi 5 (`/opt/csvg_edge`) over SSH (`pi@172.198.1.30`).
+2. Installs virtual environment & dependencies on Pi 5, restarting `kokoro_tts.service`.
+3. Syncs master pipeline & cloud MCP servers to OCI Cloud (`/opt/csvg_pipeline`) via Pi 5 SSH hop (`oci-prod`).
+4. Installs dependencies on OCI and registers daily cron automation (`0 4 * * *`).
+
+---
+
 ## 💻 Hardware Sizing & Local LLM Compatibility
 
 | Host Node | Hardware Profile | Local Models Supported | Zero-API Cost Setup |
@@ -44,7 +61,7 @@ Production-grade, zero-human-intervention **Customized Storytelling Video Genera
 
 ---
 
-## 📥 Installation & Setup Guide
+## 📥 Installation & Manual Setup Guide
 
 ### 1. System Dependencies (Linux / Ubuntu / Raspberry Pi OS)
 Install FFmpeg, Python 3.9+, git, and build tools:
@@ -70,7 +87,7 @@ ollama pull llama3.2:3b
 
 ### 3. Repository Installation & Python Virtual Environment
 ```bash
-git clone https://github.com/organization/buzzdropfeedv2.git
+git clone https://github.com/jeevanjoshi/buzzdropfeedv2.git
 cd buzzdropfeedv2
 python3 -m venv venv
 source venv/bin/activate
@@ -91,12 +108,12 @@ FAL_KEY=your_fal_ai_key_here
 # YouTube OAuth & Hardware Endpoints
 YOUTUBE_CLIENT_SECRET=client_secret.json
 YOUTUBE_TOKEN_FILE=token.json
-PI5_IP=192.168.1.150
+PI5_IP=172.198.1.30
 ```
 
 ---
 
-## 🚀 Running the Autonomous Pipeline
+## 🏃 Running the Autonomous Pipeline
 
 ### Run Full End-to-End Autonomous Pipeline (Live RSS Feeds):
 ```bash
