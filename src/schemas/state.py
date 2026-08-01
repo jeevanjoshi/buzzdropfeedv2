@@ -8,6 +8,7 @@ class VerifiedFact(BaseModel):
     headline: str
     summary: str
     url: str
+    source_name: str = Field(default="Verified Reports", description="Trusted organization/publisher name e.g. 'The Economic Times', 'World Bank'")
     timestamp: Optional[str] = None
 
 

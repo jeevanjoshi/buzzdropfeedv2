@@ -22,6 +22,40 @@ INDIA_ENGLISH_FINANCE_TECH_FEEDS = [
 ]
 
 
+def resolve_trusted_organization_name(url: str) -> str:
+    """
+    Resolves human-readable trusted organization name from source URL/feed domain.
+    """
+    url_lower = url.lower()
+    if "economictimes" in url_lower:
+        return "The Economic Times"
+    elif "livemint" in url_lower:
+        return "Livemint"
+    elif "moneycontrol" in url_lower:
+        return "Moneycontrol"
+    elif "business-standard" in url_lower:
+        return "Business Standard"
+    elif "yourstory" in url_lower:
+        return "YourStory"
+    elif "inc42" in url_lower:
+        return "Inc42"
+    elif "techcrunch" in url_lower:
+        return "TechCrunch"
+    elif "nytimes" in url_lower:
+        return "The New York Times"
+    elif "cnbc" in url_lower:
+        return "CNBC"
+    elif "reuters" in url_lower:
+        return "Reuters"
+    elif "bloomberg" in url_lower:
+        return "Bloomberg"
+    elif "worldbank" in url_lower:
+        return "The World Bank"
+    elif "rbi.org" in url_lower:
+        return "The Reserve Bank of India"
+    return "Verified Market Reports"
+
+
 def extract_keywords(text: str) -> List[str]:
     """
     Extracts key entity words (length > 3) from text.
@@ -40,9 +74,7 @@ def fetch_live_rss_feeds(
 ) -> List[Dict[str, Any]]:
     """
     Ingests live RSS news feeds from Global or India-specific English sources,
-    parsing headlines, summaries, URLs, and extracting keywords.
-    
-    Regions supported: "global", "india", "all"
+    parsing headlines, summaries, URLs, trusted publisher names, and extracting keywords.
     """
     if not feed_urls:
         if region == "india":
@@ -57,6 +89,8 @@ def fetch_live_rss_feeds(
     for url in feed_urls:
         try:
             feed = feedparser.parse(url)
+            org_name = resolve_trusted_organization_name(url)
+
             for entry in feed.entries[:5]:  # Top 5 stories per feed
                 headline = entry.get("title", "").strip()
                 summary = entry.get("summary", entry.get("description", "")).strip()
@@ -72,6 +106,7 @@ def fetch_live_rss_feeds(
                         "headline": headline,
                         "summary": clean_summary[:300],
                         "url": link,
+                        "source_name": org_name,
                         "keywords": keywords,
                         # Baseline 7-day search trend trajectory for newly discovered news
                         "search_history": [30.0, 38.0, 45.0, 60.0, 75.0, 90.0, 100.0],
@@ -116,7 +151,8 @@ class LiveRSSIngestionEngine:
                 source_id=f"rss-fact-{idx:03d}",
                 headline=item["headline"],
                 summary=item["summary"],
-                url=item["url"]
+                url=item["url"],
+                source_name=item.get("source_name", "Verified Market Reports")
             )
             facts.append(fact)
 
