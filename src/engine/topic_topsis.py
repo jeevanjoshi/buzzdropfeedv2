@@ -77,3 +77,14 @@ def rank_topics_topsis(
 
     ranked_candidates = sorted(candidates, key=lambda x: x.topsis_score or 0.0, reverse=True)
     return ranked_candidates
+
+
+class TopicTOPSISEngine:
+    """
+    Class wrapper around rank_topics_topsis.
+    """
+
+    def rank_candidates(
+        self, candidates: List[TopicCandidate], weights: List[float] = [0.25, 0.20, 0.15, 0.15, 0.10, 0.10, 0.05]
+    ) -> List[TopicCandidate]:
+        return rank_topics_topsis(candidates, weights=weights)

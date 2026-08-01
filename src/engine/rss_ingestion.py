@@ -1,6 +1,8 @@
 import feedparser
 import re
-from typing import List, Dict, Any
+import uuid
+from typing import List, Dict, Any, Tuple
+from src.schemas.state import TopicCandidate, VerifiedFact
 
 
 GLOBAL_FINANCE_TECH_FEEDS = [
@@ -80,3 +82,42 @@ def fetch_live_rss_feeds(
             continue
 
     return parsed_items
+
+
+class LiveRSSIngestionEngine:
+    """
+    Class wrapper around RSS feed parsing returning (List[TopicCandidate], List[VerifiedFact]).
+    """
+
+    def fetch_all_feeds(self, region: str = "all") -> Tuple[List[TopicCandidate], List[VerifiedFact]]:
+        raw_items = fetch_live_rss_feeds(region=region)
+        candidates = []
+        facts = []
+
+        for idx, item in enumerate(raw_items, start=1):
+            cand_id = f"rss-cand-{idx:03d}"
+            cand = TopicCandidate(
+                candidate_id=cand_id,
+                headline=item["headline"],
+                summary=item["summary"],
+                source_url=item["url"],
+                keywords=item["keywords"],
+                tvs_score=85.0,
+                rpm_score=0.90,
+                idi_score=0.92,
+                sdi_score=1.2,
+                shm_score=1.5,
+                vph_score=2.0,
+                sat_score=0.8
+            )
+            candidates.append(cand)
+
+            fact = VerifiedFact(
+                source_id=f"rss-fact-{idx:03d}",
+                headline=item["headline"],
+                summary=item["summary"],
+                url=item["url"]
+            )
+            facts.append(fact)
+
+        return candidates, facts
