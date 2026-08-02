@@ -3,6 +3,12 @@ import asyncio
 from src.agents.orchestrator import OrchestratorAgent
 
 
+from dotenv import load_dotenv
+
+# Load configuration variables from .env file
+load_dotenv()
+
+
 def main():
     use_live_rss = True
     region = "all"

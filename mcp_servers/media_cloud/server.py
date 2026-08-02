@@ -1,6 +1,7 @@
 import os
 import subprocess
 import datetime
+from typing import Optional, List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -16,6 +17,7 @@ class ImageGenRequest(BaseModel):
 
 class KenBurnsRequest(BaseModel):
     image_path: str
+    audio_path: Optional[str] = None
     duration: float
     output_mp4_path: str
 
@@ -59,33 +61,33 @@ class TimelineAssemblyRequest(BaseModel):
 
 def generate_synthetic_png(output_path: str, title: str = "16:9 CSVG MEDIA"):
     """
-    Generates a 16:9 synthetic 1920x1080 PNG image for offline / fallback visual testing.
+    Generates a broadcast-grade 16:9 synthetic 1920x1080 PNG image using PIL.
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     try:
-        import numpy as np
-        import cv2
-        img = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        img[:] = (20, 15, 10)  # Dark moody background
-        cv2.line(img, (0, 540), (1920, 540), (80, 40, 20), 2)
-        cv2.putText(img, title[:40].upper(), (200, 540), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
-        cv2.imwrite(output_path, img)
-    except Exception:
-        with open(output_path, "wb") as f:
-            f.write(b"SYNTHETIC_IMAGE_PLACEHOLDER")
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (1920, 1080), color=(15, 20, 30))
+        draw = ImageDraw.Draw(img)
+        # Draw elegant cyan border line
+        draw.rectangle([40, 40, 1880, 1040], outline=(0, 255, 204), width=6)
+        draw.line([(40, 540), (1880, 540)], fill=(0, 150, 200), width=3)
+        draw.text((100, 480), title[:60].upper(), fill=(255, 255, 255))
+        img.save(output_path, "PNG")
+    except Exception as e:
+        print(f"PIL Image Gen Error: {e}")
 
 
 @app.post("/tools/generate_flux_image")
 async def generate_flux_image(req: ImageGenRequest):
     """
-    Generates 16:9 widescreen image via Fal.ai Flux.1-schnell model API.
-    Enforces strict 16:9 aspect ratio and photorealistic lighting.
+    Generates 16:9 widescreen image via Fal.ai Flux.1-schnell model API,
+    with automatic fallback to Replicate Flux API if Fal.ai balance is exhausted.
     """
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(req.output_image_path)), exist_ok=True)
-        fal_key = os.getenv("FAL_KEY")
+    os.makedirs(os.path.dirname(os.path.abspath(req.output_image_path)), exist_ok=True)
+    fal_key = os.getenv("FAL_KEY")
 
-        if fal_key:
+    if fal_key and not fal_key.startswith("YOUR_"):
+        try:
             import fal_client
             import requests
             handler = fal_client.submit(
@@ -103,8 +105,45 @@ async def generate_flux_image(req: ImageGenRequest):
             with open(req.output_image_path, "wb") as f:
                 f.write(img_data)
             return {"status": "success", "engine": "fal_flux_schnell", "path": req.output_image_path}
-    except Exception:
-        pass
+        except Exception as e:
+            print(f"Fal.ai Image Gen Exception (switching to Replicate): {e}")
+
+    # Fallback to Replicate API using REPLICATE_API_TOKEN
+    replicate_token = os.getenv("REPLICATE_API_TOKEN")
+    if replicate_token and not replicate_token.startswith("YOUR_"):
+        try:
+            import requests
+            import time
+            headers = {
+                "Authorization": f"Bearer {replicate_token}",
+                "Content-Type": "application/json"
+            }
+            body = {
+                "input": {
+                    "prompt": req.prompt,
+                    "aspect_ratio": "16:9",
+                    "output_format": "png"
+                }
+            }
+            r = requests.post(
+                "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
+                headers=headers,
+                json=body
+            )
+            if r.status_code in [200, 201]:
+                pred = r.json()
+                get_url = pred["urls"]["get"]
+                for _ in range(30):
+                    time.sleep(2)
+                    res = requests.get(get_url, headers=headers).json()
+                    if res.get("status") == "succeeded":
+                        img_url = res["output"][0]
+                        img_bytes = requests.get(img_url).content
+                        with open(req.output_image_path, "wb") as f:
+                            f.write(img_bytes)
+                        return {"status": "success", "engine": "replicate_flux_schnell", "path": req.output_image_path}
+        except Exception as e:
+            print(f"Replicate Image Gen Exception: {e}")
 
     generate_synthetic_png(req.output_image_path, title=req.prompt[:30])
     return {"status": "success", "engine": "synthetic_png_fallback", "path": req.output_image_path}
@@ -329,29 +368,46 @@ async def generate_dynamic_chart(req: ChartRequest):
 @app.post("/tools/apply_ken_burns_motion")
 async def apply_ken_burns_motion(req: KenBurnsRequest):
     """
-    Applies Ken Burns pan & zoom motion transform over duration to produce strict 16:9 1920x1080 MP4.
+    Applies Ken Burns pan & zoom motion transform over duration to produce strict 16:9 1920x1080 MP4,
+    incorporating the shot's speech narration audio track.
     """
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_mp4_path)), exist_ok=True)
-        
+        dur = max(req.duration, 2.0)
+        nb_frames = int(dur * 25)
+
         cmd = [
             "ffmpeg", "-y",
             "-loop", "1",
-            "-i", req.image_path,
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=125:s=1920x1080",
-            "-t", str(req.duration),
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            req.output_mp4_path
+            "-i", req.image_path
         ]
-        
-        try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        has_audio = False
+        if req.audio_path and os.path.exists(req.audio_path) and os.path.getsize(req.audio_path) > 100:
+            cmd.extend(["-i", req.audio_path])
+            has_audio = True
+
+        cmd.extend([
+            "-vf", f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={nb_frames}:s=1920x1080,fps=25",
+            "-t", str(dur),
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-pix_fmt", "yuv420p"
+        ])
+
+        if has_audio:
+            cmd.extend(["-c:a", "aac", "-b:a", "192k", "-shortest"])
+        else:
+            cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-c:a", "aac", "-shortest"])
+
+        cmd.append(req.output_mp4_path)
+
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
             return {"status": "success", "engine": "ffmpeg_ken_burns", "path": req.output_mp4_path}
-        except Exception:
-            with open(req.output_mp4_path, "w") as f:
-                f.write("DUMMY_MP4_CONTENT")
-            return {"status": "success", "engine": "fallback_file", "path": req.output_mp4_path}
+        else:
+            print(f"FFmpeg Ken Burns Error: {res.stderr}")
+            raise Exception(f"FFmpeg error: {res.stderr[:200]}")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -361,27 +417,33 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
 async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
     """
     Executes FFmpeg timeline assembly: concatenates shot MP4s, burns .ass subtitles,
-    enforces strict 16:9 1920x1080 video resolution, and applies BGM dynamic sidechain audio ducking (-16 dB).
+    enforces strict 16:9 1920x1080 video resolution.
     """
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_video_path)), exist_ok=True)
 
+        has_subtitles = req.subtitle_path and os.path.exists(req.subtitle_path) and os.path.getsize(req.subtitle_path) > 50
+
+        vf_filter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
+        if has_subtitles:
+            sub_path_escaped = req.subtitle_path.replace(":", "\\:").replace("'", "'\\''")
+            vf_filter += f",ass='{sub_path_escaped}'"
+
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
-            "-vf", f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,ass={req.subtitle_path}",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-vf", vf_filter,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             "-c:a", "aac", "-b:a", "192k",
             req.output_video_path
         ]
 
-        try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
             return {"status": "success", "path": req.output_video_path}
-        except Exception:
-            with open(req.output_video_path, "w") as f:
-                f.write("DUMMY_FINAL_VIDEO_CONTENT")
-            return {"status": "success", "engine": "fallback_file", "path": req.output_video_path}
+        else:
+            print(f"FFmpeg Concat Error: {res.stderr}")
+            raise Exception(f"FFmpeg concat error: {res.stderr[:200]}")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

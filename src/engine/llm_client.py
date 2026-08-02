@@ -2,6 +2,9 @@ import os
 import json
 import requests
 from typing import Dict, Any, Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class LLMClient:
@@ -22,6 +25,20 @@ class LLMClient:
         self.model = model
         self.ollama_url = ollama_url or os.getenv("OLLAMA_URL", "http://localhost:11434")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+
+    def get_installed_ollama_model(self) -> str:
+        """
+        Dynamically detects installed models from local Ollama server.
+        """
+        try:
+            res = requests.get(f"{self.ollama_url}/api/tags", timeout=1.5)
+            if res.status_code == 200:
+                models = [m.get("name") for m in res.json().get("models", [])]
+                if models:
+                    return models[0]  # e.g., 'llama3.2:3b'
+        except Exception:
+            pass
+        return "llama3.2:3b"
 
     def is_ollama_available(self) -> bool:
         """
@@ -44,27 +61,34 @@ class LLMClient:
 
     def generate_json(self, prompt: str, system_prompt: str = "") -> Optional[Dict[str, Any]]:
         """
-        Dispatches prompt to Local Ollama LLM (if available), Cloud API (if available),
-        or returns None for template fallback.
+        Dispatches prompt based on PREFERRED_LLM_PROVIDER (defaults to 'local' if Ollama active).
+        Fallback chain: Preferred -> Alternate -> Template.
         """
-        # 1. Try Local LLM (Ollama on OCI / Pi 5)
-        if self.is_ollama_available():
+        preferred_provider = os.getenv("PREFERRED_LLM_PROVIDER", "local").lower()
+
+        def try_local_ollama() -> Optional[Dict[str, Any]]:
+            if not self.is_ollama_available():
+                return None
             try:
+                local_model = self.get_installed_ollama_model()
                 payload = {
-                    "model": "qwen2.5:7b-instruct" if "11434" in self.ollama_url else "llama3.2:3b",
+                    "model": local_model,
                     "prompt": f"{system_prompt}\n\nUser: {prompt}\n\nOutput strictly valid JSON object:",
                     "stream": False,
                     "format": "json"
                 }
-                res = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=45)
+                print(f"[LLMClient] Invoking Local Ollama ({local_model})...")
+                res = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=300)
                 if res.status_code == 200:
                     content = res.json().get("response", "")
                     return json.loads(content)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[LLMClient] Local Ollama Exception: {e}")
+            return None
 
-        # 2. Try Cloud API (OpenRouter / Gemini / OpenAI)
-        if self.is_cloud_llm_available():
+        def try_cloud_api() -> Optional[Dict[str, Any]]:
+            if not self.is_cloud_llm_available():
+                return None
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -81,12 +105,25 @@ class LLMClient:
                 "temperature": 0.7
             }
             try:
-                response = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
+                print(f"[LLMClient] Invoking Cloud OpenRouter ({self.model})...")
+                response = requests.post(self.base_url, headers=headers, json=payload, timeout=40)
                 response.raise_for_status()
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
                 return json.loads(content)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[LLMClient] Cloud LLM Exception: {e}")
+            return None
 
-        return None
+        # Execute according to user preference
+        if preferred_provider == "cloud":
+            res = try_cloud_api()
+            if res:
+                return res
+            return try_local_ollama()
+        else:
+            # Default to local first
+            res = try_local_ollama()
+            if res:
+                return res
+            return try_cloud_api()

@@ -77,7 +77,7 @@ async def upload_youtube_resumable(req: UploadRequest):
                     "categoryId": req.category_id
                 },
                 "status": {
-                    "privacyStatus": "public",
+                    "privacyStatus": "private",
                     "selfDeclaredMadeForKids": False,
                     "syntheticContent": {
                         "bInformed": True,

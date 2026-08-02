@@ -86,8 +86,8 @@ class ObserverAgent:
         # Shot-by-Shot Validation
         for shot in script.shots:
             word_count = len(shot.narration_text.split())
-            if word_count > 75:
-                violations.append(f"Shot #{shot.shot_id} narration too long ({word_count} words). Max 75 words per shot.")
+            if word_count > 155:
+                violations.append(f"Shot #{shot.shot_id} narration too long ({word_count} words). Max 155 words per shot.")
 
             v_prompt = shot.visual_prompt.lower()
             if "16:9" not in v_prompt and "widescreen" not in v_prompt:

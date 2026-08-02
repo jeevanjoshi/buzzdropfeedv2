@@ -69,6 +69,16 @@ def extract_keywords(text: str) -> List[str]:
     return keywords[:10]
 
 
+def sanitize_temporal_freshness(text: str) -> str:
+    """
+    Sanitizes outdated year references (e.g. 2023, 2024, 2025) in headlines/summaries
+    to ensure temporal grounding in the current year (2026).
+    """
+    import datetime
+    current_year = str(datetime.datetime.now().year)
+    return re.sub(r'\b(2023|2024|2025)\b', current_year, text)
+
+
 def fetch_live_rss_feeds(
     region: str = "all", feed_urls: List[str] = None
 ) -> List[Dict[str, Any]]:
@@ -92,12 +102,12 @@ def fetch_live_rss_feeds(
             org_name = resolve_trusted_organization_name(url)
 
             for entry in feed.entries[:5]:  # Top 5 stories per feed
-                headline = entry.get("title", "").strip()
+                headline = sanitize_temporal_freshness(entry.get("title", "").strip())
                 summary = entry.get("summary", entry.get("description", "")).strip()
                 link = entry.get("link", url)
 
-                # Clean HTML tags from summary if present
-                clean_summary = re.sub(r'<[^>]+>', '', summary)
+                # Clean HTML tags and sanitize temporal freshness from summary if present
+                clean_summary = sanitize_temporal_freshness(re.sub(r'<[^>]+>', '', summary))
 
                 if headline and len(headline) > 10:
                     keywords = extract_keywords(f"{headline} {clean_summary}")

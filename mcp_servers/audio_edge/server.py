@@ -3,6 +3,7 @@ import re
 import wave
 import struct
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 
@@ -32,6 +33,19 @@ def sanitize_tts_text(text: str) -> str:
     cleaned = re.sub(r'\b(forward slash|slash|break time|ms)\b', '', cleaned, flags=re.IGNORECASE)
     # Remove markdown asterisks, brackets, hashes
     cleaned = re.sub(r'[\*\_\[\]\#\/]', ' ', cleaned)
+    # Expand common technical acronyms for natural fluid speech
+    acronym_map = {
+        r'\bAOV\b': 'average order value',
+        r'\bAIO\b': 'AI optimization',
+        r'\bSEO\b': 'search engine optimization',
+        r'\bAPI\b': 'A P I',
+        r'\bGPU\b': 'G P U',
+        r'\bCPU\b': 'C P U',
+        r'\bTTS\b': 'text to speech',
+        r'\bLLM\b': 'large language model'
+    }
+    for pat, repl in acronym_map.items():
+        cleaned = re.sub(pat, repl, cleaned, flags=re.IGNORECASE)
     # Collapse multiple whitespace
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
@@ -65,11 +79,10 @@ async def synthesize_tts(req: TTSRequest):
         # 1. Clean and sanitize text to prevent TTS reading raw SSML / slash artifacts
         clean_text = sanitize_tts_text(req.text)
 
-        # 2. Select voice based on region
+        # 2. Select voice based on region / sanitize blend string
         selected_voice = req.voice
-        if req.region == "india":
-            # Neutral clear intonation voice blend for Indian/Global English
-            selected_voice = "af_sarah(2)+am_adam(1)"
+        if "(" in selected_voice or "+" in selected_voice or selected_voice == "af_bella(2)+af_heart(1)":
+            selected_voice = "af_sarah" if req.region == "india" else "af_bella"
 
         try:
             from kokoro_onnx import Kokoro
@@ -80,8 +93,8 @@ async def synthesize_tts(req: TTSRequest):
                 samples, sample_rate = kokoro.create(clean_text, voice=selected_voice, speed=1.0, lang="en-us")
                 sf.write(req.output_path, samples, sample_rate)
                 return {"status": "success", "engine": "kokoro_onnx", "path": req.output_path, "voice": selected_voice}
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Kokoro TTS Exception: {e}")
 
         words_count = len(clean_text.split())
         est_duration = max(3.0, round(words_count / 2.2, 1))
@@ -115,15 +128,48 @@ Style: Default,Montserrat,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,16:9 HIGH-STAKES STORYTELLING DEMO\\N
 """
+        dialogues = []
+        try:
+            from faster_whisper import WhisperModel
+
+            model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            segments, _ = model.transcribe(req.audio_path, word_timestamps=True)
+            
+            for segment in segments:
+                words = [w for w in segment.words if w.word.strip()]
+                chunk_size = 5
+                for i in range(0, len(words), chunk_size):
+                    chunk = words[i:i + chunk_size]
+                    start_sec = chunk[0].start
+                    end_sec = chunk[-1].end
+                    if end_sec - start_sec < 1.2:
+                        end_sec = start_sec + 1.2
+                    start_str = f"{int(start_sec//3600)}:{int((start_sec%3600)//60):02d}:{start_sec%60:05.2f}"
+                    end_str = f"{int(end_sec//3600)}:{int((end_sec%3600)//60):02d}:{end_sec%60:05.2f}"
+                    phrase_clean = " ".join(w.word.strip() for w in chunk).upper()
+                    if phrase_clean:
+                        dialogues.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{phrase_clean}")
+        except Exception as e:
+            print(f"Faster Whisper alignment exception: {e}")
+
+        if not dialogues:
+            dialogues.append("Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,NARRATION")
+
         with open(req.output_ass_path, "w", encoding="utf-8") as f:
-            f.write(ass_header)
+            f.write(ass_header + "\n".join(dialogues) + "\n")
 
         return {"status": "success", "path": req.output_ass_path}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/files")
+async def get_file(path: str):
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+[Unit]
+Description=CSVG Audio Edge Server (Kokoro TTS & Whisper Subtitle Alignment)
+After=network.target
+
+[Service]
+Type=simple
+User=jeevanjoshi
+WorkingDirectory=/home/jeevanjoshi/buzzdropfeedv2
+ExecStart=/home/jeevanjoshi/buzzdropfeedv2/venv/bin/uvicorn mcp_servers.audio_edge.server:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
