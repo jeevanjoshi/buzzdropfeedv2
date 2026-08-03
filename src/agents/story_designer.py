@@ -3,7 +3,7 @@ import uuid
 import datetime
 import re
 from typing import List, Dict, Any, Optional
-from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact
+from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact, SEOMetadata
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.llm_client import LLMClient
 from src.engine.rag_retriever import rag_retriever
@@ -356,19 +356,55 @@ class StoryDesignerAgent:
         return script
 
 
+    def generate_seo_metadata(self, topic: TopicCandidate, script: ScriptData) -> SEOMetadata:
+        """
+        Generates high-CTR SEO metadata (Title, Description, Tags, Thumbnail Brief) alongside the script.
+        """
+        headline = topic.headline
+        clean_title = headline[:65] if len(headline) > 65 else headline
+        tags = [t.strip().lower() for t in topic.keywords if len(t.strip()) > 2][:10]
+        tags.extend(["infotainment", "documentary", "2026", "analysis", "explained"])
+        
+        description = (
+            f"Deep-dive documentary analysis on: {headline}.\n\n"
+            f"In this video, we break down the ground-truth data, market implications, and strategic lessons.\n\n"
+            f"CHAPTERS:\n"
+            f"0:00 - Act 1: The Inciting Incident\n"
+            f"2:15 - Act 2: Historical Precedents & Origins\n"
+            f"4:30 - Act 3: Deep Technical Mechanics\n"
+            f"6:45 - Act 4: Actionable Real-World Impact\n"
+            f"9:00 - Act 5: Critical Risks & Counter-Arguments\n"
+            f"11:15 - Act 6: Strategic Future Verdict\n\n"
+            f"Sources & Data Grounding:\n- {topic.source_url}\n- Grounded Fact Verification via CSVG Pipeline (2026)\n\n"
+            f"#Infotainment #{topic.niche_category.replace(' ', '')} #Documentary"
+        )
+        
+        return SEOMetadata(
+            title=clean_title,
+            description=description,
+            tags=list(set(tags)),
+            thumbnail_brief=f"{headline[:25]} Exposed",
+            chapter_timestamps=[
+                "0:00 Intro", "2:15 Historical Background", "4:30 Technical Analysis", 
+                "6:45 Real Impact", "9:00 Risk Analysis", "11:15 Conclusion"
+            ]
+        )
+
     def process(self, state: GlobalState, region: str = "all") -> A2AMessage:
         """
         Executes Story Designer workflow:
         1. Reads selected topic and verified_facts from GlobalState
         2. Generates 6-Act dramatic script with dynamic date context, trusted organization citations & region-appropriate visual framing
-        3. Updates state.script_data
-        4. Emits A2AMessage to Observer Agent
+        3. Generates SEO Metadata (Title, Description, Tags, Thumbnail Overlay Brief)
+        4. Updates state.script_data and state.seo_metadata
+        5. Emits A2AMessage to Observer Agent
         """
         if not state.selected_topic:
             raise ValueError("Cannot generate script: state.selected_topic is None")
 
         script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region)
         state.script_data = script
+        state.seo_metadata = self.generate_seo_metadata(state.selected_topic, script)
         state.execution_stage = "SCRIPT_GENERATED"
 
         msg = A2AMessage(
