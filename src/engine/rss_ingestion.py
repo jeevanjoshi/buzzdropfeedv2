@@ -174,12 +174,12 @@ def extract_keywords(text: str) -> List[str]:
 
 def sanitize_temporal_freshness(text: str) -> str:
     """
-    Sanitizes outdated year references (e.g. 2023, 2024, 2025) in headlines/summaries
+    Sanitizes outdated year references (e.g. 2015-2025) in headlines/summaries
     to ensure temporal grounding in the current year (2026).
     """
     import datetime
     current_year = str(datetime.datetime.now().year)
-    return re.sub(r'\b(2023|2024|2025)\b', current_year, text)
+    return re.sub(r'\b(201[5-9]|202[0-5])\b', current_year, text)
 
 
 def fetch_live_rss_feeds(
