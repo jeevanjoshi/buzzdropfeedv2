@@ -11,4 +11,6 @@ logs/*.json
 *.mp4
 *.ass
 *.png
-.DS_Store
+*.DS_Store
+*.onnx
+*.bin
