@@ -1,13 +1,14 @@
 import uuid
 import datetime
 from typing import List, Dict, Any, Optional
-from src.schemas.state import GlobalState, TopicCandidate, VerifiedFact
+from src.schemas.state import GlobalState, TopicCandidate, VerifiedFact, RevenueForecast
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.rss_ingestion import LiveRSSIngestionEngine
 from src.engine.topic_topsis import TopicTOPSISEngine
 from src.engine.api_ninjas import APINinjasRetriever
 from src.engine.external_apis import external_api_manager
 from src.engine.space_cinema_apis import space_cinema_api_manager
+from src.engine.monetization_optimizer import monetization_optimizer
 
 
 class FactRetrieverAgent:
@@ -119,22 +120,35 @@ class FactRetrieverAgent:
 
         return [c1, c2], [f1, f2]
 
-    def process(self, state: GlobalState, use_live_rss: bool = True, region: str = "all") -> A2AMessage:
+    def process(self, state: GlobalState, use_live_rss: bool = True, region: str = "all",
+                channel_phase: str = "REVENUE") -> A2AMessage:
         """
         Executes Fact Retriever workflow:
         1. Ingests news candidates and facts.
-        2. Evaluates candidates using TOPSIS.
-        3. Updates state.selected_topic, state.verified_facts, state.execution_stage.
+        2. Evaluates candidates using phase-aware TOPSIS.
+        3. Updates state.selected_topic, state.verified_facts, state.revenue_forecast.
         4. Emits TOPIC_SELECTED A2AMessage.
         """
         candidates, facts = self.fetch_candidates_and_facts(use_live_rss=use_live_rss, region=region)
-        
+
         if not candidates:
             raise ValueError("No topic candidates available for selection.")
 
-        # Rank candidates using TOPSIS Decision Engine
-        ranked_candidates = self.topsis_engine.rank_candidates(candidates)
+        # Rank candidates using phase-aware TOPSIS Decision Engine
+        ranked_candidates = self.topsis_engine.rank_candidates(candidates, channel_phase=channel_phase)
         winner = ranked_candidates[0]
+
+        # Compute revenue forecast for the winning topic
+        rev = monetization_optimizer.calculate_revenue_yield(winner, estimated_runtime_mins=13.0)
+        state.revenue_forecast = RevenueForecast(
+            predicted_views=rev["predicted_views"],
+            estimated_rpm_usd=rev["estimated_rpm_usd"],
+            midroll_multiplier=rev["midroll_multiplier"],
+            base_ad_revenue_usd=rev["base_ad_revenue_usd"],
+            total_expected_revenue_usd=rev["total_expected_revenue_usd"],
+            audience_type=getattr(winner, "audience_type", "general"),
+            niche_category=getattr(winner, "niche_category", "Technology & Artificial Intelligence"),
+        )
 
         # Update Global State
         state.selected_topic = winner
@@ -150,7 +164,10 @@ class FactRetrieverAgent:
                 "selected_candidate": winner.model_dump(),
                 "topsis_score": winner.topsis_score,
                 "verified_fact_count": len(facts),
-                "region": region
+                "region": region,
+                "channel_phase": channel_phase,
+                "revenue_forecast_usd": rev["total_expected_revenue_usd"],
+                "audience_type": getattr(winner, "audience_type", "general"),
             },
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )

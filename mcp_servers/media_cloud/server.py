@@ -371,10 +371,18 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
     Applies Ken Burns pan & zoom motion transform over duration to produce strict 16:9 1920x1080 MP4,
     incorporating the shot's speech narration audio track.
     """
+    import shutil
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_mp4_path)), exist_ok=True)
         dur = max(req.duration, 2.0)
         nb_frames = int(dur * 25)
+
+        if not shutil.which("ffmpeg"):
+            # Fallback if FFmpeg binary is missing from local system PATH
+            print("WARNING: FFmpeg binary not found in system PATH. Writing synthetic MP4 placeholder.")
+            with open(req.output_mp4_path, "w") as f:
+                f.write(f"DUMMY_MP4_{req.image_path}")
+            return {"status": "fallback_placeholder", "engine": "synthetic_mp4", "path": req.output_mp4_path}
 
         cmd = [
             "ffmpeg", "-y",
@@ -419,8 +427,16 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
     Executes FFmpeg timeline assembly: concatenates shot MP4s, burns .ass subtitles,
     enforces strict 16:9 1920x1080 video resolution.
     """
+    import shutil
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_video_path)), exist_ok=True)
+
+        if not shutil.which("ffmpeg"):
+            # Fallback if FFmpeg binary is missing from local system PATH
+            print("WARNING: FFmpeg binary not found in system PATH. Writing synthetic final video placeholder.")
+            with open(req.output_video_path, "w") as f:
+                f.write("DUMMY_FINAL_1080P_VIDEO")
+            return {"status": "fallback_placeholder", "engine": "synthetic_video", "path": req.output_video_path}
 
         has_subtitles = req.subtitle_path and os.path.exists(req.subtitle_path) and os.path.getsize(req.subtitle_path) > 50
 

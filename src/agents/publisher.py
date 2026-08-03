@@ -50,6 +50,14 @@ class PublisherAgent:
         )
         state.upload_metadata = meta
         state.execution_stage = "PUBLISHED_SUCCESS"
+
+        # Record to persistent deduplication history so future runs skip this topic
+        from src.engine.topic_deduplicator import topic_deduplicator
+        topic_headline = state.selected_topic.headline if state.selected_topic else title
+        topic_summary = state.selected_topic.summary if state.selected_topic else ""
+        topic_kws = state.selected_topic.keywords if state.selected_topic else []
+        topic_deduplicator.record_published_topic(topic_headline, topic_summary, topic_kws)
+
         return meta
 
     async def process(self, state: GlobalState, daily_uploads: int = 0) -> A2AMessage:

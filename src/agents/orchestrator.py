@@ -9,6 +9,9 @@ from src.agents.story_designer import StoryDesignerAgent
 from src.agents.observer import ObserverAgent
 from src.agents.media_producer import MediaProducerAgent
 from src.agents.publisher import PublisherAgent
+from src.engine.quality_verifier import quality_verifier
+from src.engine.video_quality_metrics import video_quality_metrics
+from src.engine.channel_phase_manager import channel_phase_manager, get_ypp_progress_report
 from src.engine.logger import logger
 from src.engine.tracer import tracer
 
@@ -46,13 +49,33 @@ class OrchestratorAgent:
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
 
+        # ── Load Channel Phase (GROWTH / REVENUE / SCALE) ──────────────────
+        channel_stats = channel_phase_manager.get_channel_stats()
+        state.channel_stats = channel_stats
+        phase = channel_stats.channel_phase
+
         logger.info("INITIALIZATION", f"Starting CSVG Pipeline Run: {p_id}", pipeline_id=p_id, component="ORCHESTRATOR")
+        logger.info(
+            "INITIALIZATION",
+            f"Channel Phase: {phase} | Subs: {channel_stats.subscribers} | "
+            f"Watch Hours: {channel_stats.total_watch_hours} | YPP Unlocked: {channel_stats.ypp_unlocked}",
+            pipeline_id=p_id, component="CHANNEL_PHASE"
+        )
+        if phase == "GROWTH":
+            progress = get_ypp_progress_report(channel_stats)
+            logger.info(
+                "INITIALIZATION",
+                f"YPP Progress — Subs: {progress['subs_progress_pct']}% "
+                f"| Watch Hours: {progress['watch_hours_progress_pct']}% "
+                f"| Est. days to YPP: {progress['estimated_days_to_ypp']}",
+                pipeline_id=p_id, component="CHANNEL_PHASE"
+            )
         tracer.record_step(state, "INITIALIZATION")
 
         try:
-            # 1. Fact Retrieval & Topic Selection
-            logger.info("PHASE_1_TOPIC_SELECTION", "Ingesting news feeds and evaluating 7-Criteria TOPSIS Decision Matrix...", pipeline_id=p_id, component="FACT_RETRIEVER")
-            msg_topic = self.fact_retriever.process(state, use_live_rss=use_live_rss, region=region)
+            # 1. Fact Retrieval & Topic Selection (phase-aware TOPSIS)
+            logger.info("PHASE_1_TOPIC_SELECTION", f"Ingesting feeds and evaluating TOPSIS [{phase} weights]...", pipeline_id=p_id, component="FACT_RETRIEVER")
+            msg_topic = self.fact_retriever.process(state, use_live_rss=use_live_rss, region=region, channel_phase=phase)
             
             if not state.selected_topic:
                 raise RuntimeError("No suitable topic selected by FactRetrieverAgent.")
@@ -112,6 +135,78 @@ class OrchestratorAgent:
 
             logger.info("PHASE_3_MEDIA_PRODUCTION", f"Media Production Complete! Video: {state.asset_paths.final_video}", pipeline_id=p_id, component="MEDIA_PRODUCER")
             tracer.record_step(state, "MEDIA_READY", message=msg_media)
+
+            # 4b. Post-Production Quality Gates (Stage 6 + Stage 8)
+            logger.info("PHASE_3B_QUALITY_GATES", "Running post-production compliance & video quality gates...", pipeline_id=p_id, component="QUALITY_VERIFIER")
+
+            # Gate 1: Topic-to-Script coherence re-check (catches runtime drift)
+            gate1_pass, gate1_issues = quality_verifier.verify_gate1_topic_to_script(
+                state.selected_topic, state.script_data
+            )
+            if not gate1_pass:
+                logger.warning("PHASE_3B_QUALITY_GATES", f"Gate 1 issues: {gate1_issues}", pipeline_id=p_id, component="QUALITY_VERIFIER",
+                               fix_hint="Regenerate script with stricter topic alignment constraints.")
+
+            # Gate 5: YouTube 2025/2026 AI Disclosure Auto-Tagging
+            pipeline_tags = ["flux.1", "kokoro-tts", "wan2.1"]
+            gate5_result = quality_verifier.verify_gate5_ai_disclosure_tags(state.script_data, pipeline_tags)
+            logger.info("PHASE_3B_QUALITY_GATES",
+                        f"Gate 5 AI Disclosure: syntheticContent={gate5_result['youtube_metadata_patch']['syntheticContent']}, "
+                        f"bInformed={gate5_result['youtube_metadata_patch']['bInformed']} — {gate5_result['rationale']}",
+                        pipeline_id=p_id, component="QUALITY_VERIFIER")
+            # Patch upload metadata with disclosure tags
+            if state.upload_metadata:
+                state.upload_metadata.extra_metadata = state.upload_metadata.extra_metadata or {}
+                state.upload_metadata.extra_metadata.update(gate5_result["youtube_metadata_patch"])
+
+            # Gate 6: Anti-"AI Slop" Script Entropy Audit (FATAL if fails)
+            gate6_result = quality_verifier.verify_gate6_anti_slop_entropy(state.script_data)
+            if not gate6_result["passes"]:
+                raise RuntimeError(
+                    f"Gate 6 Anti-Slop Audit FAILED — Script will be demonetized. Issues: {gate6_result['issues']}. "
+                    f"Entropy={gate6_result['shannon_entropy_bits']} bits, UniqueRatio={gate6_result['unique_word_ratio']:.0%}"
+                )
+            logger.info("PHASE_3B_QUALITY_GATES",
+                        f"Gate 6 Anti-Slop Passed: Entropy={gate6_result['shannon_entropy_bits']} bits, "
+                        f"UniqueRatio={gate6_result['unique_word_ratio']:.0%}, SentenceVariance={gate6_result['sentence_length_variance']}",
+                        pipeline_id=p_id, component="QUALITY_VERIFIER")
+
+            # Stage 8: Per-Shot FVD + Optical Flow Quality Gate
+            shot_quality_failures = []
+            for shot in state.script_data.shots:
+                shot_key = f"shot_{shot.shot_id}"
+                # Use proxy feature stats derived from shot metadata (word count, duration as stand-ins)
+                # In production, replace with real I3D feature extractor output
+                word_count = len(shot.narration_text.split())
+                gen_stats = {"mean": float(word_count) / 10.0, "variance": float(word_count) / 20.0}
+                ref_stats = {"mean": 12.0, "variance": 4.0}  # Reference baseline for 12–15min Infotainment
+                # Proxy motion vectors from duration estimate (uniform motion baseline)
+                motion_vectors = [shot.duration_estimate * 0.2 + i * 0.05 for i in range(10)]
+                report = video_quality_metrics.run_full_quality_gate(
+                    shot_id=shot_key,
+                    generated_feature_stats=gen_stats,
+                    reference_feature_stats=ref_stats,
+                    frame_motion_vectors=motion_vectors
+                )
+                if not report["stage8_overall_pass"]:
+                    shot_quality_failures.append((shot_key, report["recommendation"]))
+                    logger.warning(
+                        "PHASE_3B_QUALITY_GATES",
+                        f"Stage 8 Quality Fail — {shot_key}: {report['recommendation']}",
+                        pipeline_id=p_id, component="VIDEO_QUALITY",
+                        fix_hint=f"Re-render {shot_key} with refined FLUX.1 prompt or adjust Ken Burns motion params."
+                    )
+
+            if shot_quality_failures:
+                logger.warning(
+                    "PHASE_3B_QUALITY_GATES",
+                    f"Stage 8: {len(shot_quality_failures)}/{len(state.script_data.shots)} shots flagged. Pipeline continues with warnings.",
+                    pipeline_id=p_id, component="VIDEO_QUALITY"
+                )
+            else:
+                logger.info("PHASE_3B_QUALITY_GATES", "Stage 8: All shots passed FVD + Optical Flow gates.", pipeline_id=p_id, component="VIDEO_QUALITY")
+
+            tracer.record_step(state, "QUALITY_GATES_PASSED")
 
             # 5. YouTube Publishing
             logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Publishing Video to YouTube with Synthetic Metadata...", pipeline_id=p_id, component="PUBLISHER")

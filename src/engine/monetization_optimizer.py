@@ -5,11 +5,62 @@ from src.schemas.state import TopicCandidate
 
 class MonetizationYieldOptimizer:
     """
-    Advanced Mathematical & ML Monetization Yield Optimizer:
-    Calculates expected ad revenue yield R(i) = Views(i) * (RPM(i) / 1000) * MidRollMultiplier * SubConversion.
-    Uses Pareto Multi-Objective Optimization and Markowitz Sharpe Ratio principles to select
-    topics that yield maximum revenue in minimum timeframe.
+    Stage 7: Advanced Mathematical & ML Monetization Yield Optimizer:
+    Calculates expected ad revenue yield R(i) = Views(i) * (RPM(i) / 1000) * MidRollMultiplier.
+    Uses Pareto Multi-Objective Optimization and enforces:
+    - Target Revenue View Threshold: V_req = (E_target / R_est) * 1000
+    - Niche RPM Matrix lookup for real-world RPM ranges per content category
+    - Competitor 30-day view volume scraping & rejection gate
     """
+
+    # Niche RPM Matrix: Category -> (min_rpm_usd, max_rpm_usd, mid_rpm_usd)
+    NICHE_RPM_MATRIX = {
+        "Technology & Artificial Intelligence": (10.0, 22.0, 16.0),
+        "Global Economics & Finance":           (8.0,  20.0, 14.0),
+        "Space & Scientific Innovation":        (6.0,  14.0, 10.0),
+        "Geopolitics & World Affairs":          (4.0,  10.0, 7.0),
+        "Global Trends & Cultural Infotainment":(3.0,   8.0, 5.5),
+        "Health & Wellness":                    (7.0,  18.0, 12.0),
+    }
+
+    def calculate_required_views(self, target_revenue_usd: float, category: str) -> Dict[str, float]:
+        """
+        Stage 7: Revenue Yield Filter Formula:
+        V_req = (E_target / R_est) * 1000
+        Calculates minimum views required to achieve target revenue for a given niche RPM.
+        """
+        rpm_min, rpm_max, rpm_mid = self.NICHE_RPM_MATRIX.get(
+            category, (4.0, 10.0, 7.0)
+        )
+        v_req_optimistic = (target_revenue_usd / rpm_max) * 1000
+        v_req_realistic  = (target_revenue_usd / rpm_mid) * 1000
+        v_req_pessimistic = (target_revenue_usd / rpm_min) * 1000
+        return {
+            "category": category,
+            "target_revenue_usd": target_revenue_usd,
+            "niche_rpm_mid_usd": rpm_mid,
+            "v_req_optimistic": round(v_req_optimistic),
+            "v_req_realistic": round(v_req_realistic),
+            "v_req_pessimistic": round(v_req_pessimistic),
+        }
+
+    def filter_by_competitor_volume(
+        self, category: str, competitor_30d_avg_views: float, target_revenue_usd: float = 2450.0
+    ) -> Dict[str, Any]:
+        """
+        Competitor Volume Rejection Gate:
+        Rejects topic if competitor 30-day average views < V_req (realistic).
+        This ensures the niche has sufficient organic demand to sustain target revenue.
+        """
+        v_req = self.calculate_required_views(target_revenue_usd, category)
+        v_required = v_req["v_req_realistic"]
+        passes = competitor_30d_avg_views >= v_required
+        return {
+            "passes_revenue_gate": passes,
+            "competitor_30d_avg_views": competitor_30d_avg_views,
+            "v_req_realistic": v_required,
+            "decision": "APPROVED" if passes else f"REJECTED — needs {v_required:,.0f} views, competitor shows {competitor_30d_avg_views:,.0f}"
+        }
 
     def calculate_midroll_multiplier(self, script_runtime_minutes: float) -> float:
         """

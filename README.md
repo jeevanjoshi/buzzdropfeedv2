@@ -1,97 +1,191 @@
 # Autonomous YouTube Storytelling Video Generation (CSVG) Pipeline
 
-Production-grade, zero-human-intervention **Customized Storytelling Video Generation (CSVG)** pipeline powered by an **8-Stage Mathematical, ML & Graph-RAG Architecture** designed for high-retention 12–14 minute 16:9 widescreen Infotainment YouTube channels targeting **$2,450+ USD / Video** ad revenue.
+Production-grade, zero-human-intervention **Customized Storytelling Video Generation (CSVG)** pipeline powered by an **8-Stage Mathematical, ML & Graph-RAG Architecture**. Built for high-retention 11–14 minute 16:9 widescreen Infotainment channels targeting **$2,000+ USD / Month** ad revenue at 4 videos per day.
 
 ---
 
-## 🏛️ Master 8-Stage Cognitive, Mathematical & ML Architecture
+## 🏛️ Master System Architecture Diagram
 
 ```mermaid
-graph TD
-    Stage1[Stage 1: Loewenstein Curiosity Gap & Entropy] --> Stage2[Stage 2: GraphRAG Multi-Hop Fact Retrieval]
-    Stage2 --> Stage3[Stage 3: BERTopic Neural Outline Synthesis]
-    Stage3 --> Stage4[Stage 4: Multimodal LLM & Generative Pipeline]
-    Stage4 --> Stage5[Stage 5: LinUCB Contextual Bandit Optimizer]
-    Stage5 --> Stage6[Stage 6: 2025/2026 YouTube Compliance Engine]
-    Stage6 --> Stage7[Stage 7: Algorithmic Target RPM Revenue Filter]
-    Stage7 --> Stage8[Stage 8: Optical Flow & FVD Frame Editing]
+flowchart TD
+    subgraph DataIngestion ["1. High-RPM Data Ingestion & Deduplication"]
+        RSS["Global RSS Feeds\n(Wired, TechCrunch, Investopedia, NYT, Reuters)"]
+        DEDUP["Topic Deduplicator\n(published_topics.json\nCosine Sim >= 0.60 & Entity Jaccard Check)"]
+        BLOCK["Audience Type Classifier & Blocklist\n(Gossip / Entertainment = HARD BLOCK)"]
+        RSS --> BLOCK --> DEDUP
+    end
+
+    subgraph AgentOrchestration ["2. Agentic Control & Phase Engine"]
+        PHASE["Channel Phase Manager\n(channel_stats.json)\nGROWTH (<1K subs) | REVENUE (YPP) | SCALE (10K+)"]
+        FACT["FactRetriever Agent\n(7-Criteria TOPSIS Matrix)"]
+        STORY["StoryDesigner Agent\n(RAG-Grounded 6-Act Arc,\n13-min Narration, SEO Tags, End-Screen Hook)"]
+        OBSERVER["Observer Agent\n(Revenue Gate $16.67,\nAudience Gate, Runtime 10.5-14.5m)"]
+        
+        PHASE -->|TOPSIS Weights| FACT
+        FACT -->|TopicCandidate| STORY
+        STORY -->|ScriptData| OBSERVER
+        OBSERVER -->|REVISE| STORY
+        OBSERVER -->|APPROVE| MEDIA
+    end
+
+    subgraph MCPServers ["3. Distributed MCP Media Servers"]
+        MEDIA["MediaProducer Agent"]
+        AUDIO_EDGE["Edge Audio MCP Server (Port 8000)\n• Kokoro-ONNX / Edge TTS\n• Whisper .ass Subtitles"]
+        MEDIA_CLOUD["Cloud Media MCP Server (Port 8001)\n• Fal.ai Flux.1-Schnell 16:9 Visuals\n• Ken Burns Motion Panning\n• 1280x720 Thumbnail Generator\n• FFmpeg 1080p Timeline Assembly"]
+        
+        MEDIA --> AUDIO_EDGE
+        MEDIA --> MEDIA_CLOUD
+    end
+
+    subgraph YouTubePublishing ["4. Publishing & Compliance"]
+        PUB["Publisher Agent"]
+        YT_MCP["YouTube Cloud MCP Server (Port 8002)\n• Quota Guard (Max 4 uploads/day)\n• Synthetic Content Tags (EU AI Act)\n• Peak Slot Scheduler (01:30, 06:30, 10:30, 14:30 UTC)"]
+        STORE["Update published_topics.json\n& channel_stats.json"]
+        
+        MEDIA_CLOUD --> PUB
+        PUB --> YT_MCP --> STORE
+    end
 ```
 
-### 🗺️ 8-Stage Engine Mapping
+---
 
-| Stage | Cognitive / Scientific Principle | Mathematical / ML Model | Code Engine Module |
+## 💰 API & Resource Cost Breakdown (Free vs. Paid)
+
+| Resource / API | Role in Pipeline | Cost Model | Details & Quota Limits |
 | :--- | :--- | :--- | :--- |
-| **Stage 1** | **Curiosity Gap & Ideation** | Loewenstein Curiosity Gap, Information Entropy $H(X)$, IRM Causal Debiasing | [`src/engine/ctr_predictor.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/engine/ctr_predictor.py) |
-| **Stage 2** | **Fact-Finding & Retrieval** | GraphRAG Knowledge Graphs, TrumorGPT Fact Checking | [`src/engine/rag_retriever.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/engine/rag_retriever.py) |
-| **Stage 3** | **Narrative Structuring** | BERTopic (SBERT $\rightarrow$ UMAP $\rightarrow$ HDBSCAN $\rightarrow$ c-TF-IDF) | [`src/agents/story_designer.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/agents/story_designer.py) |
-| **Stage 4** | **Generative Execution** | DAG Swarm Orchestration, Kimi K3 / Claude 3.7, Wan2.1 / Runway Gen-3 / FLUX.1 | [`src/agents/media_producer.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/agents/media_producer.py) |
-| **Stage 5** | **Audience Optimization** | LinUCB Contextual Multi-Armed Bandits $\text{UCB}_{t,a}$, Ridge Regression | [`src/engine/linucb_bandit.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/engine/linucb_bandit.py) |
-| **Stage 6** | **Compliance & Safety** | YouTube 2025/2026 Synthetic Media API Metadata & Disclosure Engine | [`src/engine/quality_verifier.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/engine/quality_verifier.py) & [`src/agents/observer.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/agents/observer.py) |
-| **Stage 7** | **Target Monetization** | RPM Formula $E = \frac{V}{1000} \times R$, 2.6x Mid-Roll Placement Multipliers | [`src/engine/monetization_optimizer.py`](file:///home/jeevanjoshi/buzzdropfeedv2/src/engine/monetization_optimizer.py) |
-| **Stage 8** | **Reality Illusion & Editing** | Fréchet Video Distance (FVD), Implicit Neural Representations (INR), Perceptual Loss | Active in Visual Synthesis Verification |
+| **Global RSS Feeds** | News ingestion (TechCrunch, NYT, Wired, Reuters, Investopedia) | 🟢 **100% FREE** | Direct XML feeds; no API keys required |
+| **World Bank Open Data API** | Macro-economic indicators (GDP, Inflation) | 🟢 **100% FREE** | Open public API; unlimited requests |
+| **NASA APOD API** | Space & telemetry fact enrichment | 🟢 **100% FREE** | Public key (`DEMO_KEY` or free registered key) |
+| **Wikipedia & History APIs** | Historical archive fact verification | 🟢 **100% FREE** | Public Wikipedia REST API |
+| **YouTube Data API v3** | Channel Analytics & Video Uploads | 🟢 **100% FREE** | Free daily quota of 10,000 units (4 uploads = ~6,400 units) |
+| **Kokoro-ONNX TTS** | Neural speech audio synthesis (82M weights) | 🟢 **100% FREE** | Runs locally on CPU / Pi 5; zero API cost |
+| **Faster-Whisper** | Subtitle timestamp alignment (`.ass` generator) | 🟢 **100% FREE** | Runs locally on CPU / Pi 5; zero API cost |
+| **FFmpeg Engine** | Video zooming, motion panning & 1080p timeline assembly | 🟢 **100% FREE** | Open-source system binary |
+| **OpenRouter / LLM API** | Script generation & GraphRAG synthesis | 🟡 **PAID / LOW COST** | ~**$0.002–$0.008** per script via Claude 3.5 / Gemini / DeepSeek |
+| **Fal.ai (Flux.1 Schnell)** | 16:9 widescreen cinematic visual generation | 🟡 **PAID** | ~**$0.003** per image ($\approx$ **$0.045** for 15-shot video) |
+| **Replicate API** | Fallback image generation if Fal.ai is unavailable | 🟡 **PAID (Fallback)** | ~**$0.005** per image |
+| **Marketaux / API Ninjas** | Supplemental financial news facts | ⚪ **OPTIONAL FREE TIER** | Optional; fallback data included |
+
+> **Total Cost to Produce 1 Video:** $\approx$ **$0.05 USD** (15 Flux.1 images + LLM tokens).  
+> **Estimated Ad Revenue per Video:** **$16.67+ USD** at $13.00 blended RPM ($300+ revenue yield per 100K views).
 
 ---
 
-## 🏗️ Architecture & Node Execution Roles (OCI vs. Raspberry Pi 5)
+## 🛠️ System Tooling & Dependencies
 
-The pipeline uses a distributed architecture splitting heavy cloud media rendering/agent orchestration from local edge audio synthesis and speech alignment:
+### 1. Operating System Binaries (System Level)
 
-```
-               OCI CLOUD NODE (/opt/csvg_pipeline)
-   [2 OCPUs, 12 GB RAM, Ubuntu 22.04 LTS - Cron: 0 4 * * *]
-   ├── main.py                          <-- Pipeline Orchestrator & CLI Entrypoint
-   ├── src/                             <-- Core Agent Framework & Engines
-   │   ├── agents/                      (Orchestrator, FactRetriever, StoryDesigner, Observer, MediaProducer, Publisher)
-   │   ├── engine/                      (MonetizationYieldOptimizer, CTRPredictor, ScriptPacingEngine, LinUCBBandit, GraphRAGRetriever, QualityVerifier, TOPSIS)
-   │   └── schemas/                     (GlobalState, A2AMessage, ScriptData, AssetPaths)
-   ├── mcp_servers/media_cloud/         <-- Cloud Media MCP Server (Port 8001)
-   │   └── server.py                    (Flux.1 16:9, Ken Burns, Dynamic Charts, Playwright SVG, GIPHY Reactions, Thumbnails, FFmpeg Timeline)
-   └── mcp_servers/youtube_cloud/       <-- YouTube Publishing MCP Server (Port 8002)
-       └── server.py                    (Headless OAuth2 Upload & Quota Guard)
+| Binary / Tool | Minimum Version | Installation Command | Purpose |
+| :--- | :--- | :--- | :--- |
+| **Python** | 3.9+ | Default system Python | Core runtime |
+| **FFmpeg** | 4.4+ | `sudo apt install ffmpeg` *(Linux)* / `brew install ffmpeg` *(macOS)* | Video encoding, Ken Burns pan & zoom, 1080p assembly |
+| **Git** | 2.30+ | `sudo apt install git` | Source control |
 
-                                │
-                        HTTP / SSE REST Bridge
-                     (http://172.198.1.30:8000/tools/...)
-                                │
-                                v
+### 2. Python Environment Dependencies (`requirements.txt`)
 
-           RASPBERRY PI 5 EDGE NODE (/opt/csvg_edge)
-          [4 GB RAM, Raspberry Pi OS - Systemd Service]
-   ├── mcp_servers/audio_edge/          <-- Edge Audio MCP Server (Port 8000)
-   │   └── server.py                    (Kokoro-ONNX TTS Synthesis & Faster-Whisper .ass Subtitles)
-   ├── kokoro-v0.19.onnx                <-- Local Speech Weights (82M)
-   └── voices.bin                       <-- Multi-Voice Intonation Blend Weights
+```ini
+# Core Framework & Data Models
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+feedparser>=6.0.10
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# HTTP & Web Servers
+requests>=2.31.0
+aiohttp>=3.9.0
+fastapi>=0.100.0
+uvicorn>=0.22.0
+
+# Math & Data Visualization
+matplotlib>=3.7.0
+opencv-python-headless>=4.8.0
+
+# YouTube Publishing & APIs
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+fal-client>=0.5.0
+
+# Media Production Extensions
+Pillow>=10.0.0              # Thumbnail & graphics rendering
+kokoro-onnx>=0.19.0        # Local neural TTS synthesis (Optional - falls back to Edge TTS)
+faster-whisper>=0.10.0      # Local subtitle alignment (Optional - falls back to Edge Whisper)
 ```
 
 ---
 
-## 🚀 Running the Autonomous Pipeline
+## 📈 Monetization Engine & Daily Publishing Strategy
+
+### Audience-Type Routing & RPM Tiers
+
+The system skips low-CPM entertainment/gossip feeds and routes exclusively to high-RPM global categories:
+
+| Slot | Target Niche | RPM Ceiling | Upload Time (IST) | Target Audience |
+| :--- | :--- | :---: | :---: | :--- |
+| **V1** | Personal Finance & Investing | **$10–$25** | 07:00 IST | US night / UK & EU morning |
+| **V2** | Technology & Artificial Intelligence | **$10–$22** | 12:00 IST | US East morning |
+| **V3** | Business & Entrepreneurship | **$8–$20** | 16:00 IST | US West morning |
+| **V4** | Health & Future Science | **$8–$18** | 20:00 IST | US Primetime |
+
+### Revenue Calculation Formula
+
+$$\text{Revenue} = \text{Views} \times \left( \frac{\text{RPM}}{1000} \right) \times \text{MidRollMultiplier}$$
+
+* **Target Runtime:** 11–14 minutes (15 shots, $\approx 1,950$ words narration).
+* **Mid-Roll Multiplier:** **2.6x** (3 mid-roll ad placements unlocked).
+* **Break-Even Point:** Just **493 views per video** at $13.00 blended RPM to achieve $2,000 USD/month across 120 videos.
+
+---
+
+## ⚙️ Installation & Deployment
+
+### 1. Local Setup
 
 ```bash
-# Run End-to-End Autonomous Pipeline (Live RSS & RAG Feeds)
+# Clone repository
+git clone https://github.com/jeevanjoshi/buzzdropfeedv2.git
+cd buzzdropfeedv2
+
+# Create virtual environment & install dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Configure environment variables
+cp .env.example .env
+# Edit .env and fill in FAL_KEY, YOUTUBE_API_KEY, etc.
+```
+
+### 2. Running the Autonomous Pipeline
+
+```bash
+# Run full autonomous pipeline (Live RSS, RAG, and Cloud Media)
 python3 main.py
 
-# Target Indian English Business & Tech News Feeds
-python3 main.py --india
-
-# Target Global Finance & Tech Feeds
-python3 main.py --global
-
-# Offline Dry-Run Mode (Uses Local Templates & Grounded Stubs)
+# Offline Dry-Run Mode (Uses local synthetic media generators for zero-cost testing)
 python3 main.py --offline
+
+# Run full automated test suite
+python3 run_tests.py
 ```
 
-### Automated Testing Suite
-Run all automated test suites:
-```bash
-python3 run_tests.py
+### 3. Raspberry Pi 5 / Server Automation (4 Runs / Day)
+
+Add the following to your crontab (`crontab -e`) to execute the 4 daily publishing slots automatically:
+
+```cron
+# CSVG Autonomous Publishing Schedule (UTC)
+30 1 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v1.log 2>&1
+30 6 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v2.log 2>&1
+30 10 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v3.log 2>&1
+30 14 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v4.log 2>&1
 ```
 
 ---
 
 ## ⚖️ EU AI Act & YouTube Policy Compliance
 
-- Metadata tag `syntheticContent: true` and `bInformed: true` injected automatically during YouTube Data API ingestion.
-- 100% freshly rendered AI visuals (Flux.1) + CC0 ambient background tracks to guarantee zero copyright strikes.
-- Daily upload quota safety limit: Max 4 uploads per day (6,400 / 10,000 daily API units).ntee zero copyright strikes.
-- Daily upload quota safety limit: Max 4 uploads per day (6,400 / 10,000 daily API units).
+* **Synthetic Disclosure Tags:** `syntheticContent: true` and `bInformed: true` are injected automatically into YouTube upload metadata.
+* **Copyright Safety:** 100% freshly rendered AI visuals (Flux.1) + royalty-free CC0 ambient audio ensure zero copyright flags.
+* **Quota Guard:** Publisher checks API limits before uploading (max 4 uploads/day = 6,400 / 10,000 daily API units).

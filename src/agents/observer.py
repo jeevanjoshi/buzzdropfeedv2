@@ -4,6 +4,8 @@ import re
 from typing import List, Dict, Any, Tuple
 from src.schemas.state import GlobalState, ScriptData, VerifiedFact
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
+from src.engine.monetization_optimizer import monetization_optimizer
+from src.engine.channel_phase_manager import channel_phase_manager
 
 
 class ObserverAgent:
@@ -62,22 +64,50 @@ class ObserverAgent:
         return violations
 
     def evaluate_script(
-        self, script: ScriptData, verified_facts: List[VerifiedFact] = None
+        self, script: ScriptData, verified_facts: List[VerifiedFact] = None,
+        topic=None, channel_phase: str = "REVENUE"
     ) -> Tuple[bool, List[str]]:
         """
         Evaluates script constraints:
-        1. Runtime: Must be between 10 minutes (600s) and 15 minutes (900s).
-        2. Shot Count: Must have 12 to 18 shots.
-        3. Pacing: No single shot narration should exceed 75 words (~25s at 150 wpm).
-        4. Visual Quality (AQA): Prompts must include 16:9 widescreen specification and aesthetic lighting keywords.
-        5. Anti-Hallucination Audit: Cross-checks figures against verified_facts.
+        1. Revenue Gate: predicted yield must meet per-video minimum (phase-aware).
+        2. Audience Gate: entertainment/gossip topics are hard-blocked.
+        3. Runtime: Must be between 10.5 minutes and 14.5 minutes (3-midroll sweet spot).
+        4. Shot Count: Must have 12 to 18 shots.
+        5. Pacing: No single shot narration should exceed 155 words.
+        6. Visual Quality (AQA): Prompts must include 16:9 widescreen specification.
+        7. Anti-Hallucination Audit: Cross-checks figures against verified_facts.
         """
         violations = []
 
-        # Runtime Check
+        # ── Gate 0: Audience Type Gate ──────────────────────────────────────
+        # Hard-block entertainment/gossip regardless of other scores
+        if topic and getattr(topic, "audience_type", "") == "blocked":
+            violations.append(
+                f"Audience Gate FAIL: Topic audience_type='blocked' (entertainment/gossip). "
+                f"RPM ~$1 — hard blocked. Select a Tech/Finance/Health topic instead."
+            )
+            return False, violations  # Early exit — no point checking further
+
+        # ── Gate 0b: Revenue Gate (REVENUE + SCALE phases only) ─────────────
+        # In GROWTH phase we skip this — goal is watch-time not RPM
+        if topic and channel_phase in ("REVENUE", "SCALE"):
+            rev = monetization_optimizer.calculate_revenue_yield(topic, estimated_runtime_mins=13.0)
+            min_rev = channel_phase_manager.REVENUE_GATE_MIN_USD
+            if rev["total_expected_revenue_usd"] < min_rev:
+                violations.append(
+                    f"Revenue Gate FAIL: Predicted ${rev['total_expected_revenue_usd']:.2f}/video "
+                    f"< ${min_rev:.2f} minimum. RPM=${rev['estimated_rpm_usd']:.2f}, "
+                    f"PredictedViews={rev['predicted_views']:,.0f}. "
+                    f"Switch to higher-RPM niche (Tech/AI/Finance/Health)."
+                )
+
+        # Runtime Check — 10.5 to 14.5 min is the 3-midroll revenue sweet spot
         runtime_min = script.estimated_runtime_seconds / 60.0
-        if runtime_min < 8.0 or runtime_min > 18.0:
-            violations.append(f"Runtime out of bounds: {runtime_min:.2f} mins (Target: 10.0 - 15.0 mins)")
+        if runtime_min < 10.5 or runtime_min > 14.5:
+            violations.append(
+                f"Runtime out of bounds: {runtime_min:.2f} mins "
+                f"(Target: 10.5 - 14.5 mins for 3 mid-roll ads at 2.6x multiplier)"
+            )
 
         # Shot Count Check
         if len(script.shots) < 10:
@@ -107,14 +137,19 @@ class ObserverAgent:
     def process(self, state: GlobalState) -> A2AMessage:
         """
         Executes Observer evaluation workflow:
-        1. Reads state.script_data and state.verified_facts
-        2. Evaluates constraints and anti-hallucination audit
+        1. Reads state.script_data, state.verified_facts, state.selected_topic, state.channel_phase
+        2. Evaluates constraints, revenue gate, audience gate, and anti-hallucination audit
         3. Emits APPROVE_SCRIPT or REVISE_SCRIPT A2AMessage
         """
         if not state.script_data:
             raise ValueError("Observer evaluation failed: state.script_data is None")
 
-        is_approved, violations = self.evaluate_script(state.script_data, state.verified_facts)
+        is_approved, violations = self.evaluate_script(
+            state.script_data,
+            state.verified_facts,
+            topic=state.selected_topic,
+            channel_phase=state.channel_phase,
+        )
 
         if is_approved:
             state.execution_stage = "SCRIPT_APPROVED"

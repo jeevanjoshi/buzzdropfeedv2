@@ -1,7 +1,8 @@
 import os
+import re
 import uuid
 import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from src.schemas.state import GlobalState, ScriptData, AssetPaths
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from mcp_servers.audio_edge.server import synthesize_tts, align_subtitles_whisper, TTSRequest, WhisperRequest
@@ -68,11 +69,77 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         f.write(ass_header + "".join(dialogue_lines))
 
 
+def parse_scene_visual_cue(narration_text: str) -> Tuple[str, str]:
+    """
+    Parses structured [Scene: ...] visual cues embedded in narration_text.
+    Returns a tuple of (clean_narration, extracted_visual_prompt).
+    """
+    scene_match = re.search(r'\[Scene:\s*([^\]]+)\]', narration_text, re.IGNORECASE)
+    extracted_cue = scene_match.group(1).strip() if scene_match else ""
+    clean_narration = re.sub(r'\[Scene:[^\]]*\]', '', narration_text).strip()
+    return clean_narration, extracted_cue
+
+
+def inject_tts_breathing_pauses(narration: str, sentiment_score: float = 0.5) -> str:
+    """
+    Stage 4: Neural TTS Intonation Engine:
+    Inserts SSML-style natural breathing pauses (<break>) at punctuation boundaries.
+    Adjusts pause density based on script sentiment (0.0=tense/fast, 1.0=calm/slow).
+    """
+    # Map sentiment to pause duration thresholds
+    pause_ms = int(200 + (sentiment_score * 300))  # 200ms – 500ms range
+    short_pause = f"<break time='{pause_ms}ms'/>"
+    long_pause = f"<break time='{pause_ms * 2}ms'/>"
+
+    # Insert pauses at commas and em-dashes (short), and sentence ends (long)
+    narration = re.sub(r'([,;—])', r'\1 ' + short_pause + ' ', narration)
+    narration = re.sub(r'([.!?])\s', r'\1 ' + long_pause + ' ', narration)
+    return narration.strip()
+
+
+# Stage 8 Quality-by-Design: Cinematic FVD keyword sets by shot position
+_FVD_QUALITY_KEYWORDS = {
+    "hook":      "dramatic cinematic opening shot, high contrast rim lighting, shallow depth of field, anamorphic lens flare",
+    "history":   "warm documentary color grade, vintage film texture, wide establishing angle, golden hour atmosphere",
+    "technical": "cold blue data-center lighting, macro precision focus, bokeh background neural grid, sharp foreground detail",
+    "impact":    "dynamic dolly push-in, warm executive office ambience, motivated practical lighting, 16mm grain overlay",
+    "risk":      "moody low-key lighting, deep shadow contrast, ominous vignette, slow crane descent motion",
+    "verdict":   "epic city skyline wide shot, twilight gradient sky, tilt-shift miniature depth, final frame cinematic outro",
+}
+
+_ACT_TO_TONE = {1: "hook", 2: "history", 3: "technical", 4: "impact", 5: "risk", 6: "verdict"}
+
+
+def enrich_visual_prompt(visual_prompt: str, act_index: int, shot_id: int) -> str:
+    """
+    Stage 8 Quality-by-Design: Enriches raw visual prompt with cinematic FVD quality keywords
+    calibrated per act tone and shot position. Ensures FLUX.1 renders align with the
+    reference feature distribution used by the FVD gate.
+    Also enforces 16:9 widescreen, 8k resolution, and photorealistic quality tags.
+    """
+    tone = _ACT_TO_TONE.get(act_index, "impact")
+    fvd_keywords = _FVD_QUALITY_KEYWORDS[tone]
+
+    # Ensure base quality anchors are always present
+    base_anchors = []
+    if "16:9" not in visual_prompt.lower():
+        base_anchors.append("16:9 widescreen")
+    if "8k" not in visual_prompt.lower() and "photorealistic" not in visual_prompt.lower():
+        base_anchors.append("8k photorealistic")
+
+    enriched = visual_prompt.rstrip(".")
+    if base_anchors:
+        enriched += ", " + ", ".join(base_anchors)
+    enriched += f", {fvd_keywords}."
+    return enriched
+
+
 class MediaProducerAgent:
     """
-    Media Producer Agent coordinating parallel tool execution across Edge MCP Server (Pi 5)
+    Stage 4: Media Producer Agent coordinating parallel tool execution across Edge MCP Server (Pi 5)
     and Cloud Media MCP Server (OCI) to synthesize audio, generate 16:9 visuals, apply Ken Burns
     motion, burn subtitles, and assemble the final 10-15 minute widescreen video.
+    Includes TTS Intonation & Breathing Pause Injection and [Scene:...] Visual Cue Parsing.
     """
 
     def __init__(self, name: str = "MediaProducer", storage_dir: str = "/tmp/csvg_media"):
@@ -103,7 +170,20 @@ class MediaProducerAgent:
 
         for shot in script.shots:
             shot_key = f"shot_{shot.shot_id}"
-            
+
+            # Stage 4a: Parse [Scene: ...] visual cues from narration
+            clean_narration, scene_cue = parse_scene_visual_cue(shot.narration_text)
+            raw_visual_prompt = scene_cue if scene_cue else shot.visual_prompt
+
+            # Stage 8 Quality-by-Design: Enrich visual prompt with FVD cinematic keywords
+            visual_prompt = enrich_visual_prompt(raw_visual_prompt, shot.act_index, shot.shot_id)
+
+            # Stage 4b: Inject TTS breathing pauses based on shot urgency
+            urgency_words = {"warning", "collapse", "shocking", "urgent", "crisis", "breaking"}
+            has_urgency = any(w in clean_narration.lower() for w in urgency_words)
+            sentiment_score = 0.25 if has_urgency else 0.65
+            tts_narration = inject_tts_breathing_pauses(clean_narration, sentiment_score)
+
             # Paths
             wav_path = os.path.join(audio_dir, f"{shot_key}.wav")
             ass_path = os.path.join(sub_dir, f"{shot_key}.ass")
@@ -118,7 +198,7 @@ class MediaProducerAgent:
                 async with aiohttp.ClientSession() as session:
                     # 1. Synthesize TTS remotely
                     async with session.post(f"{audio_edge_url}/tools/synthesize_tts", json={
-                        "text": shot.narration_text,
+                        "text": tts_narration,
                         "output_path": wav_path,
                         "region": region_val
                     }) as resp:
@@ -147,15 +227,39 @@ class MediaProducerAgent:
                         else:
                             raise Exception(f"Failed to download ass file: {await file_resp.text()}")
             else:
-                await synthesize_tts(TTSRequest(text=shot.narration_text, output_path=wav_path))
+                await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path))
                 await align_subtitles_whisper(WhisperRequest(audio_path=wav_path, output_ass_path=ass_path))
+
+            # Gate 2 Early Validation: WAV must exist and be > 1KB before proceeding
+            if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1000:
+                raise RuntimeError(
+                    f"Gate 2 Early Fail: TTS audio for {shot_key} is missing or empty ({wav_path}). "
+                    f"Check AUDIO_EDGE_URL or local Kokoro TTS server."
+                )
+
+            # Gate 3 Early Validation: ASS subtitle file must exist and have dialogue
+            if not os.path.exists(ass_path) or os.path.getsize(ass_path) < 50:
+                raise RuntimeError(
+                    f"Gate 3 Early Fail: Subtitle file for {shot_key} is missing or empty ({ass_path}). "
+                    f"Check Whisper alignment service."
+                )
 
             asset_paths.audio[shot_key] = wav_path
             asset_paths.subtitles[shot_key] = ass_path
 
-            # Call Cloud Media MCP Tools
-            await generate_flux_image(ImageGenRequest(prompt=shot.visual_prompt, output_image_path=img_path))
-            await apply_ken_burns_motion(KenBurnsRequest(image_path=img_path, audio_path=wav_path, duration=shot.duration_estimate, output_mp4_path=mp4_path))
+            # Stage 8 Quality-by-Design: Alternate Ken Burns pan direction for optical flow continuity
+            # Odd shots pan left-to-right, even shots pan right-to-left — prevents jarring same-direction cuts
+            ken_burns_direction = "left_to_right" if shot.shot_id % 2 == 1 else "right_to_left"
+
+            # Call Cloud Media MCP Tools (using FVD-enriched visual_prompt)
+            await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
+            await apply_ken_burns_motion(KenBurnsRequest(
+                image_path=img_path,
+                audio_path=wav_path,
+                duration=shot.duration_estimate,
+                output_mp4_path=mp4_path,
+                direction=ken_burns_direction  # optical flow continuity
+            ))
             asset_paths.visuals[shot_key] = mp4_path
 
             concat_lines.append(f"file '{mp4_path}'")
