@@ -138,6 +138,27 @@ $$\text{Revenue} = \text{Views} \times \left( \frac{\text{RPM}}{1000} \right) \t
 
 ---
 
+## 🚀 Architectural Upgrades (New)
+
+The pipeline has been upgraded with the following production-grade features:
+
+### 1. Federated RAG & Hallucination Defense
+* **Federated Multi-Engine Ingestion:** Integrates DuckDuckGo, NewsAPI, and Wikipedia into a unified search query planner.
+* **Anti-Slop Content Sanitizer:** Employs regex filters to eliminate promotional terms, advertising junk, and repetitive generic AI phrases from RAG context.
+* **TrumorGPT Auditor:** Fact-checks and scores raw claims before feeding them into the story generation engine to mitigate hallucinations.
+
+### 2. Multi-Stage Quality Gates & Verification
+To ensure premium channel status and protect against YouTube demonetization, the system runs 8 automated validation checks before and after publishing:
+* **Gate 1 (Topic-to-Script Coherence):** Uses TF-IDF cosine similarity to ensure script stays strictly on-topic, validating a target word count of $\ge 1,500$ words.
+* **Gate 2 (Script-to-TTS):** Checks wav files for completeness, duration, and empty speech.
+* **Gate 3 & 3b (Subtitle Alignment):** Verifies subtitle coverage across the entire video timeline and checks subtitle-to-script text alignment coherence.
+* **Gate 4 (Master Video Integrity):** Verifies resolution, frames, and video-audio stream alignment.
+* **Gate 5 (YouTube AI Disclosure Auto-Tagging):** Scans for photorealistic or synthetic humans, automatic voice, and realistic simulations, auto-tagging YouTube metadata with `syntheticContent` & `bInformed` compliant with 2025/2026 YouTube guidelines.
+* **Gate 6 (Anti-Slop Script Entropy Audit):** Measures Shannon Word Entropy, unique word ratio, sentence length variance, and minimum narration depth to prevent repetitive AI patterns.
+* **Stage 8 (Per-Shot Quality):** Audits visual fluidity using Frechet Video Distance (FVD) and optical flow metrics.
+
+---
+
 ## ⚙️ Installation & Deployment
 
 ### 1. Local Setup
@@ -159,9 +180,14 @@ cp .env.example .env
 
 ### 2. Running the Autonomous Pipeline
 
+You can run the pipeline directly or via the production wrapper which logs output to both standard output and files.
+
 ```bash
-# Run full autonomous pipeline (Live RSS, RAG, and Cloud Media)
-python3 main.py
+# Run via production wrapper (Recommended, logs output to logs/pipeline_run.log)
+./run_production.sh
+
+# Run manually
+python3 main.py --global
 
 # Offline Dry-Run Mode (Uses local synthetic media generators for zero-cost testing)
 python3 main.py --offline
@@ -170,22 +196,33 @@ python3 main.py --offline
 python3 run_tests.py
 ```
 
-### 3. Raspberry Pi 5 / Server Automation (4 Runs / Day)
+### 3. YouTube Video Quality & Sync Auditor
+You can audit already uploaded videos or generated videos for subtitle sync, speech drift, coherence, and relevance using the verifier script:
+
+```bash
+# Run post-production audit on a video
+python3 run_video_verifier.py <YOUTUBE_VIDEO_ID_OR_URL>
+```
+
+This retrieves standard/auto-generated transcripts, analyzes Whisper/subtitle timings, and generates a markdown report detailing any synchronization drifts, semantic coherence scores, and actionable fixes.
+
+### 4. Raspberry Pi 5 / Server Automation (4 Runs / Day)
 
 Add the following to your crontab (`crontab -e`) to execute the 4 daily publishing slots automatically:
 
 ```cron
-# CSVG Autonomous Publishing Schedule (UTC)
-30 1 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v1.log 2>&1
-30 6 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v2.log 2>&1
-30 10 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v3.log 2>&1
-30 14 * * * cd /opt/buzzdropfeedv2 && /opt/buzzdropfeedv2/venv/bin/python3 main.py >> /var/log/csvg_v4.log 2>&1
+# CSVG Autonomous Publishing Schedule (UTC) using production wrapper
+30 1 * * * cd /opt/buzzdropfeedv2 && ./run_production.sh >> /opt/buzzdropfeedv2/logs/cron_system.log 2>&1
+30 6 * * * cd /opt/buzzdropfeedv2 && ./run_production.sh >> /opt/buzzdropfeedv2/logs/cron_system.log 2>&1
+30 10 * * * cd /opt/buzzdropfeedv2 && ./run_production.sh >> /opt/buzzdropfeedv2/logs/cron_system.log 2>&1
+30 14 * * * cd /opt/buzzdropfeedv2 && ./run_production.sh >> /opt/buzzdropfeedv2/logs/cron_system.log 2>&1
 ```
 
 ---
 
 ## ⚖️ EU AI Act & YouTube Policy Compliance
 
-* **Synthetic Disclosure Tags:** `syntheticContent: true` and `bInformed: true` are injected automatically into YouTube upload metadata.
+* **Synthetic Disclosure Tags:** `syntheticContent: true` and `bInformed: true` are injected automatically into YouTube upload metadata when mandatory AI-generated triggers (such as photorealistic visual components or synthetic voices) are detected by **Gate 5**.
 * **Copyright Safety:** 100% freshly rendered AI visuals (Flux.1) + royalty-free CC0 ambient audio ensure zero copyright flags.
 * **Quota Guard:** Publisher checks API limits before uploading (max 4 uploads/day = 6,400 / 10,000 daily API units).
+

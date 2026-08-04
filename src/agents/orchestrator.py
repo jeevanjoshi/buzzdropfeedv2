@@ -1,7 +1,7 @@
 import uuid
 import datetime
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from src.schemas.state import GlobalState
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.agents.fact_retriever import FactRetrieverAgent

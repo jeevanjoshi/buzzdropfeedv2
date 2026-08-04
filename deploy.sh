@@ -9,9 +9,9 @@
 
 set -e
 
-PI5_IP="172.198.1.30"
-PI5_USER="pi"
-PI5_TARGET_DIR="/opt/csvg_edge"
+PI5_IP="192.168.1.30"
+PI5_USER="jeevanjoshi"
+PI5_TARGET_DIR="/home/jeevanjoshi/buzzdropfeedv2"
 
 OCI_HOST="oci-prod"
 OCI_TARGET_DIR="/opt/csvg_pipeline"

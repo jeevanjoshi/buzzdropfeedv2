@@ -176,6 +176,7 @@ class MediaProducerAgent:
             # Stage 4a: Parse [Scene: ...] visual cues from narration
             clean_narration, scene_cue = parse_scene_visual_cue(shot.narration_text)
             raw_visual_prompt = scene_cue if scene_cue else shot.visual_prompt
+            prompt_lower = raw_visual_prompt.lower()
 
             # Stage 8 Quality-by-Design: Enrich visual prompt with FVD cinematic keywords
             visual_prompt = enrich_visual_prompt(raw_visual_prompt, shot.act_index, shot.shot_id)

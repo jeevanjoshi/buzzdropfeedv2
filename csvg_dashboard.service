@@ -1,0 +1,14 @@
+[Unit]
+Description=CSVG Verification Dashboard Server
+After=network.target
+
+[Service]
+Type=simple
+User=jeevanjoshi
+WorkingDirectory=/home/jeevanjoshi/buzzdropfeedv2
+ExecStart=/usr/bin/python3 /home/jeevanjoshi/buzzdropfeedv2/dashboard_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

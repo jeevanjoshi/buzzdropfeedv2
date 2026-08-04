@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CSVG Pipeline Verification Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #0b0f19;
+      --panel-bg: rgba(20, 26, 46, 0.45);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --accent-blue: #3b82f6;
+      --accent-green: #10b981;
+      --accent-red: #ef4444;
+      --accent-purple: #8b5cf6;
+      --glow-shadow: 0 0 25px rgba(59, 130, 246, 0.2);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Outfit', sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      min-height: 100vh;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.05) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(139, 92, 246, 0.05) 0%, transparent 40%);
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 40px 20px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 40px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+    }
+
+    .logo-glow {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      box-shadow: 0 0 15px var(--accent-green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 0.6; box-shadow: 0 0 5px var(--accent-green); }
+      50% { opacity: 1; box-shadow: 0 0 20px var(--accent-green); }
+      100% { opacity: 0.6; box-shadow: 0 0 5px var(--accent-green); }
+    }
+
+    .logo-text h1 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, #fff 0%, #a5b4fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .logo-text p {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .system-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      padding: 8px 16px;
+      border-radius: 30px;
+      font-size: 14px;
+      font-weight: 500;
+      backdrop-filter: blur(10px);
+    }
+
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 30px;
+    }
+
+    .tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 10px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 500;
+      font-size: 15px;
+      transition: all 0.3s ease;
+    }
+
+    .tab-btn:hover {
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .tab-btn.active {
+      color: var(--text-main);
+      background: var(--panel-bg);
+      border-color: var(--panel-border);
+      box-shadow: var(--glow-shadow);
+    }
+
+    .tab-content {
+      display: none;
+      animation: fadeIn 0.4s ease forwards;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .grid-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+
+    .card {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      padding: 24px;
+      backdrop-filter: blur(12px);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(255, 255, 255, 0.15);
+      box-shadow: var(--glow-shadow);
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+
+    .card-value {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -1px;
+    }
+
+    .card-footer {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 3px;
+      margin-top: 15px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent-blue) 0%, var(--accent-purple) 100%);
+      border-radius: 3px;
+    }
+
+    .console-panel {
+      background: #060913;
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    .console-header {
+      background: rgba(255, 255, 255, 0.02);
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--panel-border);
+    }
+
+    .console-dots {
+      display: flex;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    .dot.red { background: var(--accent-red); }
+    .dot.yellow { background: #f59e0b; }
+    .dot.green { background: var(--accent-green); }
+
+    .console-title {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .console-body {
+      padding: 20px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #38bdf8;
+      max-height: 500px;
+      overflow-y: auto;
+      background: #020617;
+    }
+
+    .console-body pre {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .published-list {
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+
+    .published-item {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: all 0.2s ease;
+    }
+
+    .published-item:hover {
+      border-color: rgba(255,255,255,0.12);
+      transform: translateX(3px);
+    }
+
+    .published-info h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .published-meta {
+      font-size: 13px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 15px;
+    }
+
+    .badge {
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-blue { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-green { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+
+    .btn-action {
+      background: var(--accent-red);
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: opacity 0.2s;
+    }
+
+    .btn-action:hover {
+      opacity: 0.9;
+    }
+
+    .btn-refresh {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--panel-border);
+      color: var(--text-main);
+      padding: 8px 16px;
+      border-radius: 30px;
+      font-size: 13px;
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .btn-refresh:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo-container">
+        <div class="logo-glow" id="statusGlow"></div>
+        <div class="logo-text">
+          <h1>CSVG Edge</h1>
+          <p>Local Raspberry Pi 5 Verification Portal</p>
+        </div>
+      </div>
+      <div style="display: flex; gap: 15px; align-items: center;">
+        <button class="btn-refresh" onclick="reloadData()">
+          <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.753 8H17"></path></svg>
+          Refresh
+        </button>
+        <div class="system-status" id="statusLabel">
+          Connecting...
+        </div>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('overview')">Overview & Metrics</button>
+      <button class="tab-btn" onclick="switchTab('logs')">Live Run Logs</button>
+      <button class="tab-btn" onclick="switchTab('published')">Published Stories</button>
+    </div>
+
+    <!-- Overview Tab -->
+    <div id="overview" class="tab-content active">
+      <div class="grid-stats">
+        <div class="card">
+          <div class="card-title">Channel Niche / Phase</div>
+          <div class="card-value" id="statPhase">-</div>
+          <div class="card-footer" id="statPhaseText">Analyzing YouTube Performance...</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Subscribers</div>
+          <div class="card-value" id="statSubs">0</div>
+          <div class="card-footer">Target: 1,000 for YPP</div>
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="subsBar" style="width: 0%"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">Watch Hours</div>
+          <div class="card-value" id="statWatchHours">0.0h</div>
+          <div class="card-footer">Target: 4,000 hours</div>
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="watchBar" style="width: 0%"></div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="console-panel" style="margin-top: 30px;">
+        <div class="console-header">
+          <div class="console-dots">
+            <div class="dot red"></div>
+            <div class="dot yellow"></div>
+            <div class="dot green"></div>
+          </div>
+          <div class="console-title">csvg_execution.log</div>
+        </div>
+        <div class="console-body" style="max-height: 250px;">
+          <pre id="recentLogsPre">Loading execution events...</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Logs Tab -->
+    <div id="logs" class="tab-content">
+      <div class="console-panel">
+        <div class="console-header">
+          <div class="console-dots">
+            <div class="dot red"></div>
+            <div class="dot yellow"></div>
+            <div class="dot green"></div>
+          </div>
+          <div class="console-title">pipeline_run.log</div>
+        </div>
+        <div class="console-body" id="consoleBody">
+          <pre id="rawLogsPre">Loading pipeline execution logs...</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Published Tab -->
+    <div id="published" class="tab-content">
+      <div class="published-list" id="publishedContainer">
+        <div style="text-align: center; color: var(--text-muted); padding: 40px;">
+          Loading published video list...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+      
+      event.currentTarget.classList.add('active');
+      document.getElementById(tabId).classList.add('active');
+    }
+
+    async function reloadData() {
+      try {
+        const statusRes = await fetch('/api/status');
+        const statusData = await statusRes.json();
+        
+        // Update status UI
+        const statusLabel = document.getElementById('statusLabel');
+        const statusGlow = document.getElementById('statusGlow');
+        if (statusData.is_running) {
+          statusLabel.innerHTML = '● Pipeline Running';
+          statusLabel.style.color = '#10b981';
+          statusGlow.style.background = '#10b981';
+          statusGlow.style.boxShadow = '0 0 15px #10b981';
+        } else {
+          statusLabel.innerHTML = '● Pipeline Idle';
+          statusLabel.style.color = '#9ca3af';
+          statusGlow.style.background = '#3b82f6';
+          statusGlow.style.boxShadow = '0 0 15px #3b82f6';
+        }
+
+        const stats = statusData.channel_stats;
+        if (stats) {
+          document.getElementById('statPhase').innerText = stats.channel_phase || 'GROWTH';
+          document.getElementById('statSubs').innerText = (stats.subscribers || 0).toLocaleString();
+          document.getElementById('statWatchHours').innerText = (stats.total_watch_hours || 0).toFixed(1) + 'h';
+          
+          // Progress bars
+          const subsPct = Math.min(100, ((stats.subscribers || 0) / 1000) * 100);
+          const watchPct = Math.min(100, ((stats.total_watch_hours || 0) / 4000) * 100);
+          document.getElementById('subsBar').style.width = subsPct + '%';
+          document.getElementById('watchBar').style.width = watchPct + '%';
+          
+          document.getElementById('statPhaseText').innerText = stats.ypp_unlocked ? 'Monetization Active' : 'Unlocking Partner Program';
+        }
+
+        // Load Logs
+        const logsRes = await fetch('/api/logs');
+        const logsData = await logsRes.json();
+        document.getElementById('rawLogsPre').innerText = logsData.raw_logs || 'No execution logs found.';
+        
+        // Populate recent structured logs
+        const recentLogsPre = document.getElementById('recentLogsPre');
+        if (logsData.structured_logs && logsData.structured_logs.length > 0) {
+          recentLogsPre.innerText = logsData.structured_logs.map(log => 
+            `[${log.timestamp.slice(11, 19)}] [${log.level}] [${log.stage}] ${log.message}`
+          ).join('\n');
+        } else {
+          recentLogsPre.innerText = 'No system events found.';
+        }
+
+        // Load Published
+        const pubRes = await fetch('/api/published');
+        const pubData = await pubRes.json();
+        const pubContainer = document.getElementById('publishedContainer');
+        
+        if (pubData && pubData.length > 0) {
+          pubContainer.innerHTML = pubData.reverse().map(pub => {
+            const dateStr = pub.timestamp ? new Date(pub.timestamp).toLocaleString() : 'N/A';
+            return `
+              <div class="published-item">
+                <div class="published-info">
+                  <h3>${pub.headline || pub.topic || 'Untitled video'}</h3>
+                  <div class="published-meta">
+                    <span>📅 ${dateStr}</span>
+                    <span>📈 TOPSIS: <strong>${(pub.topsis_score || 0).toFixed(4)}</strong></span>
+                    <span class="badge ${pub.published ? 'badge-green' : 'badge-blue'}">${pub.published ? 'Published' : 'Generated'}</span>
+                  </div>
+                </div>
+                ${pub.video_id ? `
+                  <a href="https://www.youtube.com/watch?v=${pub.video_id}" target="_blank" class="btn-action">
+                    <svg style="width: 16px; height: 16px;" fill="currentColor" viewBox="0 0 24 24"><path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.11C19.518 3.545 12 3.545 12 3.545s-7.518 0-9.388.508a3.003 3.003 0 0 0-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 0 0 2.11 2.11c1.87.508 9.388.508 9.388.508s7.518 0 9.388-.508a3.003 3.003 0 0 0 2.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+                    Watch
+                  </a>
+                ` : ''}
+              </div>
+            `;
+          }).join('');
+        } else {
+          pubContainer.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 40px;">No published videos detected yet.</div>';
+        }
+      } catch (err) {
+        console.error(err);
+        document.getElementById('statusLabel').innerHTML = '⚠️ Fetch Error';
+        document.getElementById('statusLabel').style.color = '#ef4444';
+      }
+    }
+
+    // Auto load & poll every 10 seconds
+    reloadData();
+    setInterval(reloadData, 10000);
+  </script>
+</body>
+</html>
