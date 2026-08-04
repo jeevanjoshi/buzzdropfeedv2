@@ -88,8 +88,11 @@ async def synthesize_tts(req: TTSRequest):
             from kokoro_onnx import Kokoro
             import soundfile as sf
             
-            if os.path.exists("kokoro-v0.19.onnx") and os.path.exists("voices.bin"):
-                kokoro = Kokoro("kokoro-v0.19.onnx", "voices.bin")
+            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+            kokoro_path = os.path.join(base_dir, "kokoro-v0.19.onnx")
+            voices_path = os.path.join(base_dir, "voices.bin")
+            if os.path.exists(kokoro_path) and os.path.exists(voices_path):
+                kokoro = Kokoro(kokoro_path, voices_path)
                 samples, sample_rate = kokoro.create(clean_text, voice=selected_voice, speed=1.0, lang="en-us")
                 sf.write(req.output_path, samples, sample_rate)
                 return {"status": "success", "engine": "kokoro_onnx", "path": req.output_path, "voice": selected_voice}

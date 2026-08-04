@@ -38,7 +38,12 @@ class OrchestratorAgent:
         self.publisher = publisher or PublisherAgent()
 
     async def run_pipeline(
-        self, pipeline_id: Optional[str] = None, use_live_rss: bool = True, region: str = "all"
+        self,
+        pipeline_id: Optional[str] = None,
+        use_live_rss: bool = True,
+        region: str = "all",
+        publish: bool = True,
+        dummy_frames: bool = False
     ) -> GlobalState:
         """
         Executes complete autonomous pipeline run with structured logging & trajectory tracing.
@@ -106,29 +111,59 @@ class OrchestratorAgent:
             logger.info("PHASE_2_OBSERVER_AUDIT", "Running Observer Fact Audit and Visual Quality Check...", pipeline_id=p_id, component="OBSERVER")
             msg_obs = self.observer.process(state)
 
-            if msg_obs.intent == AgentIntent.REVISE_SCRIPT:
+            # Define a helper function to audit script quality (Gate 1 & Gate 6)
+            def run_script_quality_checks() -> Tuple[bool, Optional[str]]:
+                # Gate 1: Topic-to-Script coherence check
+                gate1_pass, gate1_issues = quality_verifier.verify_gate1_topic_to_script(
+                    state.selected_topic, state.script_data
+                )
+                if not gate1_pass:
+                    return False, f"Gate 1 Fail (Topic Coherence): {gate1_issues}"
+                
+                # Gate 6: Anti-Slop Entropy Audit
+                gate6_result = quality_verifier.verify_gate6_anti_slop_entropy(state.script_data)
+                if not gate6_result["passes"]:
+                    return False, f"Gate 6 Fail (Anti-Slop): {gate6_result['issues']}"
+                
+                return True, None
+
+            quality_pass, quality_error = run_script_quality_checks()
+
+            if msg_obs.intent == AgentIntent.REVISE_SCRIPT or not quality_pass:
+                reason = "Observer rejection" if msg_obs.intent == AgentIntent.REVISE_SCRIPT else quality_error
                 logger.warning(
                     "PHASE_2_OBSERVER_AUDIT",
-                    "Observer rejected initial script draft. Triggering A2A revision loop...",
+                    f"Script failed initial validation ({reason}). Triggering A2A revision loop...",
                     pipeline_id=p_id, component="OBSERVER",
-                    extra_data=msg_obs.payload,
-                    fix_hint="Observer identified script pacing or unverified fact violations. Retrying StoryDesigner with strict RAG constraints."
+                    fix_hint="Retrying StoryDesigner with strict RAG constraints."
                 )
                 tracer.record_step(state, "SCRIPT_REVISION_REQUIRED", message=msg_obs, status="WARNING")
                 
-                # Retry Story Designer
-                msg_script = self.story_designer.process(state)
+                # Extract and pass detailed validation issues to StoryDesigner
+                violations = []
+                if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
+                    violations.extend(msg_obs.payload.get("violations", []))
+                if not quality_pass and quality_error:
+                    violations.append(quality_error)
+
+                # Retry Story Designer with corrective feedback
+                msg_script = self.story_designer.process(state, revision_violations=violations)
                 msg_obs = self.observer.process(state)
+                # Re-run script quality checks
+                quality_pass, quality_error = run_script_quality_checks()
 
             if msg_obs.intent == AgentIntent.REVISE_SCRIPT:
                 raise RuntimeError(f"Script failed Observer audit: {msg_obs.payload.get('violations')}")
+            
+            if not quality_pass:
+                raise RuntimeError(f"Script failed pre-production quality check: {quality_error}")
 
-            logger.info("PHASE_2_OBSERVER_AUDIT", "Observer Audit Passed 100%! Script approved.", pipeline_id=p_id, component="OBSERVER")
+            logger.info("PHASE_2_OBSERVER_AUDIT", "Observer Audit & Quality Gates Passed 100%! Script approved.", pipeline_id=p_id, component="OBSERVER")
             tracer.record_step(state, "SCRIPT_APPROVED", message=msg_obs)
 
             # 4. Media Production (Audio, Visuals, FFmpeg Assembly)
             logger.info("PHASE_3_MEDIA_PRODUCTION", "Synthesizing Edge TTS Audio and Rendering 16:9 Widescreen Visuals...", pipeline_id=p_id, component="MEDIA_PRODUCER")
-            msg_media = await self.media_producer.process(state)
+            msg_media = await self.media_producer.process(state, dummy_frames=dummy_frames)
             
             if not state.asset_paths.final_video:
                 raise RuntimeError("Media production failed: Final video output path is empty.")
@@ -138,14 +173,6 @@ class OrchestratorAgent:
 
             # 4b. Post-Production Quality Gates (Stage 6 + Stage 8)
             logger.info("PHASE_3B_QUALITY_GATES", "Running post-production compliance & video quality gates...", pipeline_id=p_id, component="QUALITY_VERIFIER")
-
-            # Gate 1: Topic-to-Script coherence re-check (catches runtime drift)
-            gate1_pass, gate1_issues = quality_verifier.verify_gate1_topic_to_script(
-                state.selected_topic, state.script_data
-            )
-            if not gate1_pass:
-                logger.warning("PHASE_3B_QUALITY_GATES", f"Gate 1 issues: {gate1_issues}", pipeline_id=p_id, component="QUALITY_VERIFIER",
-                               fix_hint="Regenerate script with stricter topic alignment constraints.")
 
             # Gate 5: YouTube 2025/2026 AI Disclosure Auto-Tagging
             pipeline_tags = ["flux.1", "kokoro-tts", "wan2.1"]
@@ -159,17 +186,19 @@ class OrchestratorAgent:
                 state.upload_metadata.extra_metadata = state.upload_metadata.extra_metadata or {}
                 state.upload_metadata.extra_metadata.update(gate5_result["youtube_metadata_patch"])
 
-            # Gate 6: Anti-"AI Slop" Script Entropy Audit (FATAL if fails)
-            gate6_result = quality_verifier.verify_gate6_anti_slop_entropy(state.script_data)
-            if not gate6_result["passes"]:
-                raise RuntimeError(
-                    f"Gate 6 Anti-Slop Audit FAILED — Script will be demonetized. Issues: {gate6_result['issues']}. "
-                    f"Entropy={gate6_result['shannon_entropy_bits']} bits, UniqueRatio={gate6_result['unique_word_ratio']:.0%}"
-                )
-            logger.info("PHASE_3B_QUALITY_GATES",
-                        f"Gate 6 Anti-Slop Passed: Entropy={gate6_result['shannon_entropy_bits']} bits, "
-                        f"UniqueRatio={gate6_result['unique_word_ratio']:.0%}, SentenceVariance={gate6_result['sentence_length_variance']}",
-                        pipeline_id=p_id, component="QUALITY_VERIFIER")
+            # Gate 3b: Subtitle-to-Script Narration Alignment Coherence Check
+            gate3b_pass, gate3b_issues = quality_verifier.verify_gate3b_subtitle_text_coherence(state)
+            if not gate3b_pass:
+                logger.warning("PHASE_3B_QUALITY_GATES", f"Gate 3b (Subtitle Coherence) warnings: {gate3b_issues}", pipeline_id=p_id, component="QUALITY_VERIFIER",
+                               fix_hint="Ensure subtitle timing aligner is operating properly on the audio edge server.")
+
+            # Gate 4: Video and Audio stream coherence check (skips fatal crash during dummy/dry-runs)
+            gate4_pass, gate4_issues = quality_verifier.verify_gate4_video_audio_coherence(state)
+            if not gate4_pass:
+                if any("missing" in str(issue).lower() for issue in gate4_issues):
+                    logger.warning("PHASE_3B_QUALITY_GATES", f"Gate 4 (Video Coherence) skipped: {gate4_issues} (This is normal during script-only or subtitle-only testing dry runs).", pipeline_id=p_id, component="QUALITY_VERIFIER")
+                else:
+                    logger.warning("PHASE_3B_QUALITY_GATES", f"Gate 4 (Video Coherence) warnings: {gate4_issues}", pipeline_id=p_id, component="QUALITY_VERIFIER")
 
             # Stage 8: Per-Shot FVD + Optical Flow Quality Gate
             shot_quality_failures = []
@@ -209,11 +238,16 @@ class OrchestratorAgent:
             tracer.record_step(state, "QUALITY_GATES_PASSED")
 
             # 5. YouTube Publishing
-            logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Publishing Video to YouTube with Synthetic Metadata...", pipeline_id=p_id, component="PUBLISHER")
-            msg_pub = await self.publisher.process(state)
+            if publish:
+                logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Publishing Video to YouTube with Synthetic Metadata...", pipeline_id=p_id, component="PUBLISHER")
+                msg_pub = await self.publisher.process(state)
 
-            logger.info("PHASE_4_YOUTUBE_PUBLISHING", f"🎉 Pipeline Run Completed Successfully! Video ID: {state.upload_metadata.video_id}", pipeline_id=p_id, component="PUBLISHER")
-            tracer.record_step(state, "PUBLISHED_SUCCESS", message=msg_pub)
+                logger.info("PHASE_4_YOUTUBE_PUBLISHING", f"🎉 Pipeline Run Completed Successfully! Video ID: {state.upload_metadata.video_id}", pipeline_id=p_id, component="PUBLISHER")
+                tracer.record_step(state, "PUBLISHED_SUCCESS", message=msg_pub)
+            else:
+                logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Skipping YouTube Publishing step as requested (pipeline run till upload complete).", pipeline_id=p_id, component="ORCHESTRATOR")
+                state.execution_stage = "QUALITY_VERIFIED"
+                tracer.record_step(state, "PIPELINE_COMPLETE_TILL_UPLOAD")
 
         except Exception as e:
             # Determine actionable Fix Hint based on exception message

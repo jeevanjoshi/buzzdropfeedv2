@@ -88,7 +88,7 @@ class LLMClient:
             if not self.is_llama_cpp_available():
                 return None
             try:
-                timeout = int(os.getenv("LLAMA_CPP_TIMEOUT", "60"))
+                timeout = int(os.getenv("LLAMA_CPP_TIMEOUT", "300"))
                 print(f"[LLMClient] Invoking Local llama.cpp server ({self.llama_cpp_url})...")
                 
                 # 1. Try OpenAI-compatible chat completions endpoint first
@@ -102,11 +102,18 @@ class LLMClient:
                     "temperature": 0.7
                 }
                 res = requests.post(url, json=payload, timeout=timeout)
+                print(f"[LLMClient] Local v1/chat/completions response status: {res.status_code}")
                 if res.status_code == 200:
                     content = res.json()["choices"][0]["message"]["content"]
+                    print(f"[LLMClient] Local v1/chat/completions content length: {len(content)}")
                     parsed = self._clean_and_parse_json(content)
                     if parsed is not None:
+                        print(f"[LLMClient] Successfully parsed JSON from chat completions.")
                         return parsed
+                    else:
+                        print(f"[LLMClient] Failed to parse JSON from chat completions. Raw content starts with: {content[:150]}")
+                else:
+                    print(f"[LLMClient] Local v1/chat/completions error body: {res.text}")
 
                 # 2. Fallback to llama-server native /completion endpoint
                 url_native = f"{self.llama_cpp_url}/completion"
@@ -116,11 +123,18 @@ class LLMClient:
                     "temperature": 0.7
                 }
                 res_native = requests.post(url_native, json=payload_native, timeout=timeout)
+                print(f"[LLMClient] Local /completion response status: {res_native.status_code}")
                 if res_native.status_code == 200:
                     content = res_native.json().get("content", "")
+                    print(f"[LLMClient] Local /completion content length: {len(content)}")
                     parsed = self._clean_and_parse_json(content)
                     if parsed is not None:
+                        print(f"[LLMClient] Successfully parsed JSON from native completion.")
                         return parsed
+                    else:
+                        print(f"[LLMClient] Failed to parse JSON from native completion. Raw content starts with: {content[:150]}")
+                else:
+                    print(f"[LLMClient] Local /completion error body: {res_native.text}")
             except Exception as e:
                 print(f"[LLMClient] Local llama.cpp Exception: {e}")
             return None

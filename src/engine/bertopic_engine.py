@@ -1,6 +1,8 @@
 import re
 import math
 from typing import List, Dict, Any, Tuple
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
 
 
 class BERTopicEngine:
@@ -38,16 +40,39 @@ class BERTopicEngine:
     def extract_chapter_outlines(self, rag_text_corpus: str, headline: str) -> List[Dict[str, Any]]:
         """
         Processes a GraphRAG research corpus into a structured, thematic chapter outline.
+        Uses TF-IDF Vectorization and KMeans clustering to group paragraphs semantically.
         """
         paragraphs = [p.strip() for p in re.split(r'\n+', rag_text_corpus) if len(p.strip()) > 40]
         if not paragraphs:
             paragraphs = [headline, rag_text_corpus]
 
-        # Group paragraphs into 3-5 thematic dense clusters
-        cluster_size = max(1, math.ceil(len(paragraphs) / self.top_k_topics))
-        clusters: List[List[str]] = []
-        for i in range(0, len(paragraphs), cluster_size):
-            clusters.append(paragraphs[i:i + cluster_size])
+        n_clusters = min(self.top_k_topics, len(paragraphs))
+        clusters: List[List[str]] = [[] for _ in range(n_clusters)]
+
+        if n_clusters > 1:
+            try:
+                # 1. Transform paragraphs to TF-IDF vector space
+                vectorizer = TfidfVectorizer(stop_words='english')
+                X = vectorizer.fit_transform(paragraphs)
+
+                # 2. Cluster paragraphs using KMeans
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init='auto')
+                labels = kmeans.fit_predict(X)
+
+                # 3. Group paragraphs by their assigned cluster label
+                for doc, label in zip(paragraphs, labels):
+                    clusters[label].append(doc)
+            except Exception:
+                # Fallback to sequential grouping if clustering fails
+                cluster_size = max(1, math.ceil(len(paragraphs) / n_clusters))
+                clusters = []
+                for i in range(0, len(paragraphs), cluster_size):
+                    clusters.append(paragraphs[i:i + cluster_size])
+        else:
+            clusters[0] = paragraphs
+
+        # Filter out empty clusters (just in case KMeans produced empty groups)
+        clusters = [c for c in clusters if c]
 
         chapters: List[Dict[str, Any]] = []
         for idx, cluster in enumerate(clusters[:self.top_k_topics]):

@@ -2,6 +2,8 @@ import json
 import urllib.request
 import urllib.parse
 import re
+import os
+import html
 from typing import Dict, Any, List, Tuple, Set
 from src.schemas.state import TopicCandidate, VerifiedFact
 
@@ -43,14 +45,83 @@ class RAGTopicRetriever:
             snippets = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', html, re.DOTALL)
             titles = re.findall(r'<a class="result__title[^>]*>(.*?)</a>', html, re.DOTALL)
 
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.metrics.pairwise import cosine_similarity
+
+            ad_pattern = re.compile(
+                r'\b(sign\s?up|subscribe|register|join\s?now|click\s?here|get\s?started|'
+                r'free\s?trial|pricing\s?plan|price|coupon|discount|promo|checkout|'
+                r'buy\s?now|add\s?to\s?cart|shop|store|order\s?now|affiliate|sponsor|advertisement|marketing)\b',
+                re.IGNORECASE
+            )
+
             for i in range(min(len(snippets), max_results)):
                 clean_snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip()
                 clean_title = re.sub(r'<[^>]+>', '', titles[i] if i < len(titles) else "").strip()
                 if len(clean_snippet) > 30:
-                    results.append({"title": clean_title, "snippet": clean_snippet})
+                    combined_text = f"{clean_title} {clean_snippet}"
+                    if ad_pattern.search(combined_text):
+                        continue
+
+                    try:
+                        vectorizer = TfidfVectorizer(stop_words='english')
+                        tfidf_matrix = vectorizer.fit_transform([query, combined_text])
+                        sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+                    except Exception:
+                        sim = 0.0
+
+                    if sim > 0.08:
+                        results.append({"title": clean_title, "snippet": clean_snippet})
         except Exception as e:
             print(f"[RAGRetriever] Search Warning: {e}")
 
+        return results
+
+    def search_newsapi_facts(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
+        """
+        Executes a NewsAPI query to retrieve structured global news snippets.
+        """
+        results = []
+        api_key = os.getenv("NEWSAPI_KEY")
+        if not api_key:
+            return results
+        try:
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://newsapi.org/v2/everything?q={encoded_query}&pageSize={max_results}&apiKey={api_key}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8', errors='ignore'))
+                articles = data.get("articles", [])
+                for a in articles:
+                    title = a.get("title", "")
+                    desc = a.get("description", "")
+                    if desc and len(desc) > 30:
+                        results.append({"title": title, "snippet": desc})
+        except Exception as e:
+            print(f"[RAGRetriever] NewsAPI Warning: {e}")
+        return results
+
+    def search_wikipedia_facts(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
+        """
+        Executes a Wikipedia Query API search to extract clean historical/factual snippets.
+        """
+        results = []
+        try:
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded_query}&utf8=&format=json"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8', errors='ignore'))
+                search_results = data.get("query", {}).get("search", [])
+                for item in search_results[:max_results]:
+                    title = item.get("title", "")
+                    snippet = item.get("snippet", "")
+                    clean_snippet = re.sub(r'<[^>]+>', '', snippet)
+                    clean_snippet = html.unescape(clean_snippet)
+                    if len(clean_snippet) > 30:
+                        results.append({"title": title, "snippet": clean_snippet})
+        except Exception as e:
+            print(f"[RAGRetriever] Wikipedia Warning: {e}")
         return results
 
     def extract_graph_triplets(self, text: str) -> List[Tuple[str, str, str]]:
@@ -166,12 +237,55 @@ class RAGTopicRetriever:
 
         retrieved_facts = []
         all_text_corpus = summary + " " + ground_truth_block
+
+        from src.engine.external_apis import external_api_manager
+
         for q in search_queries:
-            items = self.search_duckduckgo_facts(q, max_results=3)
-            for item in items:
-                snippet_text = item['snippet']
-                retrieved_facts.append(f"• [{item['title']}]: {snippet_text}")
-                all_text_corpus += " " + snippet_text
+            has_api_data = False
+            
+            # 1. Fetch from Exa AI (Neural Search)
+            try:
+                facts = external_api_manager.fetch_exa_semantic_facts(q)
+                if facts:
+                    for f in facts:
+                        retrieved_facts.append(f"• [Exa: {f.headline}]: {f.summary}")
+                        all_text_corpus += " " + f.summary
+                    has_api_data = True
+            except Exception as e:
+                print(f"[RAGRetriever] Exa query failed: {e}")
+
+            # 2. Fetch from NewsAPI (Global News)
+            try:
+                items = self.search_newsapi_facts(q, max_results=2)
+                if items:
+                    for item in items:
+                        retrieved_facts.append(f"• [NewsAPI: {item['title']}]: {item['snippet']}")
+                        all_text_corpus += " " + item['snippet']
+                    has_api_data = True
+            except Exception as e:
+                print(f"[RAGRetriever] NewsAPI query failed: {e}")
+
+            # 3. Fetch from Wikipedia (Academic Grounding)
+            try:
+                items = self.search_wikipedia_facts(q, max_results=2)
+                if items:
+                    for item in items:
+                        retrieved_facts.append(f"• [Wikipedia: {item['title']}]: {item['snippet']}")
+                        all_text_corpus += " " + item['snippet']
+                    has_api_data = True
+            except Exception as e:
+                print(f"[RAGRetriever] Wikipedia query failed: {e}")
+
+            # 4. Fallback to DuckDuckGo if no API data was retrieved at all
+            if not has_api_data:
+                try:
+                    items = self.search_duckduckgo_facts(q, max_results=3)
+                    for item in items:
+                        snippet_text = item['snippet']
+                        retrieved_facts.append(f"• [DDG: {item['title']}]: {snippet_text}")
+                        all_text_corpus += " " + snippet_text
+                except Exception as e:
+                    print(f"[RAGRetriever] DuckDuckGo query failed: {e}")
 
         # 1. GraphRAG Triplet Extraction & In-Memory Graph Indexing
         triplets = self.extract_graph_triplets(all_text_corpus)

@@ -3,7 +3,7 @@ import uuid
 import datetime
 import re
 from typing import List, Dict, Any, Optional
-from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact, SEOMetadata
+from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact, SEOMetadata, VisualType
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.llm_client import LLMClient
 from src.engine.rag_retriever import rag_retriever
@@ -42,7 +42,7 @@ class StoryDesignerAgent:
         }
 
     def generate_6act_script(
-        self, topic: TopicCandidate, verified_facts: List[VerifiedFact], region: str = "all", target_shots: int = 15
+        self, topic: TopicCandidate, verified_facts: List[VerifiedFact], region: str = "all", target_shots: int = 15, revision_violations: Optional[List[str]] = None
     ) -> ScriptData:
         """
         Expands the topic candidate into a 6-Act dramatic narrative script using RAG fact retrieval.
@@ -93,6 +93,19 @@ class StoryDesignerAgent:
             
             FULL RAG KNOWLEDGE PACK (RETRIEVED DEEP FACTS & CONTEXT):
             {rag_context_text}
+            """
+
+            if revision_violations:
+                violations_str = "\n".join(f"- {v}" for v in revision_violations)
+                prompt += f"""
+
+            ⚠️ CRITICAL REVISION INSTRUCTION:
+            The previous draft of the script failed quality/factual/anti-slop validation. 
+            You MUST correct the following violations in this new script draft:
+            {violations_str}
+            """
+
+            prompt += """
 
             Requirements:
             1. Exactly 15 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict).
@@ -102,6 +115,11 @@ class StoryDesignerAgent:
                - "act_index": integer 1 to 6
                - "narration_text": string of 115-130 words deeply explaining facts from the RAG pack
                - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
+               - "visual_type": string classification of the visual format. Choose EXACTLY one of:
+                 * "standard_image" (default photorealistic cinematic scenes)
+                 * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
+                 * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
+                 * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
             4. Spoken Attribution: Dynamically cite '{trusted_org}' when presenting core figures.
             5. Strict Temporal Grounding: Frame developments within {current_month_year}.
             6. LINGUISTIC DIVERSITY (Anti-Slop): Each shot must use DIFFERENT sentence structures, vocabulary, and rhetorical devices. Vary between: declarative statements, rhetorical questions, data-led assertions, expert quotes, and narrative storytelling. NEVER repeat opening sentence patterns across shots.
@@ -114,6 +132,7 @@ class StoryDesignerAgent:
                 "declarative, interrogative, statistical, narrative, and analytical voices must alternate across shots. "
                 "(2) NEVER start two consecutive shots with the same subject or phrase. "
                 "(3) Visual prompts must each describe a UNIQUE camera angle, location, and lighting. "
+                "(4) Explicitly select the optimal visual_type for each shot. "
                 "Return valid JSON only."
             )
             llm_result = self.llm_client.generate_json(prompt, system_prompt)
@@ -127,6 +146,10 @@ class StoryDesignerAgent:
                         narr = s.get("narration_text") or s.get("narration") or s.get("script") or ""
                         vis = s.get("visual_prompt") or s.get("visual") or s.get("prompt") or f"Cinematic 16:9 widescreen visual for {headline}, 8k photorealistic."
                         
+                        v_type_raw = s.get("visual_type") or "standard_image"
+                        if v_type_raw not in ["standard_image", "gif_meme", "matplotlib_chart", "svg_ticker"]:
+                            v_type_raw = "standard_image"
+                        
                         # Enrich short narration with RAG facts instead of static repetition
                         if len(narr.split()) < 110:
                             narr += f" According to verified analysis from {trusted_org} published in {current_month_year}, these developments mark a key milestone in {category}. Understanding the broader systemic consequences allows researchers and audience members to navigate upcoming shifts with evidence-based insight."
@@ -136,6 +159,7 @@ class StoryDesignerAgent:
                             act_index=int(act_idx),
                             narration_text=narr,
                             visual_prompt=vis,
+                            visual_type=VisualType(v_type_raw),
                             duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1))
                         ))
 
@@ -390,7 +414,7 @@ class StoryDesignerAgent:
             ]
         )
 
-    def process(self, state: GlobalState, region: str = "all") -> A2AMessage:
+    def process(self, state: GlobalState, region: str = "all", revision_violations: Optional[List[str]] = None) -> A2AMessage:
         """
         Executes Story Designer workflow:
         1. Reads selected topic and verified_facts from GlobalState
@@ -402,7 +426,7 @@ class StoryDesignerAgent:
         if not state.selected_topic:
             raise ValueError("Cannot generate script: state.selected_topic is None")
 
-        script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region)
+        script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region, revision_violations=revision_violations)
         state.script_data = script
         state.seo_metadata = self.generate_seo_metadata(state.selected_topic, script)
         state.execution_stage = "SCRIPT_GENERATED"

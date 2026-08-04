@@ -70,11 +70,20 @@ class TopicCandidate(BaseModel):
     niche_category: str = Field(default="Technology & Artificial Intelligence", description="High-RPM niche label")
 
 
+from enum import Enum
+
+class VisualType(str, Enum):
+    STANDARD_IMAGE = "standard_image"      # Flux.1 image with Ken Burns pan
+    GIF_MEME = "gif_meme"                  # Reaction meme search from GIPHY/Tenor
+    MATPLOTLIB_CHART = "matplotlib_chart"  # Dynamic dark-mode line/bar chart
+    SVG_TICKER = "svg_ticker"              # Glowing stock ticker/counter
+
 class ShotData(BaseModel):
     shot_id: int
     act_index: int = Field(..., ge=1, le=6, description="Act 1 to 6 in 6-Act dramatic model")
     narration_text: str = Field(..., description="Narration text (max 20 words per sub-chunk)")
     visual_prompt: str = Field(..., description="16:9 cinematic visual prompt")
+    visual_type: VisualType = Field(default=VisualType.STANDARD_IMAGE, description="Visual format type to generate")
     duration_estimate: float = Field(default=5.0, description="Estimated duration in seconds")
 
 

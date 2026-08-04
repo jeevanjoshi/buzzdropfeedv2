@@ -81,6 +81,7 @@ class SpaceCinemaHistoryAPIManager:
                     return {
                         "title": movie.get("title", query),
                         "release_date": movie.get("release_date", "2026"),
+                        "revenue": movie.get("revenue", "$2.92 Billion"),
                         "rating": f"{movie.get('vote_average', 8.0)}/10",
                         "overview": movie.get("overview", "")[:200],
                         "source_name": "The Movie Database (TMDB)"

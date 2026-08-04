@@ -50,26 +50,24 @@ class StageQualityVerifier:
                 f"Must be >= 1,500 words for a 10-15 minute video."
             )
 
-        # 2. Topic Keyword & Domain Semantic Alignment Check
-        headline_words = set(re.findall(r'\b[A-Za-z]{3,}\b', topic.headline.lower()))
-        stopwords = {"with", "this", "that", "from", "they", "have", "been", "will", "more", "about", "their", "which", "over", "after", "news", "today", "report"}
-        core_topic_words = [w for w in headline_words if w not in stopwords]
-        
-        # Domain synonyms for tech/AI topics
-        domain_synonyms = {"ai", "seo", "aio", "chatgpt", "traffic", "search", "content", "optimization", "algorithm", "referral", "digital", "market", "trading", "stock", "growth"}
-        target_words = set(core_topic_words).union(domain_synonyms)
+        # 2. Topic Domain Semantic Alignment Check
+        topic_text = f"{topic.headline} {topic.summary}"
+        script_full_text = " ".join(f"{s.narration_text} {s.visual_prompt}" for s in script.shots)
 
-        matching_shots = 0
-        for shot in script.shots:
-            shot_text = f"{shot.narration_text} {shot.visual_prompt}".lower()
-            if any(w in shot_text for w in target_words):
-                matching_shots += 1
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
 
-        match_ratio = matching_shots / len(script.shots)
-        if match_ratio < 0.6:
+        try:
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform([topic_text, script_full_text])
+            match_score = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
+        except Exception:
+            match_score = 0.0
+
+        if match_score < 0.08:
             issues.append(
-                f"Gate 1 Fail: Topic-to-Script Disconnect! Only {matching_shots}/{len(script.shots)} shots ({match_ratio:.0%}) "
-                f"contain topic/domain keywords. Required: >= 60% alignment."
+                f"Gate 1 Fail: Topic-to-Script Disconnect! Semantic alignment score is {match_score:.4f}. "
+                f"Required: >= 0.08 coherence."
             )
 
         is_valid = len(issues) == 0
@@ -231,6 +229,102 @@ class StageQualityVerifier:
             "issues": issues
         }
 
+    def verify_gate3b_subtitle_text_coherence(
+        self, state: GlobalState
+    ) -> Tuple[bool, List[str]]:
+        """
+        Gate 3b: Subtitle-to-Script Narration Alignment Coherence Audit.
+        Ensures the generated subtitles match the generated script narration by at least 90%.
+        """
+        issues = []
+        master_sub = os.path.join(state.asset_paths.storage_dir or "/tmp/csvg_media", "master_subtitles.ass")
+        if not os.path.exists(master_sub):
+            return False, [f"Gate 3b Fail: Subtitle file is missing ({master_sub})."]
+
+        try:
+            with open(master_sub, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            
+            sub_phrases = []
+            for line in lines:
+                if line.startswith("Dialogue:"):
+                    parts = line.split(",", 9)
+                    if len(parts) > 9:
+                        clean_phrase = re.sub(r'\{[^}]+\}', '', parts[9]).strip()
+                        sub_phrases.append(clean_phrase)
+            
+            sub_text = " ".join(sub_phrases)
+            script_text = " ".join([s.narration_text for s in state.script_data.shots])
+
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.metrics.pairwise import cosine_similarity
+
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform([script_text, sub_text])
+            coherence = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
+            
+            if coherence < 0.90:
+                issues.append(f"Gate 3b Fail: Low subtitle-to-script coherence ({coherence:.2%} < 90.0%). Subtitles may be mismatched.")
+        except Exception as e:
+            issues.append(f"Gate 3b Fail: Error parsing subtitle coherence: {e}")
+
+        is_valid = len(issues) == 0
+        return is_valid, issues
+
+    def verify_gate4_video_audio_coherence(self, state: GlobalState) -> Tuple[bool, List[str]]:
+        """
+        Gate 4: Master Video Resolution, Stream Format & Duration Verification.
+        Queries the final compiled MP4 file using ffprobe to audit properties.
+        """
+        video_path = state.asset_paths.final_video
+        issues = []
+        if not video_path or not os.path.exists(video_path):
+            return False, ["Gate 4 Fail: Compiled final video file is missing."]
+
+        import json
+        import subprocess
+
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", video_path
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            info = json.loads(res.stdout)
+        except Exception as e:
+            return False, [f"Gate 4 Fail: Failed to parse video metadata with ffprobe: {e}"]
+
+        streams = info.get("streams", [])
+        format_info = info.get("format", {})
+
+        has_video = False
+        has_audio = False
+        duration = float(format_info.get("duration", 0.0))
+
+        for stream in streams:
+            codec_type = stream.get("codec_type")
+            if codec_type == "video":
+                has_video = True
+                width = int(stream.get("width", 0))
+                height = int(stream.get("height", 0))
+                if not ((width == 1920 and height == 1080) or (width == 1080 and height == 1920)):
+                    issues.append(f"Gate 4 Fail: Video resolution is {width}x{height} (Expected: 1920x1080 or 1080x1920).")
+            elif codec_type == "audio":
+                has_audio = True
+
+        if not has_video:
+            issues.append("Gate 4 Fail: Compiled video stream is missing.")
+        if not has_audio:
+            issues.append("Gate 4 Fail: Compiled audio stream is missing.")
+
+        target_duration = state.script_data.estimated_runtime_seconds
+        if duration > 0.0 and target_duration > 0.0:
+            diff = abs(duration - target_duration)
+            if diff > 15.0:
+                issues.append(f"Gate 4 Fail: Video duration drift! Compiled duration is {duration:.2f}s, but expected {target_duration:.2f}s (Diff: {diff:.2f}s).")
+
+        is_valid = len(issues) == 0
+        return is_valid, issues
 
 
 quality_verifier = StageQualityVerifier()

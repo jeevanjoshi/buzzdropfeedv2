@@ -136,7 +136,26 @@ class FactRetrieverAgent:
 
         # Rank candidates using phase-aware TOPSIS Decision Engine
         ranked_candidates = self.topsis_engine.rank_candidates(candidates, channel_phase=channel_phase)
-        winner = ranked_candidates[0]
+        
+        # Apply pre-filtering using Audience and Revenue Gates
+        winner = None
+        for cand in ranked_candidates:
+            # 1. Audience Gate (block 'blocked' categories like gossip/entertainment)
+            if getattr(cand, "audience_type", "") == "blocked":
+                continue
+            
+            # 2. Revenue Gate (in REVENUE / SCALE phases, expected revenue must be >= MIN)
+            if channel_phase in ("REVENUE", "SCALE"):
+                rev = monetization_optimizer.calculate_revenue_yield(cand, estimated_runtime_mins=13.0)
+                from src.engine.channel_phase_manager import channel_phase_manager
+                if rev["total_expected_revenue_usd"] < channel_phase_manager.REVENUE_GATE_MIN_USD:
+                    continue
+            
+            winner = cand
+            break
+
+        if not winner:
+            winner = ranked_candidates[0]
 
         # Compute revenue forecast for the winning topic
         rev = monetization_optimizer.calculate_revenue_yield(winner, estimated_runtime_mins=13.0)

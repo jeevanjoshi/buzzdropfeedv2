@@ -74,16 +74,19 @@ def check_topic_similarity(headline: str, summary: str = "") -> Tuple[bool, floa
     if max_sim >= SIMILARITY_REJECTION_THRESHOLD:
         # Find which past headline matched most closely
         best_match = ""
-        highest_sim = 0.0
-        combined_words = list(set([w.lower().strip(",.!?") for w in cand_text.split() if len(w) > 3]))
-        if combined_words:
-            cand_vec = compute_keyword_vector(cand_text, combined_words)
-            for past_h in past_headlines:
-                past_vec = compute_keyword_vector(past_h, combined_words)
-                sim = embedding_engine.cosine_similarity(cand_vec, past_vec)
-                if sim > highest_sim:
-                    highest_sim = sim
-                    best_match = past_h
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.metrics.pairwise import cosine_similarity
+            import numpy as np
+
+            corpus = [cand_text] + past_headlines
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform(corpus)
+            sims = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])[0]
+            best_idx = int(np.argmax(sims))
+            best_match = past_headlines[best_idx]
+        except Exception:
+            best_match = past_headlines[0]
         return True, max_sim, best_match
 
     return False, max_sim, ""

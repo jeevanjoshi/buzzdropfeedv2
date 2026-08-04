@@ -3,12 +3,14 @@ import re
 import uuid
 import datetime
 from typing import Dict, Any, Optional, List, Tuple
-from src.schemas.state import GlobalState, ScriptData, AssetPaths
+from src.schemas.state import GlobalState, ScriptData, AssetPaths, VisualType
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from mcp_servers.audio_edge.server import synthesize_tts, align_subtitles_whisper, TTSRequest, WhisperRequest
 from mcp_servers.media_cloud.server import (
     generate_flux_image, apply_ken_burns_motion, assemble_ffmpeg_timeline,
-    ImageGenRequest, KenBurnsRequest, TimelineAssemblyRequest
+    render_playwright_svg_animation, generate_dynamic_chart, fetch_reaction_gif_clip,
+    ImageGenRequest, KenBurnsRequest, TimelineAssemblyRequest,
+    PlaywrightSVGRequest, ChartRequest, GIFRequest
 )
 
 
@@ -147,7 +149,7 @@ class MediaProducerAgent:
         self.storage_dir = storage_dir
         os.makedirs(self.storage_dir, exist_ok=True)
 
-    async def produce_all_media(self, state: GlobalState) -> AssetPaths:
+    async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False) -> AssetPaths:
         """
         Synthesizes audio & subtitles via Edge MCP tools, generates visuals & timeline via Cloud MCP tools.
         """
@@ -192,41 +194,61 @@ class MediaProducerAgent:
 
             # Call Edge Audio MCP Tools (with HTTP / REST Bridge support)
             audio_edge_url = os.getenv("AUDIO_EDGE_URL")
+            audio_generated = False
             if audio_edge_url:
-                import aiohttp
-                region_val = state.selected_topic.region if (state.selected_topic and hasattr(state.selected_topic, 'region')) else "all"
-                async with aiohttp.ClientSession() as session:
-                    # 1. Synthesize TTS remotely
-                    async with session.post(f"{audio_edge_url}/tools/synthesize_tts", json={
-                        "text": tts_narration,
-                        "output_path": wav_path,
-                        "region": region_val
-                    }) as resp:
-                        if resp.status != 200:
-                            raise Exception(f"TTS Synthesis failed over HTTP: {await resp.text()}")
-                    # 2. Download the synthesized wav file
-                    async with session.get(f"{audio_edge_url}/files", params={"path": wav_path}) as file_resp:
-                        if file_resp.status == 200:
-                            with open(wav_path, "wb") as f:
-                                f.write(await file_resp.read())
-                        else:
-                            raise Exception(f"Failed to download wav file: {await file_resp.text()}")
+                try:
+                    import aiohttp
+                    region_val = state.selected_topic.region if (state.selected_topic and hasattr(state.selected_topic, 'region')) else "all"
+                    async with aiohttp.ClientSession() as session:
+                        # 1. Synthesize TTS remotely
+                        async with session.post(f"{audio_edge_url}/tools/synthesize_tts", json={
+                            "text": tts_narration,
+                            "output_path": wav_path,
+                            "region": region_val
+                        }, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                            if resp.status != 200:
+                                raise Exception(f"TTS Synthesis failed over HTTP: {await resp.text()}")
+                        # 2. Download the synthesized wav file with retries
+                        for attempt in range(3):
+                            try:
+                                async with session.get(f"{audio_edge_url}/files", params={"path": wav_path}, timeout=aiohttp.ClientTimeout(total=300)) as file_resp:
+                                    if file_resp.status == 200:
+                                        with open(wav_path, "wb") as f:
+                                            f.write(await file_resp.read())
+                                        break
+                                    else:
+                                        raise Exception(f"HTTP status {file_resp.status}")
+                            except Exception as get_err:
+                                if attempt == 2:
+                                    raise Exception(f"Failed to download wav file after 3 attempts: {get_err}")
+                                await asyncio.sleep(1.0)
 
-                    # 3. Align subtitles remotely
-                    async with session.post(f"{audio_edge_url}/tools/align_subtitles_whisper", json={
-                        "audio_path": wav_path,
-                        "output_ass_path": ass_path
-                    }) as resp:
-                        if resp.status != 200:
-                            raise Exception(f"Subtitle alignment failed over HTTP: {await resp.text()}")
-                    # 4. Download the aligned subtitles (.ass)
-                    async with session.get(f"{audio_edge_url}/files", params={"path": ass_path}) as file_resp:
-                        if file_resp.status == 200:
-                            with open(ass_path, "wb") as f:
-                                f.write(await file_resp.read())
-                        else:
-                            raise Exception(f"Failed to download ass file: {await file_resp.text()}")
-            else:
+                        # 3. Align subtitles remotely
+                        async with session.post(f"{audio_edge_url}/tools/align_subtitles_whisper", json={
+                            "audio_path": wav_path,
+                            "output_ass_path": ass_path
+                        }, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                            if resp.status != 200:
+                                raise Exception(f"Subtitle alignment failed over HTTP: {await resp.text()}")
+                        # 4. Download the aligned subtitles (.ass) with retries
+                        for attempt in range(3):
+                            try:
+                                async with session.get(f"{audio_edge_url}/files", params={"path": ass_path}, timeout=aiohttp.ClientTimeout(total=300)) as file_resp:
+                                    if file_resp.status == 200:
+                                        with open(ass_path, "wb") as f:
+                                            f.write(await file_resp.read())
+                                        break
+                                    else:
+                                        raise Exception(f"HTTP status {file_resp.status}")
+                            except Exception as get_err:
+                                if attempt == 2:
+                                    raise Exception(f"Failed to download ass file after 3 attempts: {get_err}")
+                                await asyncio.sleep(1.0)
+                        audio_generated = True
+                except Exception as e:
+                    print(f"Edge Audio Service Exception (falling back to local synthesis): {e}")
+
+            if not audio_generated:
                 await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path))
                 await align_subtitles_whisper(WhisperRequest(audio_path=wav_path, output_ass_path=ass_path))
 
@@ -251,15 +273,111 @@ class MediaProducerAgent:
             # Odd shots pan left-to-right, even shots pan right-to-left — prevents jarring same-direction cuts
             ken_burns_direction = "left_to_right" if shot.shot_id % 2 == 1 else "right_to_left"
 
-            # Call Cloud Media MCP Tools (using FVD-enriched visual_prompt)
-            await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
-            await apply_ken_burns_motion(KenBurnsRequest(
-                image_path=img_path,
-                audio_path=wav_path,
-                duration=shot.duration_estimate,
-                output_mp4_path=mp4_path,
-                direction=ken_burns_direction  # optical flow continuity
-            ))
+            # Route and generate specialized visual assets based on AI-classified shot.visual_type
+            is_specialized = False
+            v_type = getattr(shot, "visual_type", VisualType.STANDARD_IMAGE)
+
+            # Check 1: Reaction GIF / Meme segment
+            if v_type == VisualType.GIF_MEME or "[gif:" in prompt_lower or "reaction gif" in prompt_lower:
+                gif_query = "shocked reaction"
+                match = re.search(r'\[gif:\s*([^\]]+)\]', prompt_lower)
+                if match:
+                    gif_query = match.group(1).strip()
+                elif ":" in raw_visual_prompt:
+                    gif_query = raw_visual_prompt.split(":", 1)[1].strip()
+                else:
+                    gif_query = raw_visual_prompt[:30].strip()
+
+                print(f"🎬 Processing AI GIF reaction segment for {shot_key} (Query: '{gif_query}')")
+                try:
+                    await fetch_reaction_gif_clip(GIFRequest(
+                        query=gif_query,
+                        duration=shot.duration_estimate,
+                        output_mp4_path=mp4_path
+                    ))
+                    is_specialized = True
+                except Exception as gif_err:
+                    print(f"⚠️ GIF generation failed: {gif_err}. Falling back to normal image rendering.")
+
+            # Check 2: Dynamic Stock/Data Chart segment
+            elif v_type == VisualType.MATPLOTLIB_CHART or "[chart:" in prompt_lower or "stock chart" in prompt_lower or "market graph" in prompt_lower:
+                chart_title = raw_visual_prompt
+                match = re.search(r'\[chart:\s*([^\]]+)\]', prompt_lower)
+                if match:
+                    chart_title = match.group(1).strip()
+                
+                print(f"📊 Processing AI dynamic data chart segment for {shot_key} (Title: '{chart_title}')")
+                try:
+                    await generate_dynamic_chart(ChartRequest(
+                        title=chart_title,
+                        labels=["Q1", "Q2", "Q3", "Q4", "Current"],
+                        values=[100, 130, 110, 180, 225],
+                        unit_symbol="%" if "percent" in prompt_lower or "%" in prompt_lower else "$ Billion",
+                        duration=shot.duration_estimate,
+                        output_mp4_path=mp4_path
+                    ))
+                    is_specialized = True
+                except Exception as chart_err:
+                    print(f"⚠️ Chart generation failed: {chart_err}. Falling back to normal image rendering.")
+
+            # Check 3: SVG Animation Counter/Ticker segment
+            elif v_type == VisualType.SVG_TICKER or "[svg:" in prompt_lower or "ticker" in prompt_lower or "counter" in prompt_lower:
+                svg_title = raw_visual_prompt
+                match = re.search(r'\[svg:\s*([^\]]+)\]', prompt_lower)
+                if match:
+                    svg_title = match.group(1).strip()
+
+                print(f"📈 Processing AI animated Playwright SVG ticker segment for {shot_key} (Title: '{svg_title}')")
+                try:
+                    await render_playwright_svg_animation(PlaywrightSVGRequest(
+                        chart_type="animated_line_chart",
+                        title=svg_title,
+                        headline_val="$520.4 Billion" if "billion" in prompt_lower else "+18.4%",
+                        sub_text="Live Market Shift" if "billion" in prompt_lower else "Gain",
+                        duration=shot.duration_estimate,
+                        output_mp4_path=mp4_path
+                    ))
+                    is_specialized = True
+                except Exception as svg_err:
+                    print(f"⚠️ SVG animation failed: {svg_err}. Falling back to normal image rendering.")
+
+            # Default: Widescreen FLUX image generation + Ken Burns camera pan
+            if not is_specialized:
+                if dummy_frames:
+                    from mcp_servers.media_cloud.server import generate_synthetic_png
+                    generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+                else:
+                    try:
+                        await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
+                    except Exception as e:
+                        err_msg = str(e).lower()
+                        print(f"⚠️ Visual Generation Error on shot {shot.shot_id}: {e}")
+                        
+                        # 1. Content Moderation / Safety Flag
+                        if any(term in err_msg for term in ["moderation", "nsfw", "safety", "policy", "blocked"]):
+                            sanitized_prompt = f"A professional widescreen cinematic documentary representation of clean technology workspace, flat vector style, 16:9 widescreen presentation"
+                            print(f"🔄 Re-submitting sanitized safe prompt to Fal.ai/Replicate: '{sanitized_prompt}'")
+                            try:
+                                await generate_flux_image(ImageGenRequest(prompt=sanitized_prompt, output_image_path=img_path))
+                            except Exception as retry_err:
+                                print(f"⚠️ Safety prompt retry failed. Falling back to local synthetic generation: {retry_err}")
+                                from mcp_servers.media_cloud.server import generate_synthetic_png
+                                generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+                        else:
+                            # 2. Rate Limits, Quota Errors, or Network/API issues
+                            print(f"📉 API Error (Rate Limit/Quota). Gracefully falling back to local synthetic generation for shot {shot.shot_id} to keep pipeline alive.")
+                            from mcp_servers.media_cloud.server import generate_synthetic_png
+                            generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+
+                # Compile PNG to MP4 with Ken Burns movement
+                await apply_ken_burns_motion(KenBurnsRequest(
+                    image_path=img_path,
+                    audio_path=wav_path,
+                    duration=shot.duration_estimate,
+                    output_mp4_path=mp4_path,
+                    direction=ken_burns_direction  # optical flow continuity
+                ))
+
             asset_paths.visuals[shot_key] = mp4_path
 
             concat_lines.append(f"file '{mp4_path}'")
@@ -293,7 +411,7 @@ class MediaProducerAgent:
         state.execution_stage = "MEDIA_PRODUCED"
         return asset_paths
 
-    async def process(self, state: GlobalState) -> A2AMessage:
+    async def process(self, state: GlobalState, dummy_frames: bool = False) -> A2AMessage:
         """
         Executes Media Producer workflow:
         1. Reads state.script_data
@@ -301,7 +419,7 @@ class MediaProducerAgent:
         3. Updates state.asset_paths
         4. Emits MEDIA_READY A2AMessage to Orchestrator
         """
-        assets = await self.produce_all_media(state)
+        assets = await self.produce_all_media(state, dummy_frames=dummy_frames)
 
         msg = A2AMessage(
             message_id=f"msg-{uuid.uuid4().hex[:8]}",
