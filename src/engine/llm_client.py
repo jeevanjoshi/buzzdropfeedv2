@@ -66,15 +66,17 @@ class LLMClient:
             content_clean = content_clean[:-3]
         content_clean = content_clean.strip()
         try:
-            return json.loads(content_clean)
-        except Exception:
+            return json.loads(content_clean, strict=False)
+        except Exception as e1:
             import re
             match = re.search(r'\{.*\}', content_clean, re.DOTALL)
             if match:
                 try:
-                    return json.loads(match.group(0))
-                except Exception:
-                    pass
+                    return json.loads(match.group(0), strict=False)
+                except Exception as e2:
+                    print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. Regex fallback error: {e2}")
+            else:
+                print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. No curly braces match found.")
         return None
 
     def generate_json(self, prompt: str, system_prompt: str = "") -> Optional[Dict[str, Any]]:
@@ -159,11 +161,25 @@ class LLMClient:
             }
             try:
                 print(f"[LLMClient] Invoking Cloud OpenRouter ({self.model})...")
-                response = requests.post(self.base_url, headers=headers, json=payload, timeout=40)
+                response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
                 response.raise_for_status()
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                return json.loads(content)
+                
+                if "choices" not in data or not data["choices"]:
+                    print(f"[LLMClient] Cloud API returned no choices. Full response: {data}")
+                    return None
+                
+                choice = data["choices"][0]
+                finish_reason = choice.get("finish_reason")
+                content = choice.get("message", {}).get("content", "")
+                
+                print(f"[LLMClient] Cloud API Response status: {response.status_code}, content length: {len(content)}, finish_reason: {finish_reason}")
+                
+                parsed = self._clean_and_parse_json(content)
+                if parsed is not None:
+                    return parsed
+                else:
+                    print(f"[LLMClient] Failed to parse JSON from Cloud API. Raw content starts with: {content[:200]} ... ends with: {content[-200:] if len(content) > 200 else ''}")
             except Exception as e:
                 print(f"[LLMClient] Cloud LLM Exception: {e}")
             return None

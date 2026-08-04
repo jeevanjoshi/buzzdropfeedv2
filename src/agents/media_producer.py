@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import datetime
+import asyncio
 from typing import Dict, Any, Optional, List, Tuple
 from src.schemas.state import GlobalState, ScriptData, AssetPaths, VisualType
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
@@ -158,6 +159,7 @@ class MediaProducerAgent:
             raise ValueError("Media production failed: state.script_data is None")
 
         asset_paths = AssetPaths()
+        asset_paths.storage_dir = self.storage_dir
 
         # 1. Synthesize TTS Audio and Subtitles for all shots
         audio_dir = os.path.join(self.storage_dir, "audio")
@@ -227,7 +229,8 @@ class MediaProducerAgent:
                         # 3. Align subtitles remotely
                         async with session.post(f"{audio_edge_url}/tools/align_subtitles_whisper", json={
                             "audio_path": wav_path,
-                            "output_ass_path": ass_path
+                            "output_ass_path": ass_path,
+                            "original_text": tts_narration
                         }, timeout=aiohttp.ClientTimeout(total=300)) as resp:
                             if resp.status != 200:
                                 raise Exception(f"Subtitle alignment failed over HTTP: {await resp.text()}")
@@ -251,7 +254,7 @@ class MediaProducerAgent:
 
             if not audio_generated:
                 await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path))
-                await align_subtitles_whisper(WhisperRequest(audio_path=wav_path, output_ass_path=ass_path))
+                await align_subtitles_whisper(WhisperRequest(audio_path=wav_path, output_ass_path=ass_path, original_text=tts_narration))
 
             # Gate 2 Early Validation: WAV must exist and be > 1KB before proceeding
             if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1000:
@@ -298,7 +301,7 @@ class MediaProducerAgent:
                     ))
                     is_specialized = True
                 except Exception as gif_err:
-                    print(f"⚠️ GIF generation failed: {gif_err}. Falling back to normal image rendering.")
+                    print(f"Warning: GIF generation failed: {gif_err}. Falling back to normal image rendering.")
 
             # Check 2: Dynamic Stock/Data Chart segment
             elif v_type == VisualType.MATPLOTLIB_CHART or "[chart:" in prompt_lower or "stock chart" in prompt_lower or "market graph" in prompt_lower:
@@ -307,7 +310,7 @@ class MediaProducerAgent:
                 if match:
                     chart_title = match.group(1).strip()
                 
-                print(f"📊 Processing AI dynamic data chart segment for {shot_key} (Title: '{chart_title}')")
+                print(f"Processing AI dynamic data chart segment for {shot_key} (Title: '{chart_title}')")
                 try:
                     await generate_dynamic_chart(ChartRequest(
                         title=chart_title,
@@ -319,16 +322,16 @@ class MediaProducerAgent:
                     ))
                     is_specialized = True
                 except Exception as chart_err:
-                    print(f"⚠️ Chart generation failed: {chart_err}. Falling back to normal image rendering.")
+                    print(f"Warning: Chart generation failed: {chart_err}. Falling back to normal image rendering.")
 
             # Check 3: SVG Animation Counter/Ticker segment
-            elif v_type == VisualType.SVG_TICKER or "[svg:" in prompt_lower or "ticker" in prompt_lower or "counter" in prompt_lower:
+            elif v_type == VisualType.SVG_TICKER or "[svg:" in prompt_lower or re.search(r'\bticker\b', prompt_lower) or re.search(r'\bcounter\b', prompt_lower):
                 svg_title = raw_visual_prompt
                 match = re.search(r'\[svg:\s*([^\]]+)\]', prompt_lower)
                 if match:
                     svg_title = match.group(1).strip()
 
-                print(f"📈 Processing AI animated Playwright SVG ticker segment for {shot_key} (Title: '{svg_title}')")
+                print(f"Processing AI animated Playwright SVG ticker segment for {shot_key} (Title: '{svg_title}')")
                 try:
                     await render_playwright_svg_animation(PlaywrightSVGRequest(
                         chart_type="animated_line_chart",
@@ -340,7 +343,7 @@ class MediaProducerAgent:
                     ))
                     is_specialized = True
                 except Exception as svg_err:
-                    print(f"⚠️ SVG animation failed: {svg_err}. Falling back to normal image rendering.")
+                    print(f"Warning: SVG animation failed: {svg_err}. Falling back to normal image rendering.")
 
             # Default: Widescreen FLUX image generation + Ken Burns camera pan
             if not is_specialized:
@@ -352,23 +355,112 @@ class MediaProducerAgent:
                         await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
                     except Exception as e:
                         err_msg = str(e).lower()
-                        print(f"⚠️ Visual Generation Error on shot {shot.shot_id}: {e}")
+                        print(f"Warning: Visual Generation Error on shot {shot.shot_id}: {e}")
                         
                         # 1. Content Moderation / Safety Flag
                         if any(term in err_msg for term in ["moderation", "nsfw", "safety", "policy", "blocked"]):
                             sanitized_prompt = f"A professional widescreen cinematic documentary representation of clean technology workspace, flat vector style, 16:9 widescreen presentation"
-                            print(f"🔄 Re-submitting sanitized safe prompt to Fal.ai/Replicate: '{sanitized_prompt}'")
+                            print(f"Re-submitting sanitized safe prompt to Fal.ai/Replicate: '{sanitized_prompt}'")
                             try:
                                 await generate_flux_image(ImageGenRequest(prompt=sanitized_prompt, output_image_path=img_path))
                             except Exception as retry_err:
-                                print(f"⚠️ Safety prompt retry failed. Falling back to local synthetic generation: {retry_err}")
+                                print(f"Warning: Safety prompt retry failed. Falling back to local synthetic generation: {retry_err}")
                                 from mcp_servers.media_cloud.server import generate_synthetic_png
                                 generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
                         else:
                             # 2. Rate Limits, Quota Errors, or Network/API issues
-                            print(f"📉 API Error (Rate Limit/Quota). Gracefully falling back to local synthetic generation for shot {shot.shot_id} to keep pipeline alive.")
-                            from mcp_servers.media_cloud.server import generate_synthetic_png
-                            generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+                            print(f"API Error (Rate Limit/Quota). Gracefully falling back to Pixabay stock assets for shot {shot.shot_id} to keep pipeline alive.")
+                            try:
+                                from src.engine.pixabay_retriever import pixabay_retriever
+                                import requests
+                                
+                                # Clean up search query for Pixabay
+                                words = re.findall(r'\b\w{3,}\b', raw_visual_prompt)
+                                clean_query = " ".join(words[:4]) if words else "abstract"
+                                
+                                # Determine best asset type from prompt keywords
+                                query_lower = raw_visual_prompt.lower()
+                                is_vector = any(kw in query_lower for kw in ["vector", "svg", "icon", "logo"])
+                                is_illustration = any(kw in query_lower for kw in ["illustration", "graphic", "clipart"])
+                                is_video = any(kw in query_lower for kw in ["video", "footage", "b-roll", "timelapse", "motion"])
+
+                                if is_video:
+                                    print(f"[Pixabay Fallback] Searching stock videos for: '{clean_query}'")
+                                    video_results = pixabay_retriever.search_videos(clean_query, limit=1)
+                                    if video_results:
+                                        video_url = video_results[0]["video_url"]
+                                        print(f"[Pixabay Fallback] Downloading stock video from {video_url}")
+                                        res_vid = requests.get(video_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+                                        if res_vid.status_code == 200:
+                                            with open(mp4_path, 'wb') as out_file:
+                                                out_file.write(res_vid.content)
+                                            print(f"Successfully downloaded Pixabay stock video to {mp4_path}")
+                                            is_specialized = True
+                                        else:
+                                            raise RuntimeError(f"HTTP status {res_vid.status_code} when downloading video.")
+                                    else:
+                                        raise RuntimeError("No stock videos found on Pixabay.")
+                                else:
+                                    img_type = "photo"
+                                    if is_vector:
+                                        img_type = "vector"
+                                    elif is_illustration:
+                                        img_type = "illustration"
+                                        
+                                    print(f"[Pixabay Fallback] Searching stock images ({img_type}) for: '{clean_query}'")
+                                    img_results = pixabay_retriever.search_images(clean_query, image_type=img_type, limit=1)
+                                    if img_results:
+                                        img_url = img_results[0]["largeImageURL"]
+                                        print(f"[Pixabay Fallback] Downloading stock image from {img_url}")
+                                        res_img = requests.get(img_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+                                        if res_img.status_code == 200:
+                                            with open(img_path, 'wb') as out_file:
+                                                out_file.write(res_img.content)
+                                            print(f"Successfully downloaded Pixabay stock image to {img_path}")
+                                        else:
+                                            raise RuntimeError(f"HTTP status {res_img.status_code} when downloading image.")
+                                    else:
+                                        raise RuntimeError(f"No stock {img_type}s found on Pixabay.")
+                            except Exception as pixabay_err:
+                                print(f"Warning: Pixabay stock media fallback failed: {pixabay_err}. Using local synthetic generation.")
+                                from mcp_servers.media_cloud.server import generate_synthetic_png
+                                generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+
+                # Outro static text overlay if this is the final shot in the script
+                is_last_shot = (shot.shot_id == len(script.shots))
+                if is_last_shot and os.path.exists(img_path):
+                    try:
+                        import cv2
+                        img = cv2.imread(img_path)
+                        if img is not None:
+                            h, w, c = img.shape
+                            overlay = img.copy()
+                            cv2.rectangle(overlay, (0, h - 220), (w, h), (11, 14, 20), -1)
+                            alpha = 0.75
+                            cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+                            
+                            text_1 = "LIKE & SUBSCRIBE TO THE CHANNEL"
+                            text_2 = "Drop your thoughts in the comments below!"
+                            
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            font_scale_1 = 1.6
+                            font_scale_2 = 1.1
+                            thickness_1 = 4
+                            thickness_2 = 3
+                            
+                            size_1 = cv2.getTextSize(text_1, font, font_scale_1, thickness_1)[0]
+                            size_2 = cv2.getTextSize(text_2, font, font_scale_2, thickness_2)[0]
+                            
+                            x_1 = int((w - size_1[0]) / 2)
+                            x_2 = int((w - size_2[0]) / 2)
+                            
+                            cv2.putText(img, text_1, (x_1, h - 130), font, font_scale_1, (0, 255, 204), thickness_1, cv2.LINE_AA)
+                            cv2.putText(img, text_2, (x_2, h - 60), font, font_scale_2, (255, 255, 255), thickness_2, cv2.LINE_AA)
+                            
+                            cv2.imwrite(img_path, img)
+                            print(f"[MediaProducer] Outro static text overlay successfully applied to {img_path}")
+                    except Exception as overlay_err:
+                        print(f"Warning: Outro text overlay failed: {overlay_err}")
 
                 # Compile PNG to MP4 with Ken Burns movement
                 await apply_ken_burns_motion(KenBurnsRequest(
@@ -378,6 +470,31 @@ class MediaProducerAgent:
                     output_mp4_path=mp4_path,
                     direction=ken_burns_direction  # optical flow continuity
                 ))
+
+            # Mix narration audio with the specialized visual MP4 if applicable
+            if is_specialized:
+                if os.path.exists(mp4_path):
+                    import shutil
+                    import subprocess
+                    temp_specialized_path = mp4_path.replace(".mp4", "_visual_only.mp4")
+                    shutil.move(mp4_path, temp_specialized_path)
+                    print(f"[MediaProducer] Merging audio {wav_path} with specialized video {temp_specialized_path} -> {mp4_path}")
+                    merge_cmd = [
+                        "ffmpeg", "-y",
+                        "-i", temp_specialized_path,
+                        "-i", wav_path,
+                        "-c:v", "copy",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-shortest",
+                        mp4_path
+                    ]
+                    res = subprocess.run(merge_cmd, capture_output=True, text=True)
+                    if res.returncode != 0:
+                        print(f"Warning: ffmpeg audio merge failed: {res.stderr}. Restoring visual-only clip.")
+                        shutil.move(temp_specialized_path, mp4_path)
+                    else:
+                        if os.path.exists(temp_specialized_path):
+                            os.remove(temp_specialized_path)
 
             asset_paths.visuals[shot_key] = mp4_path
 
@@ -396,16 +513,40 @@ class MediaProducerAgent:
 
         # Assemble Final Timeline
         final_video_path = os.path.join(self.storage_dir, "final_video_1080p.mp4")
-        bgm_dummy_path = os.path.join(self.storage_dir, "bgm.mp3")
-        with open(bgm_dummy_path, "w") as f:
-            f.write("DUMMY_BGM")
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        bgm_source_path = os.path.join(project_root, "resources", "bgm.mp3")
+        bgm_final_path = os.path.join(self.storage_dir, "bgm.mp3")
+
+        if os.path.exists(bgm_source_path) and os.path.getsize(bgm_source_path) > 1000:
+            import shutil
+            shutil.copy2(bgm_source_path, bgm_final_path)
+            print(f"[MediaProducer] Using background music file: {bgm_source_path}")
+        else:
+            print("[MediaProducer] WARNING: resources/bgm.mp3 not found or invalid. Falling back to dummy text file (silence).")
+            with open(bgm_final_path, "w") as f:
+                f.write("DUMMY_BGM")
 
         await assemble_ffmpeg_timeline(TimelineAssemblyRequest(
             concat_list_path=concat_list_path,
             subtitle_path=master_sub_path,
-            bgm_path=bgm_dummy_path,
+            bgm_path=bgm_final_path,
             output_video_path=final_video_path
         ))
+
+        # Generate dynamic widescreen high-CTR Thumbnail
+        thumbnail_path = os.path.join(self.storage_dir, "thumbnail.png")
+        try:
+            from mcp_servers.media_cloud.server import ThumbnailRequest, generate_thumbnail
+            headline = state.selected_topic.headline if state.selected_topic else "Market Shift"
+            brief = getattr(state.selected_topic, "thumbnail_brief", "") or headline
+            await generate_thumbnail(ThumbnailRequest(
+                headline_text=brief,
+                output_thumbnail_path=thumbnail_path
+            ))
+            asset_paths.thumbnail = thumbnail_path
+            print(f"[MediaProducer] High-CTR Thumbnail successfully generated at {thumbnail_path}")
+        except Exception as thumb_err:
+            print(f"Warning: Thumbnail generation failed: {thumb_err}")
 
         asset_paths.final_video = final_video_path
         state.asset_paths = asset_paths

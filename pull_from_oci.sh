@@ -12,7 +12,7 @@ OCI_DIR="/home/ubuntu/buzzdropfeedv2"
 
 LOCAL_DIR="/home/jeevanjoshi/buzzdropfeedv2"
 
-echo "🔄 Pulling logs, published topics, and stats from OCI (${OCI_HOST})..."
+echo "Pulling logs, published topics, and stats from OCI (${OCI_HOST})..."
 
 # Rsync logs and JSON configuration states from OCI to Pi 5
 rsync -avz \
@@ -24,4 +24,4 @@ rsync -avz \
     -e ssh \
     "${OCI_USER}@${OCI_HOST}:${OCI_DIR}/" "${LOCAL_DIR}/"
 
-echo "✅ Pull completed successfully! Dashboard updated."
+echo "Pull completed successfully! Dashboard updated."

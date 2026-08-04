@@ -101,6 +101,7 @@ class AssetPaths(BaseModel):
     final_video: Optional[str] = None
     thumbnail: Optional[str] = None          # 1280x720 YouTube thumbnail PNG
     shorts_clip: Optional[str] = None        # 1080x1920 vertical 60-90s Shorts clip
+    storage_dir: Optional[str] = "/tmp/csvg_media"
 
 
 class UploadMetadata(BaseModel):

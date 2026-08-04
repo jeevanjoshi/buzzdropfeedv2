@@ -62,9 +62,9 @@ def main():
         with open(token_path, "w") as f:
             json.dump(token_data, f, indent=2)
             
-        print(f"\n🎉 SUCCESS! token.json successfully created and saved.")
+        print(f"\nSUCCESS! token.json successfully created and saved.")
     except Exception as e:
-        print(f"\n❌ Error exchanging code: {str(e)}")
+        print(f"\nError exchanging code: {str(e)}")
 
 if __name__ == "__main__":
     main()

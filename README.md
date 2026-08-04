@@ -139,15 +139,33 @@ $$\text{Revenue} = \text{Views} \times \left( \frac{\text{RPM}}{1000} \right) \t
 ---
 
 ## 🚀 Architectural Upgrades (New)
-
+ 
 The pipeline has been upgraded with the following production-grade features:
 
-### 1. Federated RAG & Hallucination Defense
+### 1. Dynamic NLP RAG Expansion
+* **Semantic Search Grounding**: Replaced static boilerplate filler text with a dynamic `scikit-learn` `TfidfVectorizer` and `cosine_similarity` search engine. Short script segments are expanded with the most semantically relevant real-time facts fetched from search results.
+* **Diverse Citations**: Instructed the LLM to attribute facts dynamically to their actual source publications (e.g. Wikipedia, New York Times, Wired) instead of generic over-attributions.
+
+### 2. Specialized Visuals Audio Merging & Watermarking
+* **FFmpeg Audio Mixing**: Specialized visual clips (memes, SVG tickers, matplotlib charts) are automatically merged post-generation with the corresponding voiceover WAV track to prevent audio drops.
+* **Animated Tickers**: Refactored stock tickers to use regex word-boundary triggers to avoid accidental matches.
+* **OpenCV Outro Overlay**: Generates a professional dark semi-transparent banner overlay on the final outro shot containing a creative subscribe and comment prompt.
+
+### 3. Subtitle Alignment & Numeric Normalization
+* **Typo-Free Whisper Alignments**: Integrated `difflib.SequenceMatcher` to realign Whisper transcriptions back to the original script spelling.
+* **Large Number Expansion**: Sanitizes numbers (e.g. `5000000` -> `5 million`) and currencies (e.g. `$100` -> `100 dollars`) inside FastAPI to prevent Kokoro TTS reading glitches.
+
+### 4. Widescreen Hybrid AI Thumbnail Generator
+* **AI Backgrounds**: Generates high-CTR custom widescreen background thumbnails using `fal.ai` (`flux/schnell`) or `replicate`, falling back to clean dark themes if both are down.
+* **Multiline Word Wrapping**: Word-wraps long video titles across up to 2 lines cleanly on the thumbnail canvas.
+* **Auto-Upload**: Integrated the YouTube Data API `thumbnails().set` endpoint to automatically publish the custom thumbnail image to YouTube post-upload.
+
+### 5. Federated RAG & Hallucination Defense
 * **Federated Multi-Engine Ingestion:** Integrates DuckDuckGo, NewsAPI, and Wikipedia into a unified search query planner.
 * **Anti-Slop Content Sanitizer:** Employs regex filters to eliminate promotional terms, advertising junk, and repetitive generic AI phrases from RAG context.
 * **TrumorGPT Auditor:** Fact-checks and scores raw claims before feeding them into the story generation engine to mitigate hallucinations.
 
-### 2. Multi-Stage Quality Gates & Verification
+### 6. Multi-Stage Quality Gates & Verification
 To ensure premium channel status and protect against YouTube demonetization, the system runs 8 automated validation checks before and after publishing:
 * **Gate 1 (Topic-to-Script Coherence):** Uses TF-IDF cosine similarity to ensure script stays strictly on-topic, validating a target word count of $\ge 1,500$ words.
 * **Gate 2 (Script-to-TTS):** Checks wav files for completeness, duration, and empty speech.

@@ -14,6 +14,7 @@ class UploadRequest(BaseModel):
     description: str
     tags: List[str] = ["finance", "tech", "economics", "stocks", "business"]
     category_id: str = "27"  # Education / Finance
+    thumbnail_path: Optional[str] = None
 
 
 class QuotaCheckRequest(BaseModel):
@@ -102,6 +103,16 @@ async def upload_youtube_resumable(req: UploadRequest):
                     continue
 
             video_id = response.get("id", "uploaded_demo_id")
+
+            # Upload custom thumbnail if path is provided and exists
+            if req.thumbnail_path and os.path.exists(req.thumbnail_path):
+                try:
+                    media_thumb = MediaFileUpload(req.thumbnail_path, mimetype="image/png")
+                    youtube.thumbnails().set(videoId=video_id, media_body=media_thumb).execute()
+                    print(f"[YouTube Upload] Successfully set custom thumbnail: {req.thumbnail_path}")
+                except Exception as thumb_err:
+                    print(f"Warning: Failed to upload custom thumbnail: {thumb_err}")
+
             return {
                 "status": "success",
                 "video_id": video_id,

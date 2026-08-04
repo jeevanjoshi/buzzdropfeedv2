@@ -16,10 +16,14 @@ class TTSRequest(BaseModel):
     region: str = "all"
     output_path: str
 
+from typing import Optional
+import difflib
+
 
 class WhisperRequest(BaseModel):
     audio_path: str
     output_ass_path: str
+    original_text: Optional[str] = None
 
 
 def sanitize_tts_text(text: str) -> str:
@@ -27,6 +31,29 @@ def sanitize_tts_text(text: str) -> str:
     Strips raw SSML tags, break commands, slashes, and formatting artifacts
     so the TTS model never speaks garbage like 'break time 300 ms forward slash'.
     """
+    # Expand currencies first, e.g. $100 -> 100 dollars, $520.4 Billion -> 520.4 Billion dollars
+    text = re.sub(r'\$(\d+(?:,\d+)*(?:\.\d+)?)\s*(billion|million|trillion|usd)?\b', 
+                  lambda m: f"{m.group(1).replace(',', '')} {m.group(2) if m.group(2) else ''} dollars".strip().replace("  ", " "), 
+                  text, flags=re.IGNORECASE)
+    text = re.sub(r'\$(\d+)', r'\1 dollars', text)
+
+    # Expand large numbers to text (e.g. 5000000 -> 5 million)
+    def num_repl(match):
+        num_str = match.group(1).replace(",", "")
+        val = int(num_str)
+        if val >= 1_000_000_000 and val % 1_000_000 == 0:
+            billions = val / 1_000_000_000
+            return f"{int(billions) if billions.is_integer() else billions:.1f} billion"
+        elif val >= 1_000_000 and val % 10_000 == 0:
+            millions = val / 1_000_000
+            return f"{int(millions) if millions.is_integer() else millions:.1f} million"
+        elif val >= 1_000 and val % 100 == 0:
+            thousands = val / 1_000
+            return f"{int(thousands) if thousands.is_integer() else thousands:.1f} thousand"
+        return match.group(1)
+    
+    text = re.sub(r'\b(\d{1,3}(?:,\d{3})+|\d{4,15})\b', num_repl, text)
+
     # Remove HTML / SSML tags e.g. <break time="300ms"/>
     cleaned = re.sub(r'<[^>]+>', ' ', text)
     # Remove raw slash words or spoken artifacts
@@ -49,6 +76,7 @@ def sanitize_tts_text(text: str) -> str:
     # Collapse multiple whitespace
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
+
 
 
 def generate_synthetic_wav(output_path: str, duration_sec: float = 3.0, sample_rate: int = 24000):
@@ -139,20 +167,61 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             model = WhisperModel("tiny", device="cpu", compute_type="int8")
             segments, _ = model.transcribe(req.audio_path, word_timestamps=True)
             
+            # Extract all words with timestamps from Whisper transcription
+            all_whisper_words = []
             for segment in segments:
-                words = [w for w in segment.words if w.word.strip()]
-                chunk_size = 5
-                for i in range(0, len(words), chunk_size):
-                    chunk = words[i:i + chunk_size]
-                    start_sec = chunk[0].start
-                    end_sec = chunk[-1].end
-                    if end_sec - start_sec < 1.2:
-                        end_sec = start_sec + 1.2
-                    start_str = f"{int(start_sec//3600)}:{int((start_sec%3600)//60):02d}:{start_sec%60:05.2f}"
-                    end_str = f"{int(end_sec//3600)}:{int((end_sec%3600)//60):02d}:{end_sec%60:05.2f}"
-                    phrase_clean = " ".join(w.word.strip() for w in chunk).upper()
-                    if phrase_clean:
-                        dialogues.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{phrase_clean}")
+                for w in segment.words:
+                    if w.word.strip():
+                        all_whisper_words.append({
+                            "word": w.word.strip(),
+                            "start": w.start,
+                            "end": w.end
+                        })
+            
+            # Align with original text using dynamic NLP Sequence Matching
+            if req.original_text and all_whisper_words:
+                orig_words_raw = req.original_text.split()
+                orig_words_clean = [re.sub(r'[^\w\s]', '', w).upper() for w in orig_words_raw]
+                w_words_clean = [re.sub(r'[^\w\s]', '', w["word"]).upper() for w in all_whisper_words]
+                
+                sm = difflib.SequenceMatcher(None, w_words_clean, orig_words_clean)
+                for tag, i1, i2, j1, j2 in sm.get_opcodes():
+                    if tag == 'equal':
+                        for k in range(i1, i2):
+                            orig_idx = j1 + (k - i1)
+                            if orig_idx < len(orig_words_raw):
+                                all_whisper_words[k]["word"] = orig_words_raw[orig_idx]
+                    elif tag in ('replace', 'delete'):
+                        orig_chunk = orig_words_raw[j1:j2]
+                        if orig_chunk:
+                            for idx, k in enumerate(range(i1, i2)):
+                                if idx < len(orig_chunk):
+                                    all_whisper_words[k]["word"] = orig_chunk[idx]
+                                else:
+                                    all_whisper_words[k]["word"] = ""
+                            if len(orig_chunk) > (i2 - i1) and i2 - 1 >= 0:
+                                leftover = " ".join(orig_chunk[(i2 - i1):])
+                                all_whisper_words[i2 - 1]["word"] += " " + leftover
+                        else:
+                            for k in range(i1, i2):
+                                all_whisper_words[k]["word"] = ""
+                
+                # Filter out deleted/empty words
+                all_whisper_words = [w for w in all_whisper_words if w["word"].strip()]
+            
+            # Chunk the aligned words for display
+            chunk_size = 5
+            for i in range(0, len(all_whisper_words), chunk_size):
+                chunk = all_whisper_words[i:i + chunk_size]
+                start_sec = chunk[0]["start"]
+                end_sec = chunk[-1]["end"]
+                if end_sec - start_sec < 1.2:
+                    end_sec = start_sec + 1.2
+                start_str = f"{int(start_sec//3600)}:{int((start_sec%3600)//60):02d}:{start_sec%60:05.2f}"
+                end_str = f"{int(end_sec//3600)}:{int((end_sec%3600)//60):02d}:{end_sec%60:05.2f}"
+                phrase_clean = " ".join(w["word"].strip() for w in chunk).upper()
+                if phrase_clean:
+                    dialogues.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{phrase_clean}")
         except Exception as e:
             print(f"Faster Whisper alignment exception: {e}")
 

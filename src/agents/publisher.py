@@ -39,7 +39,8 @@ class PublisherAgent:
             video_path=state.asset_paths.final_video,
             title=title,
             description=desc,
-            tags=state.selected_topic.keywords if state.selected_topic else ["finance", "tech"]
+            tags=state.selected_topic.keywords if state.selected_topic else ["finance", "tech"],
+            thumbnail_path=state.asset_paths.thumbnail
         ))
 
         meta = UploadMetadata(

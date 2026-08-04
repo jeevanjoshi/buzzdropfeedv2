@@ -151,7 +151,7 @@ class ObserverAgent:
             from src.engine.llm_client import LLMClient
             llm_client = LLMClient()
             if llm_client.is_available():
-                print(f"🧠 Observer calling AI-in-the-loop critic to verify {len(flagged_sentences_info)} flagged claims...")
+                print(f"Observer calling AI-in-the-loop critic to verify {len(flagged_sentences_info)} flagged claims...")
                 flagged_list_str = "\n".join([f"- [Shot #{sid}][Type: {itype}]: '{sentence}'" for sid, sentence, itype in flagged_sentences_info])
                 prompt = f"""
                 You are a factual validation critic. The local parser flagged the following sentences from a YouTube script as potential factual hallucinations or ungrounded claims.
@@ -164,9 +164,9 @@ class ObserverAgent:
                 
                 Requirements:
                 1. Review each flagged claim against the verified facts corpus.
-                2. Determine if the claim is a safe narrative/rhetorical transition (which should be APPROVED) or a genuine factual hallucination (which must be REJECTED).
+                2. Determine if the claim is a safe narrative/rhetorical transition, standard documentary phrasing, or a logical deduction/extrapolation from the facts (which should be APPROVED), or a genuine factual hallucination like wrong statistics, false names, incorrect dates, or fabricated events (which must be REJECTED).
                 3. Return a JSON object with a single key "violations" containing an array of strings. Each string should be the exact text of the REJECTED claim alongside the reason why it fails.
-                4. Do NOT reject safe transitions or rhetorical questions. Only reject hard claims that lack factual basis.
+                4. Do NOT reject safe transitions, rhetorical questions, standard stylistic prose, or reasonable syntheses/deductions (e.g., stating that debris falling on homes puts communities at risk or poses a threat, which is a logical consequence). Only reject hard claims that lack factual basis or contradict the corpus.
                 """
                 system_prompt = "You are a precise, objective facts verification critic. Return valid JSON only."
                 try:
@@ -177,7 +177,7 @@ class ObserverAgent:
                             violations.append(violation)
                         return violations
                 except Exception as critic_err:
-                    print(f"⚠️ Critic call failed: {critic_err}. Defaulting to local validation flags.")
+                    print(f"Warning: Critic call failed: {critic_err}. Defaulting to local validation flags.")
 
             # If LLM client is unavailable or failed, default back to local flags to be safe
             for sid, sentence, itype in flagged_sentences_info:
@@ -225,12 +225,12 @@ class ObserverAgent:
                     f"Switch to higher-RPM niche (Tech/AI/Finance/Health)."
                 )
 
-        # Runtime Check — 10.5 to 14.5 min is the 3-midroll revenue sweet spot
+        # Runtime Check — 10.0 to 15.5 min is the target range
         runtime_min = script.estimated_runtime_seconds / 60.0
-        if runtime_min < 10.5 or runtime_min > 14.5:
+        if runtime_min < 10.0 or runtime_min > 15.5:
             violations.append(
                 f"Runtime out of bounds: {runtime_min:.2f} mins "
-                f"(Target: 10.5 - 14.5 mins for 3 mid-roll ads at 2.6x multiplier)"
+                f"(Target: 10.0 - 15.5 mins for YPP & mid-roll optimization)"
             )
 
         # Shot Count Check

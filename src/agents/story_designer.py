@@ -41,6 +41,86 @@ class StoryDesignerAgent:
             "sources": [fact.url for fact in verified_facts]
         }
 
+    def parse_raw_snippets(
+        self, rag_pack: Dict[str, Any], summary: str, verified_facts: List[VerifiedFact],
+        trusted_org: str, category: str, headline: str, current_month_year: str
+    ) -> List[str]:
+        retrieved_context = rag_pack.get("rag_retrieved_context", "")
+        raw_snippets_raw = [
+            line.strip().lstrip("• ").strip()
+            for line in retrieved_context.split("\n")
+            if line.strip().startswith("•") and len(line.strip()) > 40
+        ]
+        seen_snips = set()
+        raw_snippets = []
+        for s in raw_snippets_raw:
+            key = s[:60]
+            if key not in seen_snips:
+                seen_snips.add(key)
+                raw_snippets.append(s)
+
+        if len(raw_snippets) < 5:
+            summary_sentences = [s.strip() for s in re.split(r'[.!?]', summary) if len(s.strip()) > 30]
+            for sent in summary_sentences:
+                key = sent[:60]
+                if key not in seen_snips:
+                    seen_snips.add(key)
+                    raw_snippets.append(sent)
+
+        if len(raw_snippets) < 5:
+            for vf in verified_facts[:8]:
+                frag = f"{vf.headline}: {vf.summary[:80]}"
+                key = frag[:60]
+                if key not in seen_snips:
+                    seen_snips.add(key)
+                    raw_snippets.append(frag)
+
+        while len(raw_snippets) < 8:
+            raw_snippets.append(f"According to {trusted_org} analysis, {headline} represents a pivotal development in {category} as of {current_month_year}.")
+        return raw_snippets
+
+    def expand_narration_with_semantic_facts(
+        self, narr: str, title: str, category: str, raw_snippets: List[str],
+        used_snippets: set, target_word_count: int = 115
+    ) -> str:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        
+        current_words = narr.split()
+        if len(current_words) >= target_word_count:
+            return narr
+
+        # Filter unused snippets
+        unused = [s for s in raw_snippets if s[:60] not in used_snippets]
+        if not unused:
+            return narr
+            
+        query_context = f"{title} {narr} {category}"
+        
+        try:
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform([query_context] + unused)
+            sim_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])[0]
+            sorted_indices = sim_scores.argsort()[::-1]
+            
+            for idx in sorted_indices:
+                best_snippet = unused[idx]
+                best_snippet_clean = best_snippet.strip()
+                if best_snippet_clean not in narr:
+                    narr += " " + best_snippet_clean
+                    used_snippets.add(best_snippet[:60])
+                if len(narr.split()) >= target_word_count:
+                    break
+        except Exception as e:
+            print(f"Warning: Semantic expansion error: {e}. Falling back to standard linear selection.")
+            for best_snippet in unused:
+                if best_snippet not in narr:
+                    narr += " " + best_snippet
+                    used_snippets.add(best_snippet[:60])
+                    if len(narr.split()) >= target_word_count:
+                        break
+        return narr
+
     def generate_6act_script(
         self, topic: TopicCandidate, verified_facts: List[VerifiedFact], region: str = "all", target_shots: int = 15, revision_violations: Optional[List[str]] = None
     ) -> ScriptData:
@@ -89,7 +169,7 @@ class StoryDesignerAgent:
             You are an investigative documentary director crafting a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
             CATEGORY: '{category}'
             DYNAMIC TEMPORAL ANCHOR: Current Date is {current_date_str} ({current_month_year}). Year: {current_year}.
-            TRUSTED SOURCE ATTRIBUTION: Spoken natural citations of '{trusted_org}'.
+            TRUSTED SOURCE ATTRIBUTION: Cite diverse actual publications matching the facts from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank).
             
             FULL RAG KNOWLEDGE PACK (RETRIEVED DEEP FACTS & CONTEXT):
             {rag_context_text}
@@ -120,22 +200,32 @@ class StoryDesignerAgent:
                  * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
                  * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
                  * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
-            4. Spoken Attribution: Dynamically cite '{trusted_org}' when presenting core figures.
+            4. Spoken Attribution: Dynamically cite the specific actual publisher or source from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank) for each fact in a natural, conversational way. Avoid over-attributing everything to a single source.
             5. Strict Temporal Grounding: Frame developments within {current_month_year}.
-            6. LINGUISTIC DIVERSITY (Anti-Slop): Each shot must use DIFFERENT sentence structures, vocabulary, and rhetorical devices. Vary between: declarative statements, rhetorical questions, data-led assertions, expert quotes, and narrative storytelling. NEVER repeat opening sentence patterns across shots.
-            7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup — no two shots may share the same shot type or location.
+            6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
+            7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
             8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
+            9. STORYTELLING INTEGRATION: Seamlessly blend real-world facts from the RAG pack into a single, cohesive narrative arc. Do not output raw scrapped snippets verbatim; rephrase them using rich, evocative English prose.
+            10. CREATIVE CTA INTEGRATION: The final shot (Shot 15) must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
             """
             system_prompt = (
-                f"You are a master documentary scriptwriter specializing in {category} in {current_year}. "
-                "CRITICAL RULES: (1) Each narration shot must use DIFFERENT vocabulary, sentence rhythm, and rhetorical style — "
-                "declarative, interrogative, statistical, narrative, and analytical voices must alternate across shots. "
-                "(2) NEVER start two consecutive shots with the same subject or phrase. "
-                "(3) Visual prompts must each describe a UNIQUE camera angle, location, and lighting. "
-                "(4) Explicitly select the optimal visual_type for each shot. "
-                "Return valid JSON only."
+                f"You are a master documentary director and creative storyteller specializing in {category} in {current_year}. "
+                "CRITICAL RULES: "
+                "1. STYLISTIC EXCELLENCE (Vox/Netflix Documentary Style): Write in a gripping, cinematic, and narrative-first tone. "
+                "Never write dry summaries or list scraped facts line-by-line. Instead, weave facts into a suspenseful, unfolding human story. "
+                "2. DIVERSE CITATIONS: Dynamically attribute facts to the actual distinct publishers in the RAG pack (e.g. 'As reported by The New York Times', 'Wired analysis shows', 'Wikipedia records indicate'). Do not attribute everything to a single publisher. "
+                "3. CREATIVE ANALOGIES: Translate complex data, metrics, or technical mechanisms into vivid metaphors and simple physical analogies. "
+                "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
+                "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
+                "6. NEVER start two consecutive shots with the same subject or phrase. Ensure seamless transitions between shots. "
+                "7. Visual prompts must describe unique, high-end cinematic locations, camera moves, and lighting. Return valid JSON only."
             )
             llm_result = self.llm_client.generate_json(prompt, system_prompt)
+
+            # Parse raw snippets and setup dynamic RAG pool
+            raw_snippets = self.parse_raw_snippets(rag_pack, summary, verified_facts, trusted_org, category, headline, current_month_year)
+            _used_snips = set()
+
             if llm_result and "shots" in llm_result:
                 try:
                     raw_shots = llm_result["shots"]
@@ -150,9 +240,9 @@ class StoryDesignerAgent:
                         if v_type_raw not in ["standard_image", "gif_meme", "matplotlib_chart", "svg_ticker"]:
                             v_type_raw = "standard_image"
                         
-                        # Enrich short narration with RAG facts instead of static repetition
-                        if len(narr.split()) < 110:
-                            narr += f" According to verified analysis from {trusted_org} published in {current_month_year}, these developments mark a key milestone in {category}. Understanding the broader systemic consequences allows researchers and audience members to navigate upcoming shifts with evidence-based insight."
+                        # Enrich short narration with dynamic RAG facts using semantic search/TF-IDF similarity
+                        if len(narr.split()) < 115:
+                            narr = self.expand_narration_with_semantic_facts(narr, headline, category, raw_snippets, _used_snips, target_word_count=115)
 
                         shots.append(ShotData(
                             shot_id=int(shot_id),

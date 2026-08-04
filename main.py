@@ -15,6 +15,7 @@ def main():
     publish = True
     dummy_frames = False
 
+    state = None
     if len(sys.argv) > 1:
         if "--offline" in sys.argv:
             use_live_rss = False
@@ -26,13 +27,29 @@ def main():
             publish = False
         if "--dummy-frames" in sys.argv or "--dummy-frame" in sys.argv:
             dummy_frames = True
+        
+        # Parse --resume <pipeline_id>
+        for i, arg in enumerate(sys.argv):
+            if arg == "--resume" and i + 1 < len(sys.argv):
+                pipeline_id = sys.argv[i + 1]
+                state_file = f"logs/state_{pipeline_id}.json"
+                import os
+                if os.path.exists(state_file):
+                    print(f"Loading state checkpoint from {state_file}...")
+                    from src.schemas.state import GlobalState
+                    with open(state_file, "r", encoding="utf-8") as f:
+                        state = GlobalState.model_validate_json(f.read())
+                else:
+                    print(f"Error: Checkpoint file {state_file} not found.")
+                    sys.exit(1)
 
     orchestrator = OrchestratorAgent()
     state = asyncio.run(orchestrator.run_pipeline(
         use_live_rss=use_live_rss,
         region=region,
         publish=publish,
-        dummy_frames=dummy_frames
+        dummy_frames=dummy_frames,
+        state=state
     ))
 
     print(f"Summary of Pipeline Execution:")

@@ -42,36 +42,55 @@ class RAGTopicRetriever:
             with urllib.request.urlopen(req, timeout=8) as response:
                 html = response.read().decode('utf-8', errors='ignore')
 
-            snippets = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', html, re.DOTALL)
-            titles = re.findall(r'<a class="result__title[^>]*>(.*?)</a>', html, re.DOTALL)
-
             from sklearn.feature_extraction.text import TfidfVectorizer
             from sklearn.metrics.pairwise import cosine_similarity
 
             ad_pattern = re.compile(
                 r'\b(sign\s?up|subscribe|register|join\s?now|click\s?here|get\s?started|'
                 r'free\s?trial|pricing\s?plan|price|coupon|discount|promo|checkout|'
-                r'buy\s?now|add\s?to\s?cart|shop|store|order\s?now|affiliate|sponsor|advertisement|marketing)\b',
+                r'buy\s?now|add\s?to\s?cart|shop|store|order\s?now|affiliate|sponsor|'
+                r'advertisement|marketing|ad\b|advertised|shopping|sale|discounted|deal|'
+                r'best\sprice|cheap)\b',
                 re.IGNORECASE
             )
 
-            for i in range(min(len(snippets), max_results)):
-                clean_snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip()
-                clean_title = re.sub(r'<[^>]+>', '', titles[i] if i < len(titles) else "").strip()
-                if len(clean_snippet) > 30:
-                    combined_text = f"{clean_title} {clean_snippet}"
-                    if ad_pattern.search(combined_text):
-                        continue
+            # Split the HTML page into individual result blocks
+            blocks = html.split('<div class="result results_links results_links_deep web-result')
+            for block in blocks[1:]:
+                # Extract first anchor href
+                url_match = re.search(r'href="([^"]+)"', block)
+                if not url_match:
+                    continue
+                url = url_match.group(1)
+                
+                # Exclude sponsored tracking links
+                if "y.js" in url or "ad_provider" in url or "sponsored" in url:
+                    continue
 
-                    try:
-                        vectorizer = TfidfVectorizer(stop_words='english')
-                        tfidf_matrix = vectorizer.fit_transform([query, combined_text])
-                        sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-                    except Exception:
-                        sim = 0.0
+                # Local match inside block for title and snippet
+                title_match = re.search(r'<a class="result__title[^>]*>(.*?)</a>', block, re.DOTALL)
+                snippet_match = re.search(r'<a class="result__snippet[^>]*>(.*?)</a>', block, re.DOTALL)
+                
+                if title_match and snippet_match:
+                    clean_title = re.sub(r'<[^>]+>', '', title_match.group(1)).strip()
+                    clean_snippet = re.sub(r'<[^>]+>', '', snippet_match.group(1)).strip()
+                    
+                    if len(clean_snippet) > 30:
+                        combined_text = f"{clean_title} {clean_snippet}"
+                        if ad_pattern.search(combined_text):
+                            continue
 
-                    if sim > 0.08:
-                        results.append({"title": clean_title, "snippet": clean_snippet})
+                        try:
+                            vectorizer = TfidfVectorizer(stop_words='english')
+                            tfidf_matrix = vectorizer.fit_transform([query, combined_text])
+                            sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+                        except Exception:
+                            sim = 0.0
+
+                        if sim > 0.08:
+                            results.append({"title": clean_title, "snippet": clean_snippet})
+                            if len(results) >= max_results:
+                                break
         except Exception as e:
             print(f"[RAGRetriever] Search Warning: {e}")
 

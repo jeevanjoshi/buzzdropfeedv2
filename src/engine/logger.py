@@ -71,7 +71,7 @@ class PipelineLogger:
         # Console Log
         console_msg = f"[{stage}] [{component}] {message}"
         if fix_hint:
-            console_msg += f" | 💡 FIX HINT: {fix_hint}"
+            console_msg += f" | FIX HINT: {fix_hint}"
 
         if level.upper() == "ERROR" or level.upper() == "CRITICAL":
             self.logger.error(console_msg)

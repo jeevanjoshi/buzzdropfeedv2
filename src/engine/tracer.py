@@ -59,5 +59,14 @@ class PipelineTracer:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(trajectory_data, f, indent=2)
 
+        # Proactive checkpointing: Serialize and save the full global state
+        state_path = os.path.join(self.log_dir, f"state_{p_id}.json")
+        try:
+            with open(state_path, "w", encoding="utf-8") as f:
+                f.write(state.model_dump_json(indent=2))
+        except Exception as e:
+            # Prevent failures in serialization from breaking tracing/pipeline execution
+            print(f"Warning: Failed to save state checkpoint: {e}")
+
 
 tracer = PipelineTracer()

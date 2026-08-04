@@ -237,7 +237,7 @@ class StageQualityVerifier:
         Ensures the generated subtitles match the generated script narration by at least 90%.
         """
         issues = []
-        master_sub = os.path.join(state.asset_paths.storage_dir or "/tmp/csvg_media", "master_subtitles.ass")
+        master_sub = os.path.join(getattr(state.asset_paths, "storage_dir", None) or "/tmp/csvg_media", "master_subtitles.ass")
         if not os.path.exists(master_sub):
             return False, [f"Gate 3b Fail: Subtitle file is missing ({master_sub})."]
 

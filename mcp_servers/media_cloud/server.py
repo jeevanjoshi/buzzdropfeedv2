@@ -290,13 +290,119 @@ async def generate_thumbnail(req: ThumbnailRequest):
             import cv2
             import numpy as np
 
-            img = np.zeros((720, 1280, 3), dtype=np.uint8)
-            img[:] = (15, 10, 5)  # Dark dramatic background
+            # Try generating a background image using fal.ai or replicate
+            bg_data = None
+            fal_key = os.getenv("FAL_KEY")
+            if fal_key and not fal_key.startswith("YOUR_"):
+                try:
+                    import fal_client
+                    import requests
+                    prompt = f"Widescreen 16:9 cinematic background representing: {req.headline_text}. Hyperrealistic, dark moody ambient lighting, dramatic atmosphere."
+                    handler = fal_client.submit(
+                        "fal-ai/flux/schnell",
+                        arguments={
+                            "prompt": prompt,
+                            "image_size": "landscape_16_9",
+                            "num_inference_steps": 4,
+                            "enable_safety_checker": True
+                        }
+                    )
+                    res = handler.get()
+                    img_url = res["images"][0]["url"]
+                    bg_data = requests.get(img_url).content
+                    print("[Thumbnail] Successfully generated background image via Fal.ai")
+                except Exception as e:
+                    print(f"[Thumbnail] Fal.ai background generation failed: {e}")
+
+            if bg_data is None:
+                replicate_token = os.getenv("REPLICATE_API_TOKEN")
+                if replicate_token and not replicate_token.startswith("YOUR_"):
+                    try:
+                        import requests
+                        headers = {
+                            "Authorization": f"Bearer {replicate_token}",
+                            "Content-Type": "application/json"
+                        }
+                        prompt = f"Widescreen 16:9 cinematic background representing: {req.headline_text}. Hyperrealistic, dark moody ambient lighting, dramatic atmosphere."
+                        body = {
+                            "input": {
+                                "prompt": prompt,
+                                "aspect_ratio": "16:9",
+                                "output_format": "png"
+                            }
+                        }
+                        r = requests.post(
+                            "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
+                            headers=headers,
+                            json=body
+                        )
+                        if r.status_code in [200, 201]:
+                            import time
+                            pred = r.json()
+                            get_url = pred["urls"]["get"]
+                            for _ in range(20):
+                                time.sleep(2)
+                                check_res = requests.get(get_url, headers=headers).json()
+                                if check_res.get("status") == "succeeded":
+                                    img_url = check_res["output"][0]
+                                    bg_data = requests.get(img_url).content
+                                    print("[Thumbnail] Successfully generated background image via Replicate")
+                                    break
+                    except Exception as e:
+                        print(f"[Thumbnail] Replicate background generation failed: {e}")
+
+            # Decode the image data or fall back to plain dark background
+            if bg_data:
+                try:
+                    nparr = np.frombuffer(bg_data, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    img = cv2.resize(img, (1280, 720))
+                    # Apply a slight dark tint/overlay to ensure text readability on top of the image
+                    overlay = img.copy()
+                    cv2.rectangle(overlay, (0, 0), (1280, 720), (10, 10, 15), -1)
+                    cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+                except Exception as img_err:
+                    print(f"[Thumbnail] Failed to decode generated background: {img_err}. Using solid fallback.")
+                    img = np.zeros((720, 1280, 3), dtype=np.uint8)
+                    img[:] = (15, 10, 5)
+            else:
+                img = np.zeros((720, 1280, 3), dtype=np.uint8)
+                img[:] = (15, 10, 5)
 
             # Glowing border & high-contrast yellow/white text overlay
             cv2.rectangle(img, (20, 20), (1260, 700), (0, 215, 255), 6)
-            cv2.putText(img, req.headline_text[:30].upper(), (60, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 4)
-            cv2.putText(img, sub_text, (60, 440), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3)
+            
+            # Word-wrap the headline into two lines of max ~25-30 chars
+            words = req.headline_text.upper().split()
+            lines = []
+            current_line = []
+            current_len = 0
+            for w in words:
+                if current_len + len(w) + 1 <= 24:
+                    current_line.append(w)
+                    current_len += len(w) + 1
+                else:
+                    if current_line:
+                        lines.append(" ".join(current_line))
+                    current_line = [w]
+                    current_len = len(w)
+            if current_line:
+                lines.append(" ".join(current_line))
+
+            # Limit to max 2 lines for thumbnail readability, adding ... if truncated
+            if len(lines) > 2:
+                lines = lines[:2]
+                lines[1] = lines[1][:21] + "..."
+            elif not lines:
+                lines = ["EXPLAINED"]
+
+            # Draw lines with clean anti-aliasing
+            y_start = 260 if len(lines) > 1 else 340
+            for idx, line in enumerate(lines):
+                cv2.putText(img, line, (60, y_start + (idx * 90)), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 4, cv2.LINE_AA)
+            
+            sub_y = y_start + (len(lines) * 90) + 10
+            cv2.putText(img, sub_text, (60, sub_y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3, cv2.LINE_AA)
 
             cv2.imwrite(req.output_thumbnail_path, img)
             return {"status": "success", "engine": "high_ctr_thumbnail", "path": req.output_thumbnail_path}
@@ -445,14 +551,30 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
             sub_path_escaped = req.subtitle_path.replace(":", "\\:").replace("'", "'\\''")
             vf_filter += f",ass='{sub_path_escaped}'"
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
-            "-vf", vf_filter,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "aac", "-b:a", "192k",
-            req.output_video_path
-        ]
+        has_bgm = False
+        if req.bgm_path and os.path.exists(req.bgm_path) and os.path.getsize(req.bgm_path) > 1000:
+            has_bgm = True
+
+        if has_bgm:
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
+                "-stream_loop", "-1", "-i", req.bgm_path,
+                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]volume=1.0[voice];[1:a]volume=0.12[bgm];[voice][bgm]amix=inputs=2:duration=first[a]",
+                "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-c:a", "aac", "-b:a", "192k",
+                req.output_video_path
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
+                "-vf", vf_filter,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-c:a", "aac", "-b:a", "192k",
+                req.output_video_path
+            ]
 
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0:
