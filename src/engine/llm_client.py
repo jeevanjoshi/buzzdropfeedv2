@@ -22,7 +22,7 @@ class LLMClient:
         llama_cpp_url: Optional[str] = None
     ):
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-        self.model = model
+        self.model = os.getenv("LLM_MODEL") or model
         self.llama_cpp_url = (llama_cpp_url or os.getenv("LLAMA_CPP_URL", "http://localhost:8080")).rstrip("/")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -150,38 +150,54 @@ class LLMClient:
                 "HTTP-Referer": "https://github.com/buzzdropfeedv2",
                 "X-Title": "CSVG Autonomous Pipeline"
             }
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt + "\nReturn ONLY valid JSON matching requested schema."},
-                    {"role": "user", "content": prompt}
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.7
-            }
-            try:
-                print(f"[LLMClient] Invoking Cloud OpenRouter ({self.model})...")
-                response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
-                response.raise_for_status()
-                data = response.json()
+            models_to_try = [self.model]
+
+            import time
+            for model_attempt in models_to_try:
+                payload = {
+                    "model": model_attempt,
+                    "messages": [
+                        {"role": "system", "content": system_prompt + "\nReturn ONLY valid JSON matching requested schema."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.7
+                }
                 
-                if "choices" not in data or not data["choices"]:
-                    print(f"[LLMClient] Cloud API returned no choices. Full response: {data}")
-                    return None
-                
-                choice = data["choices"][0]
-                finish_reason = choice.get("finish_reason")
-                content = choice.get("message", {}).get("content", "")
-                
-                print(f"[LLMClient] Cloud API Response status: {response.status_code}, content length: {len(content)}, finish_reason: {finish_reason}")
-                
-                parsed = self._clean_and_parse_json(content)
-                if parsed is not None:
-                    return parsed
-                else:
-                    print(f"[LLMClient] Failed to parse JSON from Cloud API. Raw content starts with: {content[:200]} ... ends with: {content[-200:] if len(content) > 200 else ''}")
-            except Exception as e:
-                print(f"[LLMClient] Cloud LLM Exception: {e}")
+                max_retries = 3
+                for retry_idx in range(max_retries):
+                    try:
+                        print(f"[LLMClient] Invoking Cloud OpenRouter ({model_attempt}) [Attempt {retry_idx + 1}/{max_retries}]...")
+                        response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
+                        response.raise_for_status()
+                        data = response.json()
+                        
+                        if "choices" not in data or not data["choices"]:
+                            print(f"[LLMClient] Cloud API returned no choices. Full response: {data}")
+                            time.sleep(2 * (retry_idx + 1))
+                            continue
+                        
+                        choice = data["choices"][0]
+                        finish_reason = choice.get("finish_reason")
+                        content = choice.get("message", {}).get("content", "")
+                        error_detail = choice.get("error")
+                        
+                        if error_detail or finish_reason == "error":
+                            print(f"[LLMClient] OpenRouter choice contains error: {error_detail or 'finish_reason is error'}")
+                            time.sleep(2 * (retry_idx + 1))
+                            continue
+                        
+                        print(f"[LLMClient] Cloud API Response status: {response.status_code}, content length: {len(content)}, finish_reason: {finish_reason}")
+                        
+                        parsed = self._clean_and_parse_json(content)
+                        if parsed is not None:
+                            return parsed
+                        else:
+                            print(f"[LLMClient] Failed to parse JSON from Cloud API. Raw content starts with: {content[:200]} ...")
+                    except Exception as e:
+                        print(f"[LLMClient] Cloud LLM Exception: {e}")
+                    
+                    time.sleep(2 * (retry_idx + 1))
             return None
 
         # Execute according to user preference

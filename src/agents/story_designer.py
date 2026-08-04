@@ -244,6 +244,31 @@ class StoryDesignerAgent:
                         if len(narr.split()) < 115:
                             narr = self.expand_narration_with_semantic_facts(narr, headline, category, raw_snippets, _used_snips, target_word_count=115)
 
+                        # Prune narration using NLTK ML sentence boundary detection if it exceeds 150 words
+                        word_count = len(narr.split())
+                        if word_count > 150:
+                            import nltk
+                            try:
+                                nltk.data.find('tokenizers/punkt_tab')
+                            except LookupError:
+                                nltk.download('punkt_tab', quiet=True)
+                            try:
+                                nltk.data.find('tokenizers/punkt')
+                            except LookupError:
+                                nltk.download('punkt', quiet=True)
+                            from nltk.tokenize import sent_tokenize
+                            sentences = sent_tokenize(narr)
+                            pruned_narr = ""
+                            for sent in sentences:
+                                if len((pruned_narr + " " + sent).strip().split()) <= 150:
+                                    pruned_narr = (pruned_narr + " " + sent).strip()
+                                else:
+                                    break
+                            if pruned_narr:
+                                narr = pruned_narr
+                            else:
+                                narr = " ".join(narr.split()[:150]) + "."
+
                         shots.append(ShotData(
                             shot_id=int(shot_id),
                             act_index=int(act_idx),
@@ -448,6 +473,31 @@ class StoryDesignerAgent:
                 extra_snip = raw_snippets[(idx + 2) % len(raw_snippets)]
                 if extra_snip not in narration:
                     narration += " " + extra_snip
+
+            # Prune narration using NLTK ML sentence boundary detection if it exceeds 150 words
+            word_count = len(narration.split())
+            if word_count > 150:
+                import nltk
+                try:
+                    nltk.data.find('tokenizers/punkt_tab')
+                except LookupError:
+                    nltk.download('punkt_tab', quiet=True)
+                try:
+                    nltk.data.find('tokenizers/punkt')
+                except LookupError:
+                    nltk.download('punkt', quiet=True)
+                from nltk.tokenize import sent_tokenize
+                sentences = sent_tokenize(narration)
+                pruned_narr = ""
+                for sent in sentences:
+                    if len((pruned_narr + " " + sent).strip().split()) <= 150:
+                        pruned_narr = (pruned_narr + " " + sent).strip()
+                    else:
+                        break
+                if pruned_narr:
+                    narration = pruned_narr
+                else:
+                    narration = " ".join(narration.split()[:150]) + "."
 
             dur = max(42.0, round(len(narration.split()) / 2.2, 1))
             total_runtime += dur

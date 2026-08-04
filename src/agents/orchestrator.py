@@ -145,15 +145,18 @@ class OrchestratorAgent:
 
                 quality_pass, quality_error = run_script_quality_checks()
 
-                if msg_obs.intent == AgentIntent.REVISE_SCRIPT or not quality_pass:
+                revision_round = 0
+                max_revision_rounds = 3
+                while (msg_obs.intent == AgentIntent.REVISE_SCRIPT or not quality_pass) and revision_round < max_revision_rounds:
+                    revision_round += 1
                     reason = "Observer rejection" if msg_obs.intent == AgentIntent.REVISE_SCRIPT else quality_error
                     logger.warning(
                         "PHASE_2_OBSERVER_AUDIT",
-                        f"Script failed initial validation ({reason}). Triggering A2A revision loop...",
+                        f"Script failed validation round {revision_round} ({reason}). Triggering A2A revision loop...",
                         pipeline_id=p_id, component="OBSERVER",
-                        fix_hint="Retrying StoryDesigner with strict RAG constraints."
+                        fix_hint=f"Retrying StoryDesigner (round {revision_round}/{max_revision_rounds}) with strict constraints."
                     )
-                    tracer.record_step(state, "SCRIPT_REVISION_REQUIRED", message=msg_obs, status="WARNING")
+                    tracer.record_step(state, f"SCRIPT_REVISION_REQUIRED_R{revision_round}", message=msg_obs, status="WARNING")
                     
                     # Extract and pass detailed validation issues to StoryDesigner
                     violations = []
