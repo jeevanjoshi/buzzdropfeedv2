@@ -6,543 +6,491 @@
   <title>CSVG Pipeline Verification Center</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <style>
     :root {
-      --bg-color: #0b0f19;
-      --panel-bg: rgba(20, 26, 46, 0.45);
-      --panel-border: rgba(255, 255, 255, 0.08);
-      --text-main: #f3f4f6;
-      --text-muted: #9ca3af;
-      --accent-blue: #3b82f6;
-      --accent-green: #10b981;
-      --accent-red: #ef4444;
-      --accent-purple: #8b5cf6;
-      --glow-shadow: 0 0 25px rgba(59, 130, 246, 0.2);
+      --bg: #05070f;
+      --panel: rgba(15, 20, 38, 0.6);
+      --panel-solid: #0b1020;
+      --border: rgba(255, 255, 255, 0.07);
+      --text: #eef1f8;
+      --muted: #7c8598;
+      --blue: #3b82f6;
+      --green: #10b981;
+      --red: #ef4444;
+      --purple: #8b5cf6;
+      --amber: #f59e0b;
+      --cyan: #22d3ee;
     }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: 'Outfit', sans-serif;
-      background-color: var(--bg-color);
-      color: var(--text-main);
+      background: var(--bg);
+      color: var(--text);
       min-height: 100vh;
       overflow-x: hidden;
-      background-image: 
-        radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.05) 0%, transparent 40%),
-        radial-gradient(circle at 90% 80%, rgba(139, 92, 246, 0.05) 0%, transparent 40%);
     }
 
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 40px 20px;
+    .aurora {
+      position: fixed; inset: 0; z-index: -1; overflow: hidden;
+      background:
+        radial-gradient(circle at 12% 18%, rgba(59,130,246,0.12) 0%, transparent 42%),
+        radial-gradient(circle at 88% 78%, rgba(139,92,246,0.12) 0%, transparent 42%),
+        radial-gradient(circle at 72% 15%, rgba(16,185,129,0.07) 0%, transparent 30%),
+        radial-gradient(circle at 25% 85%, rgba(34,211,238,0.06) 0%, transparent 32%);
+      filter: blur(2px);
     }
-
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 40px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid var(--panel-border);
+    .aurora::before {
+      content: ''; position: absolute; width: 60vw; height: 60vw; border-radius: 50%;
+      background: radial-gradient(circle, rgba(59,130,246,0.08), transparent 60%);
+      animation: drift 22s ease-in-out infinite;
     }
-
-    .logo-container {
-      display: flex;
-      align-items: center;
-      gap: 15px;
+    .aurora::after {
+      content: ''; position: absolute; width: 50vw; height: 50vw; border-radius: 50%;
+      right: -10vw; bottom: -10vw;
+      background: radial-gradient(circle, rgba(139,92,246,0.08), transparent 60%);
+      animation: drift 28s ease-in-out infinite reverse;
     }
+    @keyframes drift { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(6vw,4vw) scale(1.15); } }
 
-    .logo-glow {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background: var(--accent-green);
-      box-shadow: 0 0 15px var(--accent-green);
-      animation: pulse 2s infinite;
+    .app { max-width: 1240px; margin: 0 auto; padding: 34px 22px 70px; position: relative; z-index: 1; }
+
+    /* ── Header ─────────────────────────────────────────── */
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; padding-bottom: 22px; border-bottom: 1px solid var(--border); }
+
+    .brand { display: flex; align-items: center; gap: 15px; }
+    .brand-logo {
+      width: 44px; height: 44px; border-radius: 13px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6 60%, #22d3ee);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 20px; color: #fff;
+      box-shadow: 0 10px 28px rgba(59,130,246,0.4);
     }
+    .brand h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.4px; background: linear-gradient(120deg,#fff,#a5b4fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .brand p { font-size: 12px; color: var(--muted); }
 
-    @keyframes pulse {
-      0% { opacity: 0.6; box-shadow: 0 0 5px var(--accent-green); }
-      50% { opacity: 1; box-shadow: 0 0 20px var(--accent-green); }
-      100% { opacity: 0.6; box-shadow: 0 0 5px var(--accent-green); }
-    }
+    .header-actions { display: flex; gap: 12px; align-items: center; }
 
-    .logo-text h1 {
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: -0.5px;
-      background: linear-gradient(135deg, #fff 0%, #a5b4fc 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-
-    .logo-text p {
-      font-size: 12px;
-      color: var(--text-muted);
-    }
-
-    .system-status {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      padding: 8px 16px;
-      border-radius: 30px;
-      font-size: 14px;
-      font-weight: 500;
-      backdrop-filter: blur(10px);
-    }
-
-    .tabs {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 30px;
-    }
-
-    .tab-btn {
-      background: transparent;
-      border: 1px solid transparent;
-      color: var(--text-muted);
-      padding: 10px 20px;
-      border-radius: 8px;
-      cursor: pointer;
-      font-family: inherit;
-      font-weight: 500;
-      font-size: 15px;
-      transition: all 0.3s ease;
-    }
-
-    .tab-btn:hover {
-      color: var(--text-main);
-      background: rgba(255, 255, 255, 0.04);
-    }
-
-    .tab-btn.active {
-      color: var(--text-main);
-      background: var(--panel-bg);
-      border-color: var(--panel-border);
-      box-shadow: var(--glow-shadow);
-    }
-
-    .tab-content {
-      display: none;
-      animation: fadeIn 0.4s ease forwards;
-    }
-
-    .tab-content.active {
-      display: block;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .grid-stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 20px;
-      margin-bottom: 30px;
-    }
-
-    .card {
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      border-radius: 16px;
-      padding: 24px;
-      backdrop-filter: blur(12px);
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    .card:hover {
-      transform: translateY(-4px);
-      border-color: rgba(255, 255, 255, 0.15);
-      box-shadow: var(--glow-shadow);
-    }
-
-    .card-title {
-      font-size: 14px;
-      font-weight: 500;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 12px;
-    }
-
-    .card-value {
-      font-size: 32px;
-      font-weight: 700;
-      letter-spacing: -1px;
-    }
-
-    .card-footer {
-      margin-top: 12px;
-      font-size: 13px;
-      color: var(--text-muted);
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-
-    .progress-bar-container {
-      width: 100%;
-      height: 6px;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 3px;
-      margin-top: 15px;
-      overflow: hidden;
-    }
-
-    .progress-bar {
-      height: 100%;
-      background: linear-gradient(90deg, var(--accent-blue) 0%, var(--accent-purple) 100%);
-      border-radius: 3px;
-    }
-
-    .console-panel {
-      background: #060913;
-      border: 1px solid var(--panel-border);
-      border-radius: 16px;
-      overflow: hidden;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-    }
-
-    .console-header {
-      background: rgba(255, 255, 255, 0.02);
-      padding: 12px 20px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 1px solid var(--panel-border);
-    }
-
-    .console-dots {
-      display: flex;
-      gap: 6px;
-    }
-
-    .dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-    }
-
-    .dot.red { background: var(--accent-red); }
-    .dot.yellow { background: #f59e0b; }
-    .dot.green { background: var(--accent-green); }
-
-    .console-title {
-      font-size: 13px;
-      color: var(--text-muted);
-      font-family: 'JetBrains Mono', monospace;
-    }
-
-    .console-body {
-      padding: 20px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 13px;
-      line-height: 1.6;
-      color: #38bdf8;
-      max-height: 500px;
-      overflow-y: auto;
-      background: #020617;
-    }
-
-    .console-body pre {
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
-
-    .published-list {
-      display: flex;
-      flex-direction: column;
-      gap: 15px;
-    }
-
-    .published-item {
-      background: var(--panel-bg);
-      border: 1px solid var(--panel-border);
-      border-radius: 12px;
-      padding: 20px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      transition: all 0.2s ease;
-    }
-
-    .published-item:hover {
-      border-color: rgba(255,255,255,0.12);
-      transform: translateX(3px);
-    }
-
-    .published-info h3 {
-      font-size: 16px;
-      font-weight: 600;
-      margin-bottom: 6px;
-    }
-
-    .published-meta {
-      font-size: 13px;
-      color: var(--text-muted);
-      display: flex;
-      gap: 15px;
-    }
-
-    .badge {
-      padding: 3px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-
-    .badge-blue { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
-    .badge-green { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-
-    .btn-action {
-      background: var(--accent-red);
-      color: white;
-      border: none;
-      padding: 8px 16px;
-      border-radius: 6px;
-      font-family: inherit;
-      font-weight: 600;
-      cursor: pointer;
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      transition: opacity 0.2s;
-    }
-
-    .btn-action:hover {
-      opacity: 0.9;
-    }
-
-    .btn-refresh {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid var(--panel-border);
-      color: var(--text-main);
-      padding: 8px 16px;
-      border-radius: 30px;
-      font-size: 13px;
-      cursor: pointer;
-      font-family: inherit;
-      font-weight: 500;
-      display: flex;
-      align-items: center;
-      gap: 6px;
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+      color: var(--text); padding: 9px 16px; border-radius: 30px;
+      font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
       transition: all 0.2s;
     }
+    .btn:hover { background: rgba(255,255,255,0.1); }
+    .btn:active { transform: scale(0.96); }
+    .btn.primary { background: linear-gradient(135deg,#3b82f6,#2563eb); border: none; box-shadow: 0 8px 20px rgba(59,130,246,0.3); }
+    .btn.primary:hover { box-shadow: 0 10px 26px rgba(59,130,246,0.45); }
+    .btn svg { width: 15px; height: 15px; }
+    .btn.spinning svg { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    .btn-refresh:hover {
-      background: rgba(255, 255, 255, 0.1);
+    .status-pill {
+      display: flex; align-items: center; gap: 9px;
+      background: var(--panel); border: 1px solid var(--border);
+      padding: 10px 16px; border-radius: 30px; font-size: 13px; font-weight: 600;
+      backdrop-filter: blur(14px); transition: all 0.3s;
     }
+    .dot { width: 9px; height: 9px; border-radius: 50%; }
+    .dot.running { background: var(--green); animation: blink 1.2s infinite; }
+    .dot.idle { background: #64748b; }
+    .dot.error { background: var(--red); animation: blink 0.7s infinite; }
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .status-pill.running { border-color: rgba(16,185,129,0.35); box-shadow: 0 0 22px rgba(16,185,129,0.12); }
+    .status-pill.error { border-color: rgba(239,68,68,0.4); box-shadow: 0 0 22px rgba(239,68,68,0.12); }
+
+    /* ── Tabs ───────────────────────────────────────────── */
+    .tabs { display: flex; gap: 8px; margin-bottom: 26px; }
+    .tab {
+      background: transparent; border: 1px solid transparent; color: var(--muted);
+      padding: 10px 18px; border-radius: 10px; cursor: pointer;
+      font-family: inherit; font-weight: 600; font-size: 14px;
+      display: flex; align-items: center; gap: 8px; transition: all 0.25s;
+    }
+    .tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .tab.active { color: var(--text); background: var(--panel); border-color: var(--border); box-shadow: 0 0 24px rgba(59,130,246,0.12); }
+    .tab svg { width: 15px; height: 15px; }
+
+    /* ── Stage tracker ──────────────────────────────────── */
+    .stage-tracker {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin-bottom: 22px; padding: 14px 18px;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 14px; backdrop-filter: blur(14px);
+    }
+    .stage-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1.2px; font-weight: 700; }
+    .stage-badge {
+      font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
+      padding: 5px 12px; border-radius: 8px;
+      border: 1px solid; transition: all 0.4s;
+    }
+    .hb-age { margin-left: auto; font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+    .hb-age strong { color: var(--green); }
+    .hb-age.live strong { animation: blink 1.4s infinite; }
+
+    .stage-progress { display: flex; gap: 6px; align-items: center; margin-top: 12px; width: 100%; }
+    .stage-seg { flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.07); overflow: hidden; }
+    .stage-seg.filled { background: linear-gradient(90deg,#3b82f6,#8b5cf6,#22d3ee); box-shadow: 0 0 8px rgba(139,92,246,0.5); }
+    .stage-seg.current { animation: pulseBar 1.6s infinite; }
+    @keyframes pulseBar { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* ── Cards ──────────────────────────────────────────── */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-bottom: 24px; }
+
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 16px; padding: 20px 22px; position: relative; overflow: hidden;
+      backdrop-filter: blur(14px); transition: all 0.3s cubic-bezier(.4,0,.2,1);
+    }
+    .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg,var(--blue),var(--purple),var(--green)); opacity: 0; transition: opacity 0.3s; }
+    .card:hover { transform: translateY(-4px); border-color: rgba(255,255,255,0.14); box-shadow: 0 16px 40px rgba(0,0,0,0.4); }
+    .card:hover::before { opacity: 1; }
+
+    .card-icon {
+      width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+      margin-bottom: 12px; font-size: 16px;
+    }
+    .card-icon svg { width: 17px; height: 17px; }
+
+    .card-title { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+    .card-value { font-size: 30px; font-weight: 800; letter-spacing: -1px; line-height: 1.1; }
+    .card-sub { margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+
+    .bar { width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; margin-top: 14px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg,var(--blue),var(--purple)); transition: width 0.9s cubic-bezier(.4,0,.2,1); }
+
+    .count { font-variant-numeric: tabular-nums; }
+
+    /* ── Console ────────────────────────────────────────── */
+    .console {
+      background: #04060d; border: 1px solid var(--border);
+      border-radius: 16px; overflow: hidden; box-shadow: 0 16px 44px rgba(0,0,0,0.5);
+    }
+    .console-head {
+      background: rgba(255,255,255,0.02); padding: 12px 18px;
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .console-dots { display: flex; gap: 6px; }
+    .cd { width: 12px; height: 12px; border-radius: 50%; }
+    .cd-r { background: var(--red); } .cd-y { background: var(--amber); } .cd-g { background: var(--green); }
+    .console-title { font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+    .console-body {
+      padding: 16px 18px; font-family: 'JetBrains Mono', monospace;
+      font-size: 12.5px; line-height: 1.75; max-height: 520px; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.14) transparent;
+    }
+    .console-body::-webkit-scrollbar { width: 8px; }
+    .console-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+    .log-line { white-space: pre-wrap; word-wrap: break-word; color: #7dd3fc; }
+    .log-empty { color: var(--muted); }
+
+    /* ── Published ──────────────────────────────────────── */
+    .pub-list { display: flex; flex-direction: column; gap: 13px; }
+    .pub-item {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 14px; padding: 18px 20px;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      backdrop-filter: blur(12px); transition: all 0.25s;
+      animation: fadeUp 0.35s ease both;
+    }
+    .pub-item:hover { border-color: rgba(255,255,255,0.15); transform: translateX(4px); }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    .pub-title { font-size: 15.5px; font-weight: 700; margin-bottom: 8px; }
+    .pub-meta { font-size: 12.5px; color: var(--muted); display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    .pub-meta svg { width: 12px; height: 12px; vertical-align: -1px; margin-right: 4px; }
+    .badge { padding: 3px 9px; border-radius: 6px; font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
+    .badge-green { background: rgba(16,185,129,0.14); color: #34d399; border: 1px solid rgba(16,185,129,0.3); }
+    .badge-blue { background: rgba(59,130,246,0.14); color: #60a5fa; border: 1px solid rgba(59,130,246,0.3); }
+    .watch-btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      background: linear-gradient(135deg,#ef4444,#dc2626); color: #fff;
+      padding: 9px 16px; border-radius: 8px; font-family: inherit;
+      font-weight: 700; font-size: 12.5px; text-decoration: none;
+      box-shadow: 0 6px 16px rgba(239,68,68,0.28); transition: all 0.2s;
+    }
+    .watch-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(239,68,68,0.4); }
+    .watch-btn svg { width: 15px; height: 15px; }
+
+    .empty { text-align: center; color: var(--muted); padding: 48px; font-size: 14px; }
+    .skeleton {
+      background: linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.09), rgba(255,255,255,0.04));
+      background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 8px;
+    }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+
+    .footer-note { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 16px; font-size: 11px; color: #4b5563; font-family: 'JetBrains Mono', monospace; }
+    .footer-note .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: blink 1.6s infinite; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div class="logo-container">
-        <div class="logo-glow" id="statusGlow"></div>
-        <div class="logo-text">
-          <h1>CSVG Edge</h1>
-          <p>Local Raspberry Pi 5 Verification Portal</p>
-        </div>
-      </div>
-      <div style="display: flex; gap: 15px; align-items: center;">
-        <button class="btn-refresh" onclick="reloadData()">
-          <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.753 8H17"></path></svg>
-          Refresh
-        </button>
-        <div class="system-status" id="statusLabel">
-          Connecting...
-        </div>
-      </div>
-    </header>
+  <div class="aurora"></div>
+  <div id="root"></div>
 
-    <div class="tabs">
-      <button class="tab-btn active" onclick="switchTab('overview')">Overview & Metrics</button>
-      <button class="tab-btn" onclick="switchTab('logs')">Live Run Logs</button>
-      <button class="tab-btn" onclick="switchTab('published')">Published Stories</button>
-    </div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
 
-    <!-- Overview Tab -->
-    <div id="overview" class="tab-content active">
-      <div class="grid-stats">
-        <div class="card">
-          <div class="card-title">Channel Niche / Phase</div>
-          <div class="card-value" id="statPhase">-</div>
-          <div class="card-footer" id="statPhaseText">Analyzing YouTube Performance...</div>
-        </div>
-        <div class="card">
-          <div class="card-title">Subscribers</div>
-          <div class="card-value" id="statSubs">0</div>
-          <div class="card-footer">Target: 1,000 for YPP</div>
-          <div class="progress-bar-container">
-            <div class="progress-bar" id="subsBar" style="width: 0%"></div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-title">Watch Hours</div>
-          <div class="card-value" id="statWatchHours">0.0h</div>
-          <div class="card-footer">Target: 4,000 hours</div>
-          <div class="progress-bar-container">
-            <div class="progress-bar" id="watchBar" style="width: 0%"></div>
-          </div>
-        </div>
-      </div>
-      
-      <div class="console-panel" style="margin-top: 30px;">
-        <div class="console-header">
-          <div class="console-dots">
-            <div class="dot red"></div>
-            <div class="dot yellow"></div>
-            <div class="dot green"></div>
-          </div>
-          <div class="console-title">csvg_execution.log</div>
-        </div>
-        <div class="console-body" style="max-height: 250px;">
-          <pre id="recentLogsPre">Loading execution events...</pre>
-        </div>
-      </div>
-    </div>
+    const STAGES = [
+      'INITIALIZATION', 'TOPIC_SELECTED', 'SCRIPT_GENERATED', 'SCRIPT_APPROVED',
+      'MEDIA_PRODUCED', 'VIDEO_QUALITY', 'PUBLISHED', 'PUBLISHED_SUCCESS'
+    ];
+    const STAGE_META = {
+      'TOPIC_SELECTED': 1, 'SCRIPT_GENERATED': 2, 'SCRIPT_APPROVED': 3,
+      'MEDIA_PRODUCED': 4, 'VIDEO_QUALITY': 5, 'PUBLISHED': 6, 'PUBLISHED_SUCCESS': 7
+    };
+    const STAGE_COLOR = (s) => {
+      if (!s) return '#fbbf24';
+      if (s.startsWith('SCRIPT')) return '#60a5fa';
+      if (s.startsWith('MEDIA') || s.startsWith('VIDEO')) return '#a78bfa';
+      if (s.startsWith('PUBLISHED')) return '#34d399';
+      if (s.startsWith('TOPIC')) return '#60a5fa';
+      return '#fbbf24';
+    };
 
-    <!-- Logs Tab -->
-    <div id="logs" class="tab-content">
-      <div class="console-panel">
-        <div class="console-header">
-          <div class="console-dots">
-            <div class="dot red"></div>
-            <div class="dot yellow"></div>
-            <div class="dot green"></div>
-          </div>
-          <div class="console-title">pipeline_run.log</div>
-        </div>
-        <div class="console-body" id="consoleBody">
-          <pre id="rawLogsPre">Loading pipeline execution logs...</pre>
-        </div>
-      </div>
-    </div>
+    const IconRefresh = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.753 8H17"/></svg>
+    );
+    const IconHome = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+    );
+    const IconTerminal = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l3 3-3 3m5 0h3M5 4h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg>
+    );
+    const IconVideo = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 13m-5-2H6a2 2 0 00-2 2v2a2 2 0 002 2h4v4l6-3.75V8.75L10 5v6z"/></svg>
+    );
+    const IconSubs = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+    );
+    const IconClock = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+    );
+    const IconChart = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+    );
+    const IconCal = () => (
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+    );
 
-    <!-- Published Tab -->
-    <div id="published" class="tab-content">
-      <div class="published-list" id="publishedContainer">
-        <div style="text-align: center; color: var(--text-muted); padding: 40px;">
-          Loading published video list...
+    function StatusPill({ running, error }) {
+      const cls = error ? 'error' : (running ? 'running' : 'idle');
+      return (
+        <div className={'status-pill ' + (running ? 'running' : error ? 'error' : '')}>
+          <span className={'dot ' + cls} />
+          <span>{error ? 'Connection Error' : running ? 'Pipeline Running' : 'Pipeline Idle'}</span>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    function switchTab(tabId) {
-      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-      
-      event.currentTarget.classList.add('active');
-      document.getElementById(tabId).classList.add('active');
+      );
     }
 
-    async function reloadData() {
-      try {
-        const statusRes = await fetch('/api/status');
-        const statusData = await statusRes.json();
-        
-        // Update status UI
-        const statusLabel = document.getElementById('statusLabel');
-        const statusGlow = document.getElementById('statusGlow');
-        if (statusData.is_running) {
-          statusLabel.innerHTML = '● Pipeline Running';
-          statusLabel.style.color = '#10b981';
-          statusGlow.style.background = '#10b981';
-          statusGlow.style.boxShadow = '0 0 15px #10b981';
-        } else {
-          statusLabel.innerHTML = '● Pipeline Idle';
-          statusLabel.style.color = '#9ca3af';
-          statusGlow.style.background = '#3b82f6';
-          statusGlow.style.boxShadow = '0 0 15px #3b82f6';
-        }
+    function StageTracker({ stage }) {
+      const idx = stage ? STAGE_META[stage] : -1;
+      const color = STAGE_COLOR(stage);
+      return (
+        <div className="stage-tracker">
+          <span className="stage-label">Pipeline Stage</span>
+          <span className="stage-badge" style={{ color, borderColor: color + '55', background: color + '1c' }}>{stage || 'NOT_STARTED'}</span>
+          <span className="hb-age" id="hbAge">heartbeat: <strong>--</strong></span>
+          <div className="stage-progress">
+            {STAGES.slice(1, 8).map((s, i) => (
+              <div key={s} className={'stage-seg ' + (i <= idx ? 'filled' : '') + (i === idx ? ' current' : '')} />
+            ))}
+          </div>
+        </div>
+      );
+    }
 
-        const stats = statusData.channel_stats;
-        if (stats) {
-          document.getElementById('statPhase').innerText = stats.channel_phase || 'GROWTH';
-          document.getElementById('statSubs').innerText = (stats.subscribers || 0).toLocaleString();
-          document.getElementById('statWatchHours').innerText = (stats.total_watch_hours || 0).toFixed(1) + 'h';
-          
-          // Progress bars
-          const subsPct = Math.min(100, ((stats.subscribers || 0) / 1000) * 100);
-          const watchPct = Math.min(100, ((stats.total_watch_hours || 0) / 4000) * 100);
-          document.getElementById('subsBar').style.width = subsPct + '%';
-          document.getElementById('watchBar').style.width = watchPct + '%';
-          
-          document.getElementById('statPhaseText').innerText = stats.ypp_unlocked ? 'Monetization Active' : 'Unlocking Partner Program';
-        }
+    function StatCard({ icon, iconBg, iconColor, title, value, valueColor, sub, pct }) {
+      return (
+        <div className="card">
+          <div className="card-icon" style={{ background: iconBg, color: iconColor }}>{icon}</div>
+          <div className="card-title">{title}</div>
+          <div className="card-value count" style={{ color: valueColor }}>{value}</div>
+          <div className="card-sub">{sub}</div>
+          {pct != null && (
+            <div className="bar"><div className="bar-fill" style={{ width: pct + '%' }} /></div>
+          )}
+        </div>
+      );
+    }
 
-        // Load Logs
-        const logsRes = await fetch('/api/logs');
-        const logsData = await logsRes.json();
-        document.getElementById('rawLogsPre').innerText = logsData.raw_logs || 'No execution logs found.';
-        
-        // Populate recent structured logs
-        const recentLogsPre = document.getElementById('recentLogsPre');
-        if (logsData.structured_logs && logsData.structured_logs.length > 0) {
-          recentLogsPre.innerText = logsData.structured_logs.map(log => 
-            `[${log.timestamp.slice(11, 19)}] [${log.level}] [${log.stage}] ${log.message}`
-          ).join('\n');
-        } else {
-          recentLogsPre.innerText = 'No system events found.';
-        }
+    function Console({ title, lines, maxHeight }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+      }, [lines]);
+      return (
+        <div className="console">
+          <div className="console-head">
+            <div className="console-dots"><span className="cd cd-r" /><span className="cd cd-y" /><span className="cd cd-g" /></div>
+            <div className="console-title">{title}</div>
+          </div>
+          <div className="console-body" ref={ref} style={maxHeight ? { maxHeight } : null}>
+            {lines.length === 0 ? <div className="log-empty">No logs found.</div> :
+              lines.map((l, i) => <div key={i} className="log-line">{l}</div>)}
+          </div>
+        </div>
+      );
+    }
 
-        // Load Published
-        const pubRes = await fetch('/api/published');
-        const pubData = await pubRes.json();
-        const pubContainer = document.getElementById('publishedContainer');
-        
-        if (pubData && pubData.length > 0) {
-          pubContainer.innerHTML = pubData.reverse().map(pub => {
-            const dateStr = pub.timestamp ? new Date(pub.timestamp).toLocaleString() : 'N/A';
-            return `
-              <div class="published-item">
-                <div class="published-info">
-                  <h3>${pub.headline || pub.topic || 'Untitled video'}</h3>
-                  <div class="published-meta">
-                    <span>📅 ${dateStr}</span>
-                    <span>📈 TOPSIS: <strong>${(pub.topsis_score || 0).toFixed(4)}</strong></span>
-                    <span class="badge ${pub.published ? 'badge-green' : 'badge-blue'}">${pub.published ? 'Published' : 'Generated'}</span>
-                  </div>
+    function PublishedList({ items }) {
+      if (!items || items.length === 0) return <div className="empty">No published videos detected yet.</div>;
+      return (
+        <div className="pub-list">
+          {items.slice().reverse().map((pub, i) => (
+            <div className="pub-item" key={i} style={{ animationDelay: (i * 0.05) + 's' }}>
+              <div>
+                <div className="pub-title">{pub.headline || pub.topic || 'Untitled video'}</div>
+                <div className="pub-meta">
+                  <span><IconCal />{pub.timestamp ? new Date(pub.timestamp).toLocaleString() : 'N/A'}</span>
+                  <span><IconChart />TOPSIS: <strong>{(pub.topsis_score || 0).toFixed(4)}</strong></span>
+                  <span className={'badge ' + (pub.published ? 'badge-green' : 'badge-blue')}>{pub.published ? 'Published' : 'Generated'}</span>
                 </div>
-                ${pub.video_id ? `
-                  <a href="https://www.youtube.com/watch?v=${pub.video_id}" target="_blank" class="btn-action">
-                    <svg style="width: 16px; height: 16px;" fill="currentColor" viewBox="0 0 24 24"><path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.11C19.518 3.545 12 3.545 12 3.545s-7.518 0-9.388.508a3.003 3.003 0 0 0-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 0 0 2.11 2.11c1.87.508 9.388.508 9.388.508s7.518 0 9.388-.508a3.003 3.003 0 0 0 2.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
-                    Watch
-                  </a>
-                ` : ''}
               </div>
-            `;
-          }).join('');
-        } else {
-          pubContainer.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 40px;">No published videos detected yet.</div>';
-        }
-      } catch (err) {
-        console.error(err);
-        document.getElementById('statusLabel').innerHTML = '⚠️ Fetch Error';
-        document.getElementById('statusLabel').style.color = '#ef4444';
-      }
+              {pub.video_id && (
+                <a className="watch-btn" href={'https://www.youtube.com/watch?v=' + pub.video_id} target="_blank" rel="noreferrer">
+                  <IconVideo /> Watch
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      );
     }
 
-    // Auto load & poll every 10 seconds
-    reloadData();
-    setInterval(reloadData, 10000);
+    function App() {
+      const [tab, setTab] = useState('overview');
+      const [status, setStatus] = useState(null);
+      const [error, setError] = useState(false);
+      const [spinning, setSpinning] = useState(false);
+      const [rawLogs, setRawLogs] = useState([]);
+      const [structured, setStructured] = useState([]);
+      const [published, setPublished] = useState([]);
+      const hbRef = useRef(null);
+
+      const fetchAll = useCallback(async () => {
+        try {
+          const [sRes, lRes, pRes] = await Promise.all([
+            fetch('/api/status'), fetch('/api/logs'), fetch('/api/published')
+          ]);
+          const [sData, lData, pData] = await Promise.all([sRes.json(), lRes.json(), pRes.json()]);
+          setStatus(sData);
+          setError(false);
+          setRawLogs(lData.raw_logs ? lData.raw_logs.split('\n') : []);
+          setStructured(lData.structured_logs || []);
+          setPublished(pData || []);
+        } catch (e) {
+          console.error(e);
+          setError(true);
+        }
+      }, []);
+
+      useEffect(() => {
+        fetchAll();
+        const poll = setInterval(fetchAll, 10000);
+        return () => clearInterval(poll);
+      }, [fetchAll]);
+
+      useEffect(() => {
+        const el = hbRef.current;
+        if (el && status) {
+          if (status.heartbeat_age_sec != null) {
+            const s = Math.max(0, Math.round(status.heartbeat_age_sec));
+            el.innerHTML = status.is_running ? 'heartbeat: <strong class="live">live</strong>' : 'heartbeat: <strong>' + s + 's ago</strong>';
+          } else {
+            el.innerHTML = 'heartbeat: <strong>--</strong>';
+          }
+        }
+      }, [status]);
+
+      const running = status ? status.is_running : false;
+      const stats = status && status.channel_stats;
+
+      const structuredLines = structured.map(log =>
+        '[' + ((log.timestamp || '').slice(11, 19)) + '] [' + log.level + '] [' + log.stage + '] ' + log.message
+      );
+
+      return (
+        <div className="app">
+          <header className="header">
+            <div className="brand">
+              <div className="brand-logo">C</div>
+              <div>
+                <h1>CSVG Edge</h1>
+                <p>Raspberry Pi 5 · Autonomous Pipeline Control</p>
+              </div>
+            </div>
+            <div className="header-actions">
+              <button className={'btn' + (spinning ? ' spinning' : '')} onClick={() => { setSpinning(true); fetchAll().finally(() => setTimeout(() => setSpinning(false), 800)); }}>
+                <IconRefresh /> Refresh
+              </button>
+              <StatusPill running={running} error={error} />
+            </div>
+          </header>
+
+          <nav className="tabs">
+            {[
+              { id: 'overview', label: 'Overview & Metrics', icon: <IconHome /> },
+              { id: 'logs', label: 'Live Run Logs', icon: <IconTerminal /> },
+              { id: 'published', label: 'Published Stories', icon: <IconVideo /> },
+            ].map(t => (
+              <button key={t.id} className={'tab' + (tab === t.id ? ' active' : '')} onClick={() => setTab(t.id)}>
+                {t.icon}{t.label}
+              </button>
+            ))}
+          </nav>
+
+          {tab === 'overview' && (
+            <>
+              <StageTracker stage={status ? status.latest_stage : null} />
+
+              {!stats ? (
+                <div className="grid">
+                  {[0, 1, 2].map(i => <div key={i} className="card"><div className="skeleton" style={{ height: 100 }} /></div>)}
+                </div>
+              ) : (
+                <div className="grid">
+                  <StatCard
+                    icon={<IconChart />} iconBg="rgba(139,92,246,0.16)" iconColor="#a78bfa"
+                    title="Channel Phase" value={stats.channel_phase || 'GROWTH'} valueColor="#a78bfa"
+                    sub={stats.ypp_unlocked ? 'Monetization Active' : 'Unlocking Partner Program'}
+                  />
+                  <StatCard
+                    icon={<IconSubs />} iconBg="rgba(59,130,246,0.16)" iconColor="#60a5fa"
+                    title="Subscribers" value={(stats.subscribers || 0).toLocaleString()} valueColor="#60a5fa"
+                    sub="Target: 1,000 for YPP"
+                    pct={Math.min(100, ((stats.subscribers || 0) / 1000) * 100)}
+                  />
+                  <StatCard
+                    icon={<IconClock />} iconBg="rgba(16,185,129,0.16)" iconColor="#34d399"
+                    title="Watch Hours" value={(stats.total_watch_hours || 0).toFixed(1) + 'h'} valueColor="#34d399"
+                    sub="Target: 4,000 hours"
+                    pct={Math.min(100, ((stats.total_watch_hours || 0) / 4000) * 100)}
+                  />
+                </div>
+              )}
+
+              <Console title="csvg_execution.log" lines={structuredLines} maxHeight="240px" />
+            </>
+          )}
+
+          {tab === 'logs' && <Console title="pipeline_run.log" lines={rawLogs} />}
+
+          {tab === 'published' && <PublishedList items={published} />}
+
+          <div className="footer-note">
+            <span className="live-dot" /> live feed · auto-refresh 10s
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
   </script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </body>
 </html>

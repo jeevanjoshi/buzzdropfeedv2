@@ -106,6 +106,21 @@ class TestCSVGPipeline(unittest.TestCase):
         test_gate4_resolution()
         print("✓ Gate 4 resolution + measured-duration skip")
 
+    def test_observer_fixes(self):
+        from tests.test_observer_fixes import (
+            test_keyword_repetition_excludes_topic_state,
+            test_keyword_repetition_still_flags_real_slop,
+            test_source_diversity_lenient_for_tiny_cites,
+            test_source_diversity_enforced_at_scale,
+            test_topic_entities_from_summary_excluded,
+        )
+        test_keyword_repetition_excludes_topic_state()
+        test_keyword_repetition_still_flags_real_slop()
+        test_source_diversity_lenient_for_tiny_cites()
+        test_source_diversity_enforced_at_scale()
+        test_topic_entities_from_summary_excluded()
+        print("✓ Observer fixes (state/entity exclusion, source-diversity leniency)")
+
     def test_full_pipeline_mocked_e2e(self):
         test_full_pipeline_mocked_e2e()
         print("✓ Full E2E mocked pipeline (real Pi TTS, mocked upstream data + upload)")

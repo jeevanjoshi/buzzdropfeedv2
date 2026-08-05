@@ -162,25 +162,35 @@ class OrchestratorAgent:
                         fix_hint="Retrying StoryDesigner with strict RAG constraints."
                     )
                     tracer.record_step(state, "SCRIPT_REVISION_REQUIRED", message=msg_obs, status="WARNING")
-                    
-                    # Extract and pass detailed validation issues to StoryDesigner
-                    violations = []
-                    if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
-                        violations.extend(msg_obs.payload.get("violations", []))
-                    if not quality_pass and quality_error:
-                        violations.append(quality_error)
 
-                    # Retry Story Designer with corrective feedback
-                    msg_script = self.story_designer.process(state, revision_violations=violations)
-                    msg_obs = self.observer.process(state)
-                    # Re-run script quality checks
-                    quality_pass, quality_error = run_script_quality_checks()
+                    # Bounded revision loop: retry StoryDesigner with corrective feedback
+                    # up to MAX_REVISIONS times before giving up. Each round re-audits and
+                    # re-checks quality so genuinely stubborn drafts don't abort the run
+                    # after a single retry, while still bounding wasted LLM spend.
+                    MAX_REVISIONS = 3
+                    revision_ok = False
+                    for attempt in range(1, MAX_REVISIONS + 1):
+                        violations = []
+                        if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
+                            violations.extend(msg_obs.payload.get("violations", []))
+                        if not quality_pass and quality_error:
+                            violations.append(quality_error)
 
-                if msg_obs.intent == AgentIntent.REVISE_SCRIPT:
-                    raise RuntimeError(f"Script failed Observer audit: {msg_obs.payload.get('violations')}")
-                
-                if not quality_pass:
-                    raise RuntimeError(f"Script failed pre-production quality check: {quality_error}")
+                        logger.warning(
+                            "PHASE_2_OBSERVER_AUDIT",
+                            f"Revision attempt {attempt}/{MAX_REVISIONS} with {len(violations)} violation(s).",
+                            pipeline_id=p_id, component="OBSERVER"
+                        )
+                        msg_script = self.story_designer.process(state, revision_violations=violations)
+                        msg_obs = self.observer.process(state)
+                        quality_pass, quality_error = run_script_quality_checks()
+
+                        if msg_obs.intent != AgentIntent.REVISE_SCRIPT and quality_pass:
+                            revision_ok = True
+                            break
+
+                    if not revision_ok:
+                        raise RuntimeError(f"Script failed Observer audit after {MAX_REVISIONS} revisions: {msg_obs.payload.get('violations')}")
 
                 logger.info("PHASE_2_OBSERVER_AUDIT", "Observer Audit & Quality Gates Passed 100%! Script approved.", pipeline_id=p_id, component="OBSERVER")
                 tracer.record_step(state, "SCRIPT_APPROVED", message=msg_obs)

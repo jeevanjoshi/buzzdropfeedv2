@@ -329,6 +329,37 @@ class ObserverAgent:
             _topic_tokens.update(
                 re.findall(r"\b[a-z][a-z0-9-]{4,}\b", (getattr(topic, "headline", "") or "").lower())
             )
+            # Also exclude summary tokens so central entities/states in the topic
+            # (e.g. "jersey" in a New Jersey lawsuit, company names) aren't flagged
+            # as over-repeated filler — they legitimately recur across shots.
+            summary = getattr(topic, "summary", None) or ""
+            _topic_tokens.update(
+                re.findall(r"\b[a-z][a-z0-9-]{4,}\b", summary.lower())
+            )
+            # Expand common US state abbreviations used in the headline/summary
+            # (e.g. "NJ" -> "new jersey") so the full state name isn't flagged as
+            # over-repeated filler in the narration.
+            _US_STATES = {
+                "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
+                "ca": "california", "co": "colorado", "ct": "connecticut", "de": "delaware",
+                "fl": "florida", "ga": "georgia", "hi": "hawaii", "id": "idaho",
+                "il": "illinois", "in": "indiana", "ia": "iowa", "ks": "kansas",
+                "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
+                "ma": "massachusetts", "mi": "michigan", "mn": "minnesota", "ms": "mississippi",
+                "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada",
+                "nh": "new hampshire", "nj": "new jersey", "nm": "new mexico",
+                "ny": "new york", "nc": "north carolina", "nd": "north dakota",
+                "oh": "ohio", "ok": "oklahoma", "or": "oregon", "pa": "pennsylvania",
+                "ri": "rhode island", "sc": "south carolina", "sd": "south dakota",
+                "tn": "tennessee", "tx": "texas", "ut": "utah", "vt": "vermont",
+                "va": "virginia", "wa": "washington", "wv": "west virginia",
+                "wi": "wisconsin", "wy": "wyoming", "dc": "district of columbia",
+            }
+            for _txt in ((getattr(topic, "headline", "") or ""), summary):
+                for _abbrev, _name in _US_STATES.items():
+                    if re.search(rf"\b{_abbrev}\b", _txt.lower()):
+                        _topic_tokens.add(_name)
+                        _topic_tokens.add(_name.split()[-1])
         _tok_freq: Dict[str, int] = {}
         for s in script.shots:
             for t in set(re.findall(r'\b[a-zA-Z][a-zA-Z0-9-]{4,}\b', s.narration_text.lower())):
@@ -364,7 +395,10 @@ class ObserverAgent:
                                 f"Source Diversity: narration cites only '{top_source}'. "
                                 f"Attribute to multiple distinct sources (available: {sorted(source_names)})."
                             )
-                        elif max_cites / total_cites > 0.45:
+                        elif total_cites >= 3 and max_cites / total_cites > 0.45:
+                            # Only enforce the over-citation ratio once there are enough
+                            # citations to be meaningful; with 1-2 cites a 50/50 split is
+                            # just a small sample, not systematic over-attribution.
                             violations.append(
                                 f"Source Diversity: '{top_source}' over-cited ({max_cites}/{total_cites} = "
                                 f"{max_cites/total_cites:.0%}). Balance citations across authentic sources."

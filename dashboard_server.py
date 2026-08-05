@@ -36,7 +36,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # a local `ps` check is unreliable. Instead trust the heartbeat file:
             # "running" is true only if it says running AND was freshened recently.
             import time
+            import calendar
             is_running = False
+            hb_ts = ""
+            hb_age = None
             hb_path = os.path.join(DIRECTORY, "logs", "pipeline_heartbeat.json")
             if os.path.exists(hb_path):
                 try:
@@ -44,14 +47,34 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                         hb = json.load(f)
                     hb_ts = hb.get("ts", "")
                     if hb.get("running") and hb_ts:
-                        hb_time = time.mktime(time.strptime(hb_ts, "%Y-%m-%dT%H:%M:%SZ"))
+                        # Heartbeat ts is UTC (ends in Z) -> parse as UTC epoch via
+                        # calendar.timegm (NOT time.mktime, which assumes local time
+                        # and would skew the freshness check by the TZ offset).
+                        hb_time = calendar.timegm(time.strptime(hb_ts, "%Y-%m-%dT%H:%M:%SZ"))
+                        hb_age = time.time() - hb_time
                         # Fresh heartbeat (< 60s old) => pipeline is live right now.
-                        is_running = (time.time() - hb_time) < 60
+                        is_running = hb_age < 60
                 except Exception:
                     is_running = False
-                
+
+            # Latest pipeline stage from the most recent state checkpoint.
+            latest_stage = "NOT_STARTED"
+            state_dir = os.path.join(DIRECTORY, "logs")
+            try:
+                states = [f for f in os.listdir(state_dir) if f.startswith("state_") and f.endswith(".json")]
+                if states:
+                    newest = max(states, key=lambda f: os.path.getmtime(os.path.join(state_dir, f)))
+                    with open(os.path.join(state_dir, newest), "r") as f:
+                        st = json.load(f)
+                    latest_stage = st.get("execution_stage", "UNKNOWN")
+            except Exception:
+                pass
+
             response = {
                 "is_running": is_running,
+                "heartbeat_ts": hb_ts,
+                "heartbeat_age_sec": round(hb_age, 1) if hb_age is not None else None,
+                "latest_stage": latest_stage,
                 "channel_stats": stats
             }
             self.wfile.write(json.dumps(response).encode())
