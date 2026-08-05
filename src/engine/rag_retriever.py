@@ -4,6 +4,7 @@ import urllib.parse
 import re
 import os
 import html
+import time
 from typing import Dict, Any, List, Tuple, Set
 from src.schemas.state import TopicCandidate, VerifiedFact
 
@@ -27,6 +28,10 @@ class RAGTopicRetriever:
 
     def __init__(self):
         self.knowledge_graph: Dict[str, GraphNode] = {}
+        # RAG cache: headline -> (timestamp, pack). Avoids re-fetching the same
+        # paid/network searches on repeated runs for the same topic (cost + speed).
+        self._rag_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._rag_cache_ttl_s = 6 * 3600
 
     def search_duckduckgo_facts(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
         """
@@ -243,6 +248,14 @@ class RAGTopicRetriever:
         summary = topic.summary
         keywords = [k for k in topic.keywords if len(k) > 3][:6]
 
+        # Cache: return recent RAG pack for the same headline/fact-count to avoid
+        # redundant paid/network searches.
+        cache_key = f"{headline}|{len(verified_facts)}"
+        _now = time.time()
+        _hit = self._rag_cache.get(cache_key)
+        if _hit and (_now - _hit[0]) < self._rag_cache_ttl_s:
+            return _hit[1]
+
         # Combine verified facts into core ground truth block
         verified_snippets = [f"{vf.headline}: {vf.summary} (Source: {vf.source_name})" for vf in verified_facts]
         ground_truth_block = "\n".join(verified_snippets) if verified_snippets else summary
@@ -322,21 +335,36 @@ class RAGTopicRetriever:
         is_verified, confidence, fact_msg = self.trumorgpt_verify_fact(headline + " " + summary)
 
         rag_retrieved_block = "\n".join(retrieved_facts[:8]) if retrieved_facts else "No additional web snippets retrieved."
-        graph_triplets_block = "\n".join([f"• ({s}) --[{p}]--> ({o})" for s, p, o in triplets[:6]]) if triplets else "Direct triplet relationships extracted."
         graph_paths_block = "\n".join([f"• {p}" for p in graph_paths[:6]]) if graph_paths else "No multi-hop paths traversed."
 
-        # Derive core domain category dynamically from text
-        combined_corpus = f"{headline} {summary} {' '.join(keywords)}".lower()
-        if any(w in combined_corpus for w in ["ai", "chatgpt", "software", "tech", "chip", "nvidia", "cloud", "seo", "app"]):
-            category = "Technology & Artificial Intelligence"
-        elif any(w in combined_corpus for w in ["fed", "market", "stock", "trading", "crypto", "bank", "inflation", "revenue", "dollar"]):
-            category = "Global Economics & Finance"
-        elif any(w in combined_corpus for w in ["space", "nasa", "planet", "rocket", "star", "physics", "science"]):
-            category = "Space & Scientific Innovation"
-        elif any(w in combined_corpus for w in ["war", "election", "policy", "country", "president", "government"]):
-            category = "Geopolitics & World Affairs"
+        # Derive core domain category. Prefer the RSS/audience classification
+        # (consistent with the revenue model) when it was genuinely set; fall back
+        # to a keyword heuristic only for topics that were not audience-classified.
+        rss_niche = (getattr(topic, "niche_category", "") or "").strip()
+        rss_audience = (getattr(topic, "audience_type", "") or "general").strip()
+        if rss_niche and rss_audience and rss_audience != "general":
+            category = rss_niche
         else:
-            category = "Global Trends & Cultural Infotainment"
+            combined_corpus = f"{headline} {summary} {' '.join(keywords)}".lower()
+            if any(w in combined_corpus for w in ["ai", "chatgpt", "software", "tech", "chip", "nvidia", "cloud", "seo", "app"]):
+                category = "Technology & Artificial Intelligence"
+            elif any(w in combined_corpus for w in ["fed", "market", "stock", "trading", "crypto", "bank", "inflation", "revenue", "dollar"]):
+                category = "Global Economics & Finance"
+            elif any(w in combined_corpus for w in ["space", "nasa", "planet", "rocket", "star", "physics", "science"]):
+                category = "Space & Scientific Innovation"
+            elif any(w in combined_corpus for w in ["war", "election", "policy", "country", "president", "government"]):
+                category = "Geopolitics & World Affairs"
+            else:
+                category = "Global Trends & Cultural Infotainment"
+
+        # Guard: only surface triplets that look like real (Subject)-(Predicate)-(Object)
+        # statements, to avoid flooding the LLM prompt with naive sentence-split garbage.
+        meaningful_triplets = [
+            t for t in triplets
+            if len(t[0]) >= 3 and len(t[1]) >= 3 and len(t[2]) >= 3
+            and not t[1].lower() in {"and", "the", "of", "to", "in", "for", "with"}
+        ]
+        graph_triplets_block = "\n".join([f"• ({s}) --[{p}]--> ({o})" for s, p, o in meaningful_triplets[:6]])
 
         knowledge_pack = {
             "topic_headline": headline,
@@ -366,6 +394,7 @@ class RAGTopicRetriever:
             )
         }
 
+        self._rag_cache[cache_key] = (time.time(), knowledge_pack)
         return knowledge_pack
 
 
