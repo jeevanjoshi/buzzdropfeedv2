@@ -19,6 +19,34 @@ from src.engine.logger import logger
 LLM_MAX_ATTEMPTS = 3
 
 
+# Matches search-tool citation tags anywhere in a narration/snippet, e.g.
+# "[Tavily: ...]", "[Wikipedia: ...]", "[Exa: title | Reuters]:", "[DDG: ...]".
+_TOOL_TAG_RE = re.compile(
+    r'\[(?:Tavily|Wikipedia|Exa|NewsAPI|Firecrawl|DDG|DuckDuckGo)\s*:[^\]]*\]\s*:?',
+    re.IGNORECASE,
+)
+_ELLIPSIS_RE = re.compile(r'\s*\[\.\.\.\]\s*')
+
+
+def _clean_narration(narr: str) -> str:
+    """
+    Fixes 2 & 3: strips raw search-tool citation tags (so narration never cites
+    'Tavily'/'Exa') and '[...]' scrape artifacts from script narration. Applied to
+    the finished script so even the raw LLM output reads as clean prose.
+    """
+    s = _TOOL_TAG_RE.sub("", narr or "")
+    s = _ELLIPSIS_RE.sub(" ", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _clean_snippet_text(snippet: str) -> str:
+    """Cleans an individual retrieved-snippet line (leading tool tag + artifacts)
+    before it is used as narration padding."""
+    s = _TOOL_TAG_RE.sub("", snippet or "")
+    s = _ELLIPSIS_RE.sub(" ", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
 class StoryDesignerAgent:
     """
     Story Designer Agent responsible for expanding a selected topic into a 10-15 minute,
@@ -57,7 +85,7 @@ class StoryDesignerAgent:
     ) -> List[str]:
         retrieved_context = rag_pack.get("rag_retrieved_context", "")
         raw_snippets_raw = [
-            line.strip().lstrip("• ").strip()
+            _clean_snippet_text(line.strip().lstrip("• ").strip())
             for line in retrieved_context.split("\n")
             if line.strip().startswith("•") and len(line.strip()) > 40
             and "[DDG:" not in line and "DuckDuckGo" not in line  # skip raw scrape noise
@@ -287,7 +315,12 @@ class StoryDesignerAgent:
                         total_words = sum(len(s.narration_text.split()) for s in shots)
                         if total_words >= 1500 and len(shots) >= 12:
                             self.last_llm_source = "LIVE_LLM"
-                            runtime = total_words / 150.0 * 60.0
+                            # Fixes 2 & 3: strip raw [Tool: ...] tags and [...] scrape
+                            # artifacts from the finished narration so it reads as clean prose.
+                            for s in shots:
+                                s.narration_text = _clean_narration(s.narration_text)
+                            cw = sum(len(x.narration_text.split()) for x in shots)
+                            runtime = cw / 150.0 * 60.0
                             return ScriptData(
                                 title=llm_result.get("title", f"The Hidden Truth Behind {headline[:35]}... ({current_month_year})"),
                                 target_shots=len(shots),
@@ -343,59 +376,73 @@ class StoryDesignerAgent:
             {"shot_id": s.shot_id, "act_index": s.act_index, "narration_text": s.narration_text}
             for s in script.shots
         ]
-        prompt = (
-            "You are a skilled documentary editor. For EACH shot, rewrite the narration to be "
-            "more engaging, human, fluent and creative, while STRICTLY preserving every fact, "
-            "number, name, date, source attribution and the original meaning.\n"
-            "Rules:\n"
-            "- Keep every shot's narration between 110 and 135 words (aim ~120).\n"
-            "- Vary sentence lengths dramatically; avoid repeating words/phrases across sentences and shots.\n"
-            "- Use precise, vivid English vocabulary; avoid cliches, robotic templates and monotony.\n"
-            "- Blend rhetorical questions, storytelling scenes, analogies and punchy declarations.\n"
-            f"- Topic headline: {headline}. Category: {category}.\n"
-            "- Do NOT add any new facts or numbers; do NOT change meaning.\n"
-            "Return ONLY a JSON object with key \"shots\": an array of {\"shot_id\": <int>, "
-            "\"narration_text\": \"<rewritten>\"} for ALL shots.\n"
-            f"SHOTS TO POLISH:\n{json.dumps(shots_json, ensure_ascii=False)}"
-        )
-        try:
-            res = self.llm_client.generate_json(
-                prompt, "You are a documentary editor. Return valid JSON only."
+
+        repair_hint = ""
+        for attempt in range(1, 3):  # Fix 1: retry the polish pass to reduce transient failures
+            prompt = (
+                "You are a skilled documentary editor. For EACH shot, rewrite the narration to be "
+                "more engaging, human, fluent and creative, while STRICTLY preserving every fact, "
+                "number, name, date, source attribution and the original meaning. Remove any raw "
+                "citation tags like '[Tavily:...]' or '[Exa:...]' and keep clean prose.\n"
+                "Rules:\n"
+                "- Keep every shot's narration between 110 and 135 words (aim ~120).\n"
+                "- Vary sentence lengths dramatically; avoid repeating words/phrases across sentences and shots.\n"
+                "- Use precise, vivid English vocabulary; avoid cliches, robotic templates and monotony.\n"
+                "- Blend rhetorical questions, storytelling scenes, analogies and punchy declarations.\n"
+                f"- Topic headline: {headline}. Category: {category}.\n"
+                "- Do NOT add any new facts or numbers; do NOT change meaning.\n"
+                "Return ONLY a valid, COMPLETE JSON object with key \"shots\": an array of "
+                "{\"shot_id\": <int>, \"narration_text\": \"<rewritten>\"} for ALL shots.\n"
+                f"SHOTS TO POLISH:\n{json.dumps(shots_json, ensure_ascii=False)}\n"
             )
-        except Exception:
-            res = None
-        if not res or "shots" not in res:
-            return None
-
-        narr_by_id = {}
-        for s in res["shots"] or []:
+            prompt += repair_hint
             try:
-                sid = int(s.get("shot_id"))
-            except (TypeError, ValueError):
-                continue
-            narr = (s.get("narration_text") or "").strip()
-            wc = len(narr.split())
-            if 100 <= wc <= 160:  # guard: only accept sane-length rewrites
-                narr_by_id[sid] = narr
-
-        polished = []
-        for shot in script.shots:
-            narr = narr_by_id.get(shot.shot_id, shot.narration_text)
-            polished.append(ShotData(
-                shot_id=shot.shot_id,
-                act_index=shot.act_index,
-                narration_text=narr,
-                visual_prompt=shot.visual_prompt,
-                visual_type=shot.visual_type,
-                duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1)),
-            ))
-        total_words = sum(len(s.narration_text.split()) for s in polished)
-        return ScriptData(
-            title=script.title,
-            target_shots=len(polished),
-            shots=polished,
-            estimated_runtime_seconds=round(total_words / 150.0 * 60.0, 1),
-        )
+                res = self.llm_client.generate_json(
+                    prompt, "You are a documentary editor. Return valid JSON only."
+                )
+            except Exception:
+                res = None
+            if res and "shots" in res:
+                narr_by_id = {}
+                for s in (res["shots"] or []):
+                    try:
+                        sid = int(s.get("shot_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    narr = _clean_narration(s.get("narration_text") or "")
+                    wc = len(narr.split())
+                    if 100 <= wc <= 160:  # guard: only accept sane-length rewrites
+                        narr_by_id[sid] = narr
+                polished = []
+                for shot in script.shots:
+                    narr = narr_by_id.get(shot.shot_id, shot.narration_text)
+                    polished.append(ShotData(
+                        shot_id=shot.shot_id,
+                        act_index=shot.act_index,
+                        narration_text=narr,
+                        visual_prompt=shot.visual_prompt,
+                        visual_type=shot.visual_type,
+                        duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1)),
+                    ))
+                total_words = sum(len(s.narration_text.split()) for s in polished)
+                return ScriptData(
+                    title=script.title,
+                    target_shots=len(polished),
+                    shots=polished,
+                    estimated_runtime_seconds=round(total_words / 150.0 * 60.0, 1),
+                )
+            logger.warning(
+                "SCRIPT_DESIGN",
+                f"Polish pass attempt {attempt}/2 returned invalid result; retrying.",
+                component="STORY_DESIGNER",
+            )
+            repair_hint = (
+                "\n\nCRITICAL REPAIR INSTRUCTION: The previous response was not usable valid JSON "
+                "for all shots. Return ONLY one complete, valid JSON object with a single 'shots' "
+                "key containing every shot_id 1..N with its rewritten narration_text. Do not "
+                "truncate, omit, or wrap in markdown.\n"
+            )
+        return None
 
     def _generate_ctr_title(self, headline: str, niche_category: str = "") -> Optional[str]:
         """
