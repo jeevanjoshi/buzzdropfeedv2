@@ -1,5 +1,6 @@
 import json
 import uuid
+import time
 import datetime
 import re
 from typing import List, Dict, Any, Optional
@@ -225,6 +226,15 @@ class StoryDesignerAgent:
         self.last_llm_source = "FALLBACK_GROUNDED_TEMPLATE"
         if self.llm_client.is_available():
             for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+                if attempt > 1:
+                    # Short backoff between attempts to ride out transient provider
+                    # errors/rate-limits (errors can otherwise fail all 3 in seconds).
+                    logger.warning(
+                        "SCRIPT_DESIGN",
+                        f"LLM script attempt {attempt}/{LLM_MAX_ATTEMPTS}; backing off before retry.",
+                        component="STORY_DESIGNER",
+                    )
+                    time.sleep(4)
                 prompt = f"""
                 You are an investigative documentary director crafting a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
                 CATEGORY: '{category}'
@@ -393,6 +403,8 @@ class StoryDesignerAgent:
 
         repair_hint = ""
         for attempt in range(1, 3):  # Fix 1: retry the polish pass to reduce transient failures
+            if attempt > 1:
+                time.sleep(3)  # backoff between polish retries
             prompt = (
                 "You are a skilled documentary editor. For EACH shot, rewrite the narration to be "
                 "more engaging, human, fluent and creative, while STRICTLY preserving every fact, "
