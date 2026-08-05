@@ -113,13 +113,32 @@ class TestCSVGPipeline(unittest.TestCase):
             test_source_diversity_lenient_for_tiny_cites,
             test_source_diversity_enforced_at_scale,
             test_topic_entities_from_summary_excluded,
+            test_revision_loop_cap_structure,
         )
         test_keyword_repetition_excludes_topic_state()
         test_keyword_repetition_still_flags_real_slop()
         test_source_diversity_lenient_for_tiny_cites()
         test_source_diversity_enforced_at_scale()
         test_topic_entities_from_summary_excluded()
+        test_revision_loop_cap_structure()
         print("✓ Observer fixes (state/entity exclusion, source-diversity leniency)")
+
+    def test_promo_filter(self):
+        from tests.test_promo_filter import (
+            test_blocks_top_n_listicle,
+            test_blocks_how_i_make_style,
+            test_blocks_review_affiliate,
+            test_blocks_advertorial_growth_hype,
+            test_blocks_direct_cta,
+            test_allows_real_news,
+        )
+        test_blocks_top_n_listicle()
+        test_blocks_how_i_make_style()
+        test_blocks_review_affiliate()
+        test_blocks_advertorial_growth_hype()
+        test_blocks_direct_cta()
+        test_allows_real_news()
+        print("✓ Promo/listicle/affiliate content filter")
 
     def test_full_pipeline_mocked_e2e(self):
         test_full_pipeline_mocked_e2e()

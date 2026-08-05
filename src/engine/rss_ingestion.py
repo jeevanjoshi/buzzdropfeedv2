@@ -49,6 +49,35 @@ HEALTH_SCIENCE_FEEDS = [
 ALL_HIGH_RPM_FEEDS = TECH_AI_FEEDS + FINANCE_FEEDS + BUSINESS_FEEDS + HEALTH_SCIENCE_FEEDS
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PROMOTIONAL / LISTICLE / AFFILIATE CONTENT BLOCK
+# These patterns catch SEO spam, affiliate listicles, "Top 10 X Tools",
+# "How I Made X", "Best X for Y", "X Ways to Z" — all of which pollute the
+# RAG corpus with marketing content rather than real news. Matched items are
+# treated as "blocked" (skipped during candidate construction).
+# ─────────────────────────────────────────────────────────────────────────────
+_LISTICLE_PROMO_PATTERNS = [
+    re.compile(r'\b(top\s?\d+|best\s+\w+)\b', re.IGNORECASE),
+    re.compile(r'\b\d+\s+(tools|ways|tips|strategies|things|reasons|signs|hacks|mistakes|lessons|tricks|features|courses|ideas|platforms|services|trends|predictions|updates|apps|plugins|brands|books|movies|habits|steps|resources|opportunities|options|trends|innovations|solutions|benefits|secrets|principles|hacks|methods|techniques|routes|paths|channels|formats|templates|recipes|combinations|configurations|configurations|approaches|exercises|questions|secrets|discoveries|pillars|pillars|trends|newsletters|commandments|kits|experiments|patterns|surprises|architectures|breakthroughs|milestones|collaborations|partnerships|frameworks|considerations|perspectives|insights|myths|facts|fallacies|obstacles|warnings|alerts|rules|directives|orders|mandates|principles|policies|procedures|methods|methodologies|recipes|blueprints|roadmaps|checklists|plans|strategies|tactics\b)\b', re.IGNORECASE),
+    re.compile(r'\bhow\s+i\s+(get|make|earn|built|created|grew|started|found|got|scaled|automated|optimized|generated|unlocked|mastered|overcame|transformed|designed|developed|improved|boosted|cracked|hacked|achieved|landed)\b', re.IGNORECASE),
+    re.compile(r'\b(ultimate|complete|essential|comprehensive|definitive|exhaustive|beginner.s|advanced|expert|professional|practical|step.by.step|hands.on|in.depth|full)\s+guide\b', re.IGNORECASE),
+    re.compile(r'\b(what\s+i\s+learned|things\s+i\s+wish|things\s+you\s+should|things\s+you\s+need|x\s+things\s+every|nobody\s+tells\s+you|everyone\s+should\s+know|you\s+need\s+to\s+know|you\s+should\s+know|you\s+must\s+know|what\s+no\s+one\s+tells)\b', re.IGNORECASE),
+    re.compile(r'\b(ready\s+for\s+growth|take\s+these\s+strategic\s+next\s+steps|grow\s+your\s+\w+|boost\s+your\s+\w+|scale\s+your\s+\w+|supercharge\s+your|unlock\s+your|next\s+levels?\s+of|fastest[\w\s]*roi|lowest[\w\s]*risk\s+roi|amazing\s+(benefits?|results?|growth)|unlock\s+(your\s+)?(potential|growth|success)|transform\s+your\s+(business|life|career|content)|skyrocket|crush\s+your\s+goals)\b', re.IGNORECASE),
+    re.compile(r'\breview\s*(:|-|of)\s*\w+\b', re.IGNORECASE),
+    re.compile(r'\b(vs\.|vs\s|versus)\s+\w+.*(review|comparison|better|alternative|choose|difference)\b', re.IGNORECASE),
+    re.compile(r'\b(free\s+?trial|download\s+?now|click\s+?here|get\s+?started|start\s+?free|grab\s+?your|try\s+?free|sign\s+?up|subscribe|register|join\s+?now|affiliate|sponsored|advertisement|checkout|buy\s+?now|order\s+?now|shop\s+?now|pricing)\b', re.IGNORECASE),
+]
+
+
+def _is_promotional_listicle(headline: str, summary: str) -> bool:
+    """True if the article looks like affiliate/listicle/marketing content."""
+    text = f"{headline} {summary}"
+    for pat in _LISTICLE_PROMO_PATTERNS:
+        if pat.search(text):
+            return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ENTERTAINMENT HARD BLOCK — these topics earn $0.5-2 RPM, always rejected
 # ─────────────────────────────────────────────────────────────────────────────
 ENTERTAINMENT_BLOCK_PATTERNS = [
@@ -467,6 +496,12 @@ class LiveRSSIngestionEngine:
             audience_type = classify_audience_type(headline, summary)
             if audience_type == "blocked":
                 continue  # Hard block: entertainment/gossip/celebrity
+
+            # ── Promotional / Listicle / Affiliate Block ────────────────────
+            # Drop SEO spam, "Top 10 X Tools", "How I Made X", advertorials etc.
+            # so marketing content never enters the candidate pool or RAG corpus.
+            if _is_promotional_listicle(headline, summary):
+                continue
 
             # ── Persistent Topic Deduplication Gate (Cross-Run Check) ────────
             from src.engine.topic_deduplicator import topic_deduplicator
