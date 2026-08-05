@@ -313,19 +313,28 @@ class ObserverAgent:
                 all_narr_sentences.append(sentence)
 
         # (C) Single distinctive keyword over-repetition across shots — catches
-        # slop like a topic keyword hammered in almost every shot (Gate 6's global
-        # entropy misses a single repeated token).
+        # slop like a non-topic keyword hammered in almost every shot. The topic's
+        # OWN keywords/headline words are excluded (they legitimately recur), so
+        # this only flags genuinely excessive filler, keeping it revisable.
         _STOP = {
             "about", "their", "which", "would", "could", "these", "those", "being",
             "been", "there", "still", "while", "after", "before", "other", "under",
             "again", "through", "every", "where", "because", "between", "during",
             "without", "around", "however", "people", "thing", "things",
         }
+        _topic_tokens = set()
+        if topic is not None:
+            for kw in (getattr(topic, "keywords", None) or []):
+                _topic_tokens.add(re.sub(r"[^a-z0-9-]", "", str(kw).lower()))
+            _topic_tokens.update(
+                re.findall(r"\b[a-z][a-z0-9-]{4,}\b", (getattr(topic, "headline", "") or "").lower())
+            )
         _tok_freq: Dict[str, int] = {}
         for s in script.shots:
             for t in set(re.findall(r'\b[a-zA-Z][a-zA-Z0-9-]{4,}\b', s.narration_text.lower())):
-                if t not in _STOP and not t.isdigit():
-                    _tok_freq[t] = _tok_freq.get(t, 0) + 1
+                if t in _topic_tokens or t in _STOP or t.isdigit():
+                    continue
+                _tok_freq[t] = _tok_freq.get(t, 0) + 1
         _n_shots = len(script.shots)
         if _tok_freq and _n_shots >= 6:
             _worst = max(_tok_freq, key=_tok_freq.get)

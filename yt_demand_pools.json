@@ -1,0 +1,98 @@
+{
+  "Technology & Artificial Intelligence": {
+    "seeded_date": "2026-08-05",
+    "seed_query": "technology news",
+    "ids": [
+      "5HITopEzRlk",
+      "5fKkXFresYI",
+      "m2huteErf8E",
+      "iuLgq7bf6QY",
+      "TJXm8THHksw",
+      "UclrVWafRAI",
+      "SUInyhPJjJE",
+      "5eYTHiC55Bo",
+      "lo4bA4p3MBQ",
+      "_vUUs5rrRAs"
+    ]
+  },
+  "Real Estate": {
+    "seeded_date": "2026-08-05",
+    "seed_query": "real estate news",
+    "ids": [
+      "JRHZ-y25nk8",
+      "SwNN2Z2hPjQ",
+      "HUnh1vwrFV8",
+      "-A292n4fV_k",
+      "8tVx9Iv4_gs",
+      "B4UroEdq7k0",
+      "yJuo07_meGg",
+      "tVnOfWW89pA",
+      "4dHi5zP2iP8",
+      "ptcNWF_iLBk"
+    ]
+  },
+  "Legal & Law": {
+    "seeded_date": "2026-08-05",
+    "seed_query": "legal news",
+    "ids": [
+      "-QXHWFsAk-Y",
+      "O6vrjnDSwEY",
+      "jOVunPu50Hg",
+      "zNeTqv89dCM",
+      "hOlntyFauo8",
+      "7fVX1ukpjzw",
+      "bSAZCsXBCOg",
+      "RoDcTI4kqgk",
+      "wbB9edCuxUA",
+      "rq2sldiKjf4"
+    ]
+  },
+  "Global Trends & Infotainment": {
+    "seeded_date": "2026-08-05",
+    "seed_query": "trending news",
+    "ids": [
+      "jdJoOhqCipA",
+      "9M02G5c6x6w",
+      "Uk6q89CYhOI",
+      "DpIbJKrbpGk",
+      "W8nThq62Vb4",
+      "8NxAnGKOKjA",
+      "7pAcryRaOlg",
+      "BshJnjyuJ4Q",
+      "Ao_DlIuWYtk",
+      "YIAm3woXAoU"
+    ]
+  },
+  "Personal Finance & Investing": {
+    "seeded_date": "2026-08-05",
+    "seed_query": "personal finance investing",
+    "ids": [
+      "sU9SFT1nAOw",
+      "0GxSnWSp3VM",
+      "b5BsywkETfU",
+      "__J44m8XorM",
+      "WEDIj9JBTC8",
+      "ecOcpBpPtfU",
+      "U_zy8Ibn1Y8",
+      "eteBTw31Jzs",
+      "-C_5hzJCHaY",
+      "wL3hN7QnKQw"
+    ]
+  },
+  "Health & Science": {
+    "seeded_date": "2026-08-05",
+    "seed_query": "health news",
+    "ids": [
+      "xyQY8a-ng6g",
+      "EbEPy4edO_E",
+      "m5d3mLOsup0",
+      "62wEk02YKs0",
+      "apoEPtlja1Q",
+      "wCBjWSjnavk",
+      "fcy5d-2E0VA",
+      "_XTAh1o0jRw",
+      "mfRwSfGRewQ",
+      "J_03EXyhYS8"
+    ]
+  }
+}
