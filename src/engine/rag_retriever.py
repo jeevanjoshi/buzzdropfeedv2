@@ -5,8 +5,43 @@ import re
 import os
 import html
 import time
+import datetime as _dt
 from typing import Dict, Any, List, Tuple, Set
 from src.schemas.state import TopicCandidate, VerifiedFact
+
+_YEAR_RE = re.compile(r'\b(20[0-2]\d)\b')
+_current_year_val = None
+
+
+def _current_year() -> int:
+    global _current_year_val
+    if _current_year_val is None:
+        _current_year_val = _dt.datetime.now(_dt.timezone.utc).year
+    return _current_year_val
+
+
+def _snippet_year(text: str):
+    """Apparent 4-digit year (2000-2099) contained in a snippet/title, else None."""
+    m = _YEAR_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def _recency_tag(line: str) -> str:
+    """
+    Returns a short recency annotation for a retrieved-snippet line based on any
+    year it mentions: ' (recent: YYYY)' for current/last-year, ' (historical: YYYY)'
+    for older years, or '' when no date is found (treated as neutral/recent).
+    """
+    y = _snippet_year(line)
+    if y is None:
+        return ""
+    cy = _current_year()
+    if y >= cy - 1:
+        return f" (recent: {y})"
+    elif 2000 <= y <= cy - 2:
+        return f" (historical: {y})"
+    return ""
+
 
 
 class GraphNode:
@@ -406,6 +441,18 @@ class RAGTopicRetriever:
         # 4. TrumorGPT Fact Verification Check
         is_verified, confidence, fact_msg = self.trumorgpt_verify_fact(headline + " " + summary)
 
+        # Recency categorization: tag snippets by apparent year so the LLM treats
+        # older-dated material as HISTORICAL, not current. No date -> neutral/recent.
+        recent_lines, historic_lines = [], []
+        for line in retrieved_facts:
+            if _recency_tag(line).startswith(" (historical"):
+                historic_lines.append(f"{line}{_recency_tag(line)}")
+            else:
+                recent_lines.append(f"{line}{_recency_tag(line)}")
+
+        rag_recent_block = "\n".join(recent_lines[:8]) if recent_lines else "No clearly recent snippets retrieved."
+        rag_historical_block = "\n".join(historic_lines) if historic_lines else "No distinctly historical snippets."
+        # Primary snippet pool for the script editor (all bullets, tag-free for fluent padding)
         rag_retrieved_block = "\n".join(retrieved_facts[:8]) if retrieved_facts else "No additional web snippets retrieved."
         graph_paths_block = "\n".join([f"• {p}" for p in graph_paths[:6]]) if graph_paths else "No multi-hop paths traversed."
 
@@ -453,6 +500,8 @@ class RAGTopicRetriever:
                 "confidence": confidence,
                 "message": fact_msg
             },
+            "rag_recent_context": rag_recent_block,
+            "rag_historical_context": rag_historical_block,
             "fact_corpus": (
                 f"{ground_truth_block}\n"
                 f"{rag_retrieved_block}"
@@ -464,6 +513,13 @@ class RAGTopicRetriever:
                 f"SUMMARY: {summary}\n\n"
                 f"TRUMORGPT VERIFICATION: {fact_msg} (Confidence: {confidence})\n\n"
                 f"VERIFIED GROUND TRUTH FACTS:\n{ground_truth_block}\n\n"
+                f"STORY TELLING RULE — CURRENT vs HISTORICAL:\n"
+                f"Today is {_current_year()}. Treat any source tagged '(historical: YYYY)' as "
+                f"PAST CONTEXT ONLY. Never present older-dated data as a development happening "
+                f"in {_current_year()}. Only the RECENT sources (tagged '(recent: YYYY)' or "
+                f"untagged) may be framed as current. Weave older facts in as background/history.\n\n"
+                f"CURRENT / RECENT SOURCES:\n{rag_recent_block}\n\n"
+                f"HISTORICAL CONTEXT (background only):\n{rag_historical_block}\n\n"
                 f"GRAPHRAG KNOWLEDGE GRAPH TRIPLETS:\n{graph_triplets_block}\n\n"
                 f"GRAPHRAG MULTI-HOP RELATIONAL PATHS:\n{graph_paths_block}\n\n"
                 f"RETRIEVED DEEP CONTEXT & BACKGROUND:\n{rag_retrieved_block}"

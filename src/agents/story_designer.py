@@ -249,7 +249,7 @@ class StoryDesignerAgent:
                      * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
                      * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
                 4. Spoken Attribution: Dynamically cite the specific actual publisher or source from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank) for each fact in a natural, conversational way. Avoid over-attributing everything to a single source.
-                5. Strict Temporal Grounding: Frame developments within {current_month_year}.
+                5. Strict Temporal Grounding: Frame current developments within {current_month_year}; treat any pre-2026/historical-tagged fact as PAST background only, never as a current event.
                 6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
                 7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
                 8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
@@ -263,10 +263,12 @@ class StoryDesignerAgent:
                     "Never write dry summaries or list scraped facts line-by-line. Instead, weave facts into a suspenseful, unfolding human story. "
                     "2. DIVERSE CITATIONS: Dynamically attribute facts to the actual distinct publishers in the RAG pack (e.g. 'As reported by The New York Times', 'Wired analysis shows', 'Wikipedia records indicate'). Do not attribute everything to a single publisher. "
                     "3. CREATIVE ANALOGIES: Translate complex data, metrics, or technical mechanisms into vivid metaphors and simple physical analogies. "
-                    "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
-                    "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
-                    "6. NEVER start two consecutive shots with the same subject or phrase. Ensure seamless transitions between shots. "
-                    "7. Visual prompts must describe unique, high-end cinematic locations, camera moves, and lighting. Return valid JSON only."
+                     "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
+                     "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
+                     "6. TEMPORAL GROUNDING: Today is {current_year}. Treat any fact dated before 2026 (e.g. '(historical: YYYY)' tags, or any pre-2026 year) as HISTORICAL/PAST context ONLY. "
+                     "Never present older-dated data as a development happening in {current_month_year}. Only describe something as current/this-month if the source is clearly recent; otherwise frame it as 'back in ...' / 'historically ...'. "
+                     "7. NEVER start two consecutive shots with the same subject or phrase. Ensure seamless transitions between shots. "
+                     "8. Visual prompts must describe unique, high-end cinematic locations, camera moves, and lighting. Return valid JSON only."
                 )
                 repair_hint = ""
                 if attempt > 1:

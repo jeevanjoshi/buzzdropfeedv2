@@ -81,7 +81,12 @@ class ObserverAgent:
                             "Fact Audit"
                         ))
 
-            # 2. Dynamic Temporal Anchor Check (Preventing outdated past years presented as present events)
+            # 2. Dynamic Temporal Anchor Check — hard-flag a past year not in the corpus,
+            #    and route present-tense past-year sentences to the AI critic (which decides
+            #    historical-vs-current) even when the old year exists in the corpus, so old
+            #    RAG data can't self-excuse being framed as a current event.
+            HISTORICAL_FRAMING = ("back in", "during", "historically", "at the time",
+                                  "the year", "decade", "era", "since", "then-")
             for past_y in past_years:
                 if past_y in narration_lower:
                     if past_y not in ground_truth_corpus:
@@ -90,6 +95,12 @@ class ObserverAgent:
                             f"Outdated year '{past_y}' in: {shot.narration_text}",
                             "Temporal Audit"
                         ))
+                    # Even if in corpus, flag a sentence that cites a past year WITHOUT an
+                    # explicit historical frame -> critic decides if it's current-as-lie.
+                    for _sent in [s.strip() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]:
+                        _sl = _sent.lower()
+                        if past_y in _sl and not any(h in _sl for h in HISTORICAL_FRAMING):
+                            flagged_sentences_info.append((shot.shot_id, _sent, "Temporal Audit"))
 
             # 3. Semantic Sentence Grounding check (checks for qualitative hallucinations)
             if vectorizer:
@@ -179,7 +190,11 @@ class ObserverAgent:
                 3. Only reject ASSERTIONS that are unsupported by, or contradict, the
                    verified facts corpus (e.g. wrong statistics, false names, incorrect
                    dates, fabricated events).
-                4. Return a JSON object with a single key "violations" containing an array
+                4. TEMPORAL RULE: Reject an ASSERTION that presents data from a pre-2026 year
+                   as a CURRENT 2026 event, even if that year appears in the corpus. APPROVE
+                   pre-2026 data that is clearly framed as historical (e.g. 'In 2022...',
+                   'back in', 'historically', 'at the time').
+                5. Return a JSON object with a single key "violations" containing an array
                    of strings. Each string is the EXACT text of a REJECTED assertion followed
                    by the reason it fails. Return an empty array if all flagged claims are
                    STYLE or supported.
