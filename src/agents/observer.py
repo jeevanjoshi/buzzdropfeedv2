@@ -7,30 +7,6 @@ from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.monetization_optimizer import monetization_optimizer
 from src.engine.channel_phase_manager import channel_phase_manager
 
-# Phrases/structure markers indicating a sentence is rhetorical, metaphorical,
-# transitional, or narrative color — i.e. NOT a hard factual assertion. The audit
-# skips these so creative English isn't false-flagged as ungrounded.
-_CREATIVE_MARKERS = [
-    "like ", "as if", "imagine ", "picture ", "think of ", "think about ",
-    "a bit like", "almost like", "in a sense", "you could say", "step into ",
-    "dive into ", "let's take", "so, what", "what if ", "picture this",
-    "is like a", "acts like", "sounds like", "feels like", "looks like",
-]
-
-
-def _looks_creative_or_transitional(sentence: str) -> bool:
-    """True if a sentence is rhetorical/metaphorical/transitional creative English
-    (not a hard factual claim), so it should NOT be flagged as ungrounded."""
-    s = sentence.lower()
-    if sentence.rstrip().endswith("?"):
-        return True
-    if any(m in s for m in _CREATIVE_MARKERS):
-        return True
-    # short subjective/engagement clauses
-    if re.match(r'^\s*(let\'?s|so|and|but|imagine|remember|picture)\b', s):
-        return True
-    return False
-
 
 class ObserverAgent:
     """
@@ -119,10 +95,8 @@ class ObserverAgent:
             if vectorizer:
                 shot_sentences = [s.strip() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]
                 for sentence in shot_sentences:
-                    # Skip rhetorical questions and creative/transitional English
-                    # (not hard factual assertions) to avoid false positives.
-                    if _looks_creative_or_transitional(sentence):
-                        continue
+                    # Rhetorical questions are not assertions; other creative English
+                    # is decided by the LLM critic downstream (AI judge), not markers.
 
                     # Local NLTK POS Tagging check with Topic Keyword Subtraction
                     try:
@@ -194,10 +168,21 @@ class ObserverAgent:
                 {flagged_list_str}
                 
                 Requirements:
-                1. Review each flagged claim against the verified facts corpus.
-                2. Determine if the claim is a safe narrative/rhetorical transition, standard documentary phrasing, or a logical deduction/extrapolation from the facts (which should be APPROVED), or a genuine factual hallucination like wrong statistics, false names, incorrect dates, or fabricated events (which must be REJECTED).
-                3. Return a JSON object with a single key "violations" containing an array of strings. Each string should be the exact text of the REJECTED claim alongside the reason why it fails.
-                4. Do NOT reject safe transitions, rhetorical questions, standard stylistic prose, or reasonable syntheses/deductions (e.g., stating that debris falling on homes puts communities at risk or poses a threat, which is a logical consequence). Only reject hard claims that lack factual basis or contradict the corpus.
+                1. For EACH flagged claim, first classify it as one of:
+                   - STYLE: metaphor, analogy, rhetorical question, opinion, subjective
+                     judgement, engagement/call-to-action, narrative color, or a logical
+                     deduction/extrapolation from the facts.
+                   - ASSERTION: a hard, checkable factual claim (specific statistics,
+                     names, dates, places, events, numbers).
+                2. STYLE claims MUST be APPROVED (never rejected) — even if they are not in
+                   the corpus, because they are not assertions of fact.
+                3. Only reject ASSERTIONS that are unsupported by, or contradict, the
+                   verified facts corpus (e.g. wrong statistics, false names, incorrect
+                   dates, fabricated events).
+                4. Return a JSON object with a single key "violations" containing an array
+                   of strings. Each string is the EXACT text of a REJECTED assertion followed
+                   by the reason it fails. Return an empty array if all flagged claims are
+                   STYLE or supported.
                 """
                 system_prompt = "You are a precise, objective facts verification critic. Return valid JSON only."
                 try:
@@ -210,14 +195,15 @@ class ObserverAgent:
                 except Exception as critic_err:
                     print(f"Warning: Critic call failed: {critic_err}. Defaulting to local validation flags.")
 
-            # If LLM client is unavailable or failed, default back to local flags to be safe,
-            # but still skip creative/transitional English to protect narrative style.
+            # If the LLM critic is unavailable/fails, only hard-flag explicit
+            # numeric/temporal signals (rare false-positive risk). Low-semantic-sim
+            # flags are dropped here because creative/human English is ambiguous
+            # without an AI judge.
             for sid, sentence, itype in flagged_sentences_info:
-                if _looks_creative_or_transitional(sentence):
-                    continue
-                violations.append(
-                    f"Shot #{sid} {itype}: The claim '{sentence}' lacks verified grounding in source facts."
-                )
+                if itype in ("Fact Audit", "Temporal Audit"):
+                    violations.append(
+                        f"Shot #{sid} {itype}: The claim '{sentence}' lacks verified grounding in source facts."
+                    )
 
         return violations
 
