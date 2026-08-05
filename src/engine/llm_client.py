@@ -151,8 +151,6 @@ class LLMClient:
                 "X-Title": "CSVG Autonomous Pipeline"
             }
             models_to_try = [self.model]
-            if "google/gemini-2.5-flash" not in models_to_try:
-                models_to_try.append("google/gemini-2.5-flash")
 
             import time
             for model_attempt in models_to_try:
@@ -202,43 +200,9 @@ class LLMClient:
                     time.sleep(2 * (retry_idx + 1))
             return None
 
-        def try_native_gemini_api() -> Optional[Dict[str, Any]]:
-            gemini_key = os.getenv("GEMINI_API_KEY")
-            if not gemini_key or "YOUR_GEMINI_API_KEY" in gemini_key or len(gemini_key) < 10:
-                return None
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": f"{system_prompt}\n\nReturn ONLY valid JSON matching requested schema.\n\nUser query: {prompt}"}
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": 0.7
-                }
-            }
-            try:
-                print("[LLMClient] Invoking Google AI Studio Native Gemini 2.5 Flash...")
-                res = requests.post(url, headers=headers, json=payload, timeout=60)
-                res.raise_for_status()
-                data = res.json()
-                content = data["candidates"][0]["content"]["parts"][0]["text"]
-                print(f"[LLMClient] Google AI Studio Native response content length: {len(content)}")
-                parsed = self._clean_and_parse_json(content)
-                if parsed is not None:
-                    return parsed
-            except Exception as e:
-                print(f"[LLMClient] Google AI Studio Native Exception: {e}")
-            return None
-
         # Execute according to user preference
         if preferred_provider == "cloud":
-            return try_cloud_api() or try_native_gemini_api() or try_local_llama_cpp()
+            return try_cloud_api() or try_local_llama_cpp()
         else:
             # Default: try local llama.cpp first, fallback to cloud
-            return try_local_llama_cpp() or try_cloud_api() or try_native_gemini_api()
+            return try_local_llama_cpp() or try_cloud_api()
