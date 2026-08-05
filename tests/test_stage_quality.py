@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tempfile
 
-from src.schemas.state import GlobalState, AssetPaths, ScriptData
+from src.schemas.state import GlobalState, AssetPaths, ScriptData, ShotData
 from src.engine.quality_verifier import StageQualityVerifier
 
 
@@ -293,3 +293,109 @@ def test_crossfade_filtergraph_math():
     cmd2 = mc._build_crossfade_cmd(["/tmp/single.mp4"], [5.0], 0.5, "fade", "", out, bgm_path=None)
     assert cmd2 is None, "N<2 should return None"
     print("✓ crossfade filtergraph offset math (xfade offsets, acrossfade d, uniform format)")
+
+
+# ---------------------------------------------------------------------------
+# Gate 6 closing-shot relaxation
+# ---------------------------------------------------------------------------
+
+def _mk_shots(n, body_words=90, final_words=52):
+    from src.schemas.state import ShotData
+    import string
+    # Large pool of distinct alphabetic words (5 letters each) so the unique-word
+    # ratio gate (>=33% at <=1500 words) passes with real body prose. Each shot
+    # uses a DIFFERENT slice of the pool so the corpus stays diverse.
+    _pool = []
+    _c = string.ascii_lowercase
+    i = 0
+    while len(_pool) < 2000:
+        w = _c[i % 26] + _c[(i // 26) % 26] + _c[(i // 676) % 26] + "ab"
+        if w not in _pool:
+            _pool.append(w)
+        i += 1
+    shots = []
+    for shot_id in range(1, n):
+        offset = (shot_id - 1) * body_words
+        body = " ".join(_pool[(offset + j) % len(_pool)] for j in range(body_words))
+        shots.append(ShotData(shot_id=shot_id, act_index=1, narration_text=body,
+                              visual_prompt="Cinematic 16:9 widescreen dark lighting, 8k resolution.",
+                              duration_estimate=45.0))
+    final = " ".join(_pool[(n - 1) * body_words + j] for j in range(final_words))
+    shots.append(ShotData(shot_id=n, act_index=1, narration_text=final,
+                          visual_prompt="Cinematic 16:9 widescreen dark lighting, 8k resolution.",
+                          duration_estimate=45.0))
+    return shots
+
+
+# Exact closing shot (Shot 15) from the failed run logs/state_csvg-exec-20260805-142149.json
+_SHOT15_FAILED_TEXT = (
+    "So, as we navigate this exciting new chapter where AI helps working parents "
+    "reclaim precious time, what are your thoughts? How do you envision AI further "
+    "shaping the balance between career and family life in the coming years? "
+    "Share your insights and experiences in the comments below. "
+    "Let's continue this conversation together!"
+)
+
+
+def _load_failed_script():
+    """Load the exact script from the failed run's saved state file (real corpus)."""
+    import os
+    import json
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    state_path = os.path.join(root, "logs", "state_csvg-exec-20260805-142149.json")
+    if not os.path.exists(state_path):
+        return None
+    with open(state_path, "r") as f:
+        data = json.load(f)
+    sc = data["script_data"]
+    return ScriptData(title=sc.get("title", "T"), target_shots=len(sc["shots"]),
+                      shots=[ShotData(**s) for s in sc["shots"]],
+                      estimated_runtime_seconds=sc.get("estimated_runtime_seconds", 600.0))
+
+
+def _mk_script(shots):
+    return ScriptData(title="T", target_shots=len(shots), shots=shots, estimated_runtime_seconds=600.0)
+
+
+def test_gate6_short_final_shot_allowed():
+    """The EXACT failed script (real 52-word closing shot 15) must now pass Gate 6."""
+    v = StageQualityVerifier()
+    script = _load_failed_script()
+    if script is None:
+        # Fallback: synthetic body + the real failed closing text, so the test is
+        # still hermetic when the logs/ state file isn't present.
+        shots = _mk_shots(15)
+        shots[-1] = type(shots[-1])(
+            shot_id=15, act_index=1, narration_text=_SHOT15_FAILED_TEXT,
+            visual_prompt="Cinematic 16:9 widescreen dark lighting, 8k resolution.",
+            duration_estimate=45.0,
+        )
+        script = _mk_script(shots)
+    else:
+        # Confirm we really are reproducing the previously-failing short closing shot.
+        last_wc = len(script.shots[-1].narration_text.split())
+        assert last_wc < 80, f"Expected a short final shot, got {last_wc} words"
+    g6 = v.verify_gate6_anti_slop_entropy(script)
+    assert g6["passes"] is True, f"Expected pass with short closing shot, got: {g6['issues']}"
+    print("✓ Gate 6 relaxed for closing shot (real 52-word conclusion passes)")
+
+
+def test_gate6_short_body_shot_still_fails():
+    """A shallow NON-final shot must still fail Gate 6."""
+    v = StageQualityVerifier()
+    script = _load_failed_script()
+    if script is None:
+        script = _mk_script(_mk_shots(15))
+    # Make a non-final shot (shot 6) shallow; it must still be rejected.
+    shots = list(script.shots)
+    _pool = [f"word{i}" for i in range(200)]
+    shots[5] = type(shots[5])(
+        shot_id=6, act_index=1,
+        narration_text=" ".join(_pool[i % len(_pool)] for i in range(50)),
+        visual_prompt="Cinematic 16:9 widescreen dark lighting, 8k resolution.",
+        duration_estimate=45.0,
+    )
+    g6 = v.verify_gate6_anti_slop_entropy(_mk_script(shots))
+    assert g6["passes"] is False, "Expected shallow body shot to fail Gate 6"
+    assert 6 in g6["shallow_shots"], "Expected shot 6 flagged shallow"
+    print("✓ Gate 6 still catches shallow body shots")

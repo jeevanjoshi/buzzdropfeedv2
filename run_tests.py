@@ -106,6 +106,15 @@ class TestCSVGPipeline(unittest.TestCase):
         test_gate4_resolution()
         print("✓ Gate 4 resolution + measured-duration skip")
 
+    def test_gate6_closing_shot(self):
+        from tests.test_stage_quality import (
+            test_gate6_short_final_shot_allowed,
+            test_gate6_short_body_shot_still_fails,
+        )
+        test_gate6_short_final_shot_allowed()
+        test_gate6_short_body_shot_still_fails()
+        print("✓ Gate 6 closing-shot relaxation (final ≤ body)")
+
     def test_observer_fixes(self):
         from tests.test_observer_fixes import (
             test_keyword_repetition_excludes_topic_state,

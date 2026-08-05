@@ -169,6 +169,8 @@ class OrchestratorAgent:
                     # after a single retry, while still bounding wasted LLM spend.
                     MAX_REVISIONS = 3
                     revision_ok = False
+                    last_violations: List[str] = []
+                    last_quality_error: Optional[str] = None
                     for attempt in range(1, MAX_REVISIONS + 1):
                         violations = []
                         if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
@@ -185,12 +187,23 @@ class OrchestratorAgent:
                         msg_obs = self.observer.process(state)
                         quality_pass, quality_error = run_script_quality_checks()
 
+                        last_violations = violations
+                        last_quality_error = quality_error if not quality_pass else None
+
                         if msg_obs.intent != AgentIntent.REVISE_SCRIPT and quality_pass:
                             revision_ok = True
                             break
 
                     if not revision_ok:
-                        raise RuntimeError(f"Script failed Observer audit after {MAX_REVISIONS} revisions: {msg_obs.payload.get('violations')}")
+                        # Report the ACTUAL failure: prefer Observer violations when the
+                        # observer rejected; otherwise surface the failing quality gate.
+                        if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
+                            detail = msg_obs.payload.get("violations")
+                        else:
+                            detail = last_quality_error or last_violations
+                        raise RuntimeError(
+                            f"Script failed validation after {MAX_REVISIONS} revisions: {detail}"
+                        )
 
                 logger.info("PHASE_2_OBSERVER_AUDIT", "Observer Audit & Quality Gates Passed 100%! Script approved.", pipeline_id=p_id, component="OBSERVER")
                 tracer.record_step(state, "SCRIPT_APPROVED", message=msg_obs)
