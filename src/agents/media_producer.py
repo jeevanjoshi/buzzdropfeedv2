@@ -465,7 +465,7 @@ class MediaProducerAgent:
                 else:
                     gif_query = raw_visual_prompt[:30].strip()
 
-                print(f"🎬 Processing AI GIF reaction segment for {shot_key} (Query: '{gif_query}')")
+                print(f"[MediaProducer] Processing AI GIF reaction segment for {shot_key} (Query: '{gif_query}')")
                 try:
                     await fetch_reaction_gif_clip(GIFRequest(
                         query=gif_query,

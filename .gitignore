@@ -14,3 +14,8 @@ logs/*.json
 *.DS_Store
 *.onnx
 *.bin
+# Runtime state files (auto-generated/updated on each pipeline run)
+channel_stats.json
+yt_demand_pools.json
+yt_demand_quota.json
+published_topics.json

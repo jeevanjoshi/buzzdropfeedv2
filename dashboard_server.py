@@ -32,17 +32,23 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     stats = {"error": f"Failed to load stats: {str(e)}"}
             
             # Check pipeline active status
-            # We can check if a process with main.py is running
-            import subprocess
+            # The pipeline runs on OCI and syncs logs/heartbeat here via rsync, so
+            # a local `ps` check is unreliable. Instead trust the heartbeat file:
+            # "running" is true only if it says running AND was freshened recently.
+            import time
             is_running = False
-            try:
-                # Simple ps check
-                ps_output = subprocess.check_output(["ps", "aux"]).decode()
-                if "main.py --global" in ps_output or "main.py" in ps_output:
-                    # Exclude the grep/check itself if it matches
-                    is_running = True
-            except Exception:
-                pass
+            hb_path = os.path.join(DIRECTORY, "logs", "pipeline_heartbeat.json")
+            if os.path.exists(hb_path):
+                try:
+                    with open(hb_path, "r") as f:
+                        hb = json.load(f)
+                    hb_ts = hb.get("ts", "")
+                    if hb.get("running") and hb_ts:
+                        hb_time = time.mktime(time.strptime(hb_ts, "%Y-%m-%dT%H:%M:%SZ"))
+                        # Fresh heartbeat (< 60s old) => pipeline is live right now.
+                        is_running = (time.time() - hb_time) < 60
+                except Exception:
+                    is_running = False
                 
             response = {
                 "is_running": is_running,
@@ -110,7 +116,7 @@ if __name__ == "__main__":
     
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), DashboardHandler) as httpd:
-        print(f"🚀 CSVG Pi 5 Verification Dashboard running at http://localhost:{PORT}")
+        print(f"CSVG Pi 5 Verification Dashboard running at http://localhost:{PORT}")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
