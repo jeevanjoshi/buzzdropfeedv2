@@ -49,6 +49,30 @@ flowchart TD
 
 ---
 
+## 🆕 Recent Improvements & Reliability (Aug 2026)
+
+The pipeline was hardened, made quota-resilient, and revenue-optimized across all stages. See `improvement_20260805_093732.md` for the full commit/file log.
+
+### Content & Fact Quality
+- **No boilerplate fallback** — story generation requires a live LLM; on total failure the run aborts instead of emitting template content.
+- **LLM editor polish pass** — fact-preserving rewrite for engagement/fluency; resilient (retry + backoff).
+- **LLM fallback chain** — Gemini 2.5 Flash → `deepseek/deepseek-v4-flash-0731` → optional third model, with client-level transient retry.
+- **RAG overhaul** — Tavily + Firecrawl sources (DuckDuckGo HTML scraper removed), per-topic caching, recency tagging (recent vs historical), promotional/advertorial content filter.
+- **Observer (AI-judged audit)** — fact verification against the full RAG corpus, sentence-duplication + source-diversity gates, creative-English tolerance (STYLE vs ASSERTION), temporal-grounding and keyword over-repetition checks.
+
+### Revenue Optimization (Data Retrieval)
+- **Real scoring** — TVS from feed recency + cross-feed coverage; SDI from real sentiment.
+- **Real competitor demand** via YouTube Data API niche video-ID pools + batch stats (3-key rotation + daily quota budget).
+- **Net-RPM recalibrated** to Q2 2026 US/UK/CA/AU benchmarks + locale & seasonal multipliers.
+- **High-value niches routed:** Finance, Enterprise-AI/Tech, Health, **Legal**, **Real Estate** (high-RPM preferred even in GROWTH).
+
+### Budget & Monetization
+- **AI budget guard** (~₹2000/mo images): paid Flux limited to hero shots, free assets elsewhere, all-or-nothing economy switch.
+- **Auto Shorts extraction** (ffmpeg) + **CTR-optimized titles/thumbnails**.
+- **Publishing** uses the full StoryDesigner SEO metadata (title/description/tags).
+
+---
+
 ## 💰 API & Resource Cost Breakdown (Free vs. Paid)
 
 | Resource / API | Role in Pipeline | Cost Model | Details & Quota Limits |
@@ -174,6 +198,25 @@ To ensure premium channel status and protect against YouTube demonetization, the
 * **Gate 5 (YouTube AI Disclosure Auto-Tagging):** Scans for photorealistic or synthetic humans, automatic voice, and realistic simulations, auto-tagging YouTube metadata with `syntheticContent` & `bInformed` compliant with 2025/2026 YouTube guidelines.
 * **Gate 6 (Anti-Slop Script Entropy Audit):** Measures Shannon Word Entropy, unique word ratio, sentence length variance, and minimum narration depth to prevent repetitive AI patterns.
 * **Stage 8 (Per-Shot Quality):** Audits visual fluidity using Frechet Video Distance (FVD) and optical flow metrics.
+
+---
+
+## 🔑 Environment Variables (.env)
+
+Core configuration lives in `.env` (gitignored). Keys used by the pipeline:
+
+| Variable | Purpose |
+| :--- | :--- |
+| `OPENROUTER_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | LLM providers (primary + ChatGPT fallbacks) |
+| `LLM_MODEL` | Primary LLM model (default `google/gemini-2.5-flash`) |
+| `LLM_FALLBACK_MODEL` / `LLM_FALLBACK_MODEL2` | Fallback models when the primary errors (default `deepseek/deepseek-v4-flash-0731`) |
+| `LLM_MAX_TOKENS` | Output token cap (default 8192) |
+| `YOUTUBE_API_KEY`, `YOUTUBE_API_KEY_FALLBACK`, `YOUTUBE_API_KEY_FALLBACK2` | Developer keys for competitor view-demand (rotated on 429) |
+| `YT_SEARCH_DAILY_BUDGET` | Daily `search.list` budget (default 30) to protect the 10k-unit quota |
+| `YOUTUBE_TOKEN_FILE` / `YOUTUBE_CLIENT_SECRET` | OAuth for uploads |
+| `FAL_KEY` / `REPLICATE_API_TOKEN` | Image generation (Fal primary, Replicate fallback) |
+| `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` / `NEWSAPI_KEY` / `EXA_API_KEY` | RAG retrieval sources |
+| `AUDIO_EDGE_URL` | Edge TTS service endpoint |
 
 ---
 
