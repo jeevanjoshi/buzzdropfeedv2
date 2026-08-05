@@ -14,6 +14,7 @@ def main():
     region = "all"
     publish = True
     dummy_frames = False
+    renderer = "ffmpeg"
 
     state = None
     if len(sys.argv) > 1:
@@ -27,6 +28,10 @@ def main():
             publish = False
         if "--dummy-frames" in sys.argv or "--dummy-frame" in sys.argv:
             dummy_frames = True
+        if "--renderer" in sys.argv:
+            for i, arg in enumerate(sys.argv):
+                if arg == "--renderer" and i + 1 < len(sys.argv):
+                    renderer = sys.argv[i + 1]
         
         # Parse --resume <pipeline_id>
         for i, arg in enumerate(sys.argv):
@@ -49,7 +54,8 @@ def main():
         region=region,
         publish=publish,
         dummy_frames=dummy_frames,
-        state=state
+        state=state,
+        renderer=renderer
     ))
 
     print(f"Summary of Pipeline Execution:")

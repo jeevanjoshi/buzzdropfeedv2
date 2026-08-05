@@ -15,6 +15,7 @@ class TTSRequest(BaseModel):
     voice: str = "af_bella(2)+af_heart(1)"
     region: str = "all"
     output_path: str
+    speed: float = 1.0
 
 from typing import Optional
 import difflib
@@ -117,11 +118,17 @@ async def synthesize_tts(req: TTSRequest):
             import soundfile as sf
             
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-            kokoro_path = os.path.join(base_dir, "kokoro-v0.19.onnx")
-            voices_path = os.path.join(base_dir, "voices.bin")
+            # Kokoro v1.0 checkpoint (better quality). Falls back to v0.19 if missing.
+            kokoro_path = os.path.join(base_dir, "kokoro-v1.0.onnx")
+            voices_path = os.path.join(base_dir, "voices-v1.0.bin")
+            if not (os.path.exists(kokoro_path) and os.path.exists(voices_path)):
+                kokoro_path = os.path.join(base_dir, "kokoro-v0.19.onnx")
+                voices_path = os.path.join(base_dir, "voices.bin")
             if os.path.exists(kokoro_path) and os.path.exists(voices_path):
                 kokoro = Kokoro(kokoro_path, voices_path)
-                samples, sample_rate = kokoro.create(clean_text, voice=selected_voice, speed=1.0, lang="en-us")
+                # Clamp the tempo so it stays intelligible; speed>1 = faster/punchier.
+                speed = max(0.85, min(1.15, float(getattr(req, "speed", 1.0) or 1.0)))
+                samples, sample_rate = kokoro.create(clean_text, voice=selected_voice, speed=speed, lang="en-us")
                 sf.write(req.output_path, samples, sample_rate)
                 return {"status": "success", "engine": "kokoro_onnx", "path": req.output_path, "voice": selected_voice}
         except Exception as e:

@@ -6,7 +6,7 @@ import asyncio
 from typing import Dict, Any, Optional, List, Tuple
 from src.schemas.state import GlobalState, ScriptData, AssetPaths, VisualType
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
-from mcp_servers.audio_edge.server import synthesize_tts, align_subtitles_whisper, TTSRequest, WhisperRequest
+from mcp_servers.audio_edge.server import synthesize_tts, align_subtitles_whisper, sanitize_tts_text, TTSRequest, WhisperRequest
 from mcp_servers.media_cloud.server import (
     generate_flux_image, apply_ken_burns_motion, assemble_ffmpeg_timeline,
     render_playwright_svg_animation, generate_dynamic_chart, fetch_reaction_gif_clip,
@@ -19,6 +19,52 @@ from src.engine.media_budget import media_budget
 # All other standard-image shots use FREE assets (Pixabay/synthetic) to stay
 # within the monthly AI image budget (media_budget, ~INR 2000 / month).
 PREMIUM_SHOT_IDS = {1, 8, 12, 15}
+
+# Sync-quality knobs: the final timeline is driven by the MEASURED narration
+# audio duration, not the script-time words/2.2 estimate. A short trailing pad
+# gives a professional "hold" after each spoken clip; the subs/BGM follow the
+# same measured clock so nothing drifts.
+PAD_AFTER_NARRATION = 0.6        # trailing silence/hold after each shot's narration
+MIN_SHOT_DUR = 2.0               # hard floor for a single shot's timeline length
+BGM_VOLUME = 0.12                # background music duck factor used by both renderers
+RESOLUTION = (1920, 1080)        # strict 16:9 widescreen
+
+
+def _probe_duration(path: str) -> Optional[float]:
+    """
+    Returns the exact media duration (seconds) of an audio/video file using
+    ffprobe. This is the SINGLE SOURCE OF TRUTH for all timeline offsets so that
+    subtitles, concatenation and BGM all stay perfectly in sync with the audio.
+    Returns None on any error (never raises).
+    """
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            val = float(r.stdout.strip())
+            if val > 0:
+                return val
+    except Exception:
+        pass
+    return None
+
+
+def _probe_wav_duration(path: str) -> Optional[float]:
+    """Fast WAV duration probe using the stdlib wave module, with ffprobe fallback."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import wave
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:
+        return _probe_duration(path)
 
 
 def merge_ass_subtitle_files(ass_paths: List[str], shot_durations: List[float], output_master_ass: str):
@@ -87,23 +133,6 @@ def parse_scene_visual_cue(narration_text: str) -> Tuple[str, str]:
     extracted_cue = scene_match.group(1).strip() if scene_match else ""
     clean_narration = re.sub(r'\[Scene:[^\]]*\]', '', narration_text).strip()
     return clean_narration, extracted_cue
-
-
-def inject_tts_breathing_pauses(narration: str, sentiment_score: float = 0.5) -> str:
-    """
-    Stage 4: Neural TTS Intonation Engine:
-    Inserts SSML-style natural breathing pauses (<break>) at punctuation boundaries.
-    Adjusts pause density based on script sentiment (0.0=tense/fast, 1.0=calm/slow).
-    """
-    # Map sentiment to pause duration thresholds
-    pause_ms = int(200 + (sentiment_score * 300))  # 200ms – 500ms range
-    short_pause = f"<break time='{pause_ms}ms'/>"
-    long_pause = f"<break time='{pause_ms * 2}ms'/>"
-
-    # Insert pauses at commas and em-dashes (short), and sentence ends (long)
-    narration = re.sub(r'([,;—])', r'\1 ' + short_pause + ' ', narration)
-    narration = re.sub(r'([.!?])\s', r'\1 ' + long_pause + ' ', narration)
-    return narration.strip()
 
 
 # Stage 8 Quality-by-Design: Cinematic FVD keyword sets by shot position
@@ -210,15 +239,18 @@ class MediaProducerAgent:
     Includes TTS Intonation & Breathing Pause Injection and [Scene:...] Visual Cue Parsing.
     """
 
-    def __init__(self, name: str = "MediaProducer", storage_dir: str = "/tmp/csvg_media"):
+    def __init__(self, name: str = "MediaProducer", storage_dir: str = "/tmp/csvg_media", renderer: str = "ffmpeg"):
         self.name = name
         self.storage_dir = storage_dir
+        # "ffmpeg" = probe-driven concat (default); "moviepy" = MoviePy timeline composer.
+        self.renderer = renderer
         os.makedirs(self.storage_dir, exist_ok=True)
 
-    async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False) -> AssetPaths:
+    async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None) -> AssetPaths:
         """
         Synthesizes audio & subtitles via Edge MCP tools, generates visuals & timeline via Cloud MCP tools.
         """
+        renderer = renderer or self.renderer
         script = state.script_data
         if not script:
             raise ValueError("Media production failed: state.script_data is None")
@@ -236,6 +268,7 @@ class MediaProducerAgent:
         os.makedirs(vis_dir, exist_ok=True)
 
         concat_lines = []
+        shot_timings: List[float] = []   # measured (probed) final durations per shot
 
         for shot in script.shots:
             shot_key = f"shot_{shot.shot_id}"
@@ -248,11 +281,24 @@ class MediaProducerAgent:
             # Stage 8 Quality-by-Design: Enrich visual prompt with FVD cinematic keywords
             visual_prompt = enrich_visual_prompt(raw_visual_prompt, shot.act_index, shot.shot_id)
 
-            # Stage 4b: Inject TTS breathing pauses based on shot urgency
-            urgency_words = {"warning", "collapse", "shocking", "urgent", "crisis", "breaking"}
+            # Sync-safe text: sanitized exactly like the TTS engine speaks it, so the
+            # Whisper subtitle remap matches the real spoken words (no SSML artifacts).
+            tts_narration = sanitize_tts_text(clean_narration)
+
+            # Expressive tempo (Approach A): vary the TTS `speed` per shot so the
+            # narrator isn't monotone. Urgency/crisis shots sound punchier & faster;
+            # the verdict act slows for dramatic weight. The re-probed audio duration
+            # keeps subtitles/timeline in sync regardless of the chosen speed.
+            urgency_words = {"warning", "collapse", "shocking", "urgent", "crisis", "breaking", "plunge"}
             has_urgency = any(w in clean_narration.lower() for w in urgency_words)
-            sentiment_score = 0.25 if has_urgency else 0.65
-            tts_narration = inject_tts_breathing_pauses(clean_narration, sentiment_score)
+            if has_urgency:
+                tts_speed = 1.07
+            elif shot.act_index == 6:
+                tts_speed = 0.94   # verdict: weighty, deliberate
+            elif shot.act_index == 5:
+                tts_speed = 0.97   # risk: tense, slightly slowed
+            else:
+                tts_speed = 1.0
 
             # Paths
             wav_path = os.path.join(audio_dir, f"{shot_key}.wav")
@@ -272,7 +318,8 @@ class MediaProducerAgent:
                         async with session.post(f"{audio_edge_url}/tools/synthesize_tts", json={
                             "text": tts_narration,
                             "output_path": wav_path,
-                            "region": region_val
+                            "region": region_val,
+                            "speed": tts_speed
                         }, timeout=aiohttp.ClientTimeout(total=300)) as resp:
                             if resp.status != 200:
                                 raise Exception(f"TTS Synthesis failed over HTTP: {await resp.text()}")
@@ -291,7 +338,7 @@ class MediaProducerAgent:
                                     raise Exception(f"Failed to download wav file after 3 attempts: {get_err}")
                                 await asyncio.sleep(1.0)
 
-                        # 3. Align subtitles remotely
+                        # 3. Align subtitles remotely (against the sanitized spoken text)
                         async with session.post(f"{audio_edge_url}/tools/align_subtitles_whisper", json={
                             "audio_path": wav_path,
                             "output_ass_path": ass_path,
@@ -318,7 +365,7 @@ class MediaProducerAgent:
                     print(f"Edge Audio Service Exception (falling back to local synthesis): {e}")
 
             if not audio_generated:
-                await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path))
+                await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path, speed=tts_speed))
                 await align_subtitles_whisper(WhisperRequest(audio_path=wav_path, output_ass_path=ass_path, original_text=tts_narration))
 
             # Gate 2 Early Validation: WAV must exist and be > 1KB before proceeding
@@ -338,8 +385,16 @@ class MediaProducerAgent:
             asset_paths.audio[shot_key] = wav_path
             asset_paths.subtitles[shot_key] = ass_path
 
+            # ---- Source-of-truth timing: measure the real narration length ----
+            audio_dur = _probe_wav_duration(wav_path)
+            if not audio_dur:
+                audio_dur = max(shot.duration_estimate, MIN_SHOT_DUR)
+                print(f"[MediaProducer] WARNING: could not probe narration duration for {shot_key}; "
+                      f"falling back to estimate {audio_dur:.1f}s")
+            # Final shot timeline length = spoken audio + trailing hold (never cuts narration).
+            shot_timeline_dur = max(audio_dur + PAD_AFTER_NARRATION, MIN_SHOT_DUR)
+
             # Stage 8 Quality-by-Design: Alternate Ken Burns pan direction for optical flow continuity
-            # Odd shots pan left-to-right, even shots pan right-to-left — prevents jarring same-direction cuts
             ken_burns_direction = "left_to_right" if shot.shot_id % 2 == 1 else "right_to_left"
 
             # Route and generate specialized visual assets based on AI-classified shot.visual_type
@@ -361,7 +416,7 @@ class MediaProducerAgent:
                 try:
                     await fetch_reaction_gif_clip(GIFRequest(
                         query=gif_query,
-                        duration=shot.duration_estimate,
+                        duration=shot_timeline_dur,
                         output_mp4_path=mp4_path
                     ))
                     is_specialized = True
@@ -382,7 +437,7 @@ class MediaProducerAgent:
                         labels=["Q1", "Q2", "Q3", "Q4", "Current"],
                         values=[100, 130, 110, 180, 225],
                         unit_symbol="%" if "percent" in prompt_lower or "%" in prompt_lower else "$ Billion",
-                        duration=shot.duration_estimate,
+                        duration=shot_timeline_dur,
                         output_mp4_path=mp4_path
                     ))
                     is_specialized = True
@@ -403,7 +458,7 @@ class MediaProducerAgent:
                         title=svg_title,
                         headline_val="$520.4 Billion" if "billion" in prompt_lower else "+18.4%",
                         sub_text="Live Market Shift" if "billion" in prompt_lower else "Gain",
-                        duration=shot.duration_estimate,
+                        duration=shot_timeline_dur,
                         output_mp4_path=mp4_path
                     ))
                     is_specialized = True
@@ -475,26 +530,33 @@ class MediaProducerAgent:
                 await apply_ken_burns_motion(KenBurnsRequest(
                     image_path=img_path,
                     audio_path=wav_path,
-                    duration=shot.duration_estimate,
+                    duration=shot_timeline_dur,
                     output_mp4_path=mp4_path,
                     direction=ken_burns_direction  # optical flow continuity
                 ))
 
-            # Mix narration audio with the specialized visual MP4 if applicable
+            # Mix narration audio with the specialized visual MP4 if applicable.
+            # Re-encode to the MEASURED shot_timeline_dur so the visual is held/padded
+            # to fill the full spoken clip (no `-shortest` truncation of narration).
             if is_specialized:
                 if os.path.exists(mp4_path):
                     import shutil
                     import subprocess
                     temp_specialized_path = mp4_path.replace(".mp4", "_visual_only.mp4")
                     shutil.move(mp4_path, temp_specialized_path)
-                    print(f"[MediaProducer] Merging audio {wav_path} with specialized video {temp_specialized_path} -> {mp4_path}")
+                    print(f"[MediaProducer] Merging audio {wav_path} with specialized video {temp_specialized_path} -> {mp4_path} (dur={shot_timeline_dur:.2f}s)")
                     merge_cmd = [
                         "ffmpeg", "-y",
                         "-i", temp_specialized_path,
                         "-i", wav_path,
-                        "-c:v", "copy",
+                        "-filter_complex",
+                        f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+                        f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v];"
+                        f"[1:a]apad[a]",
+                        "-map", "[v]", "-map", "[a]",
+                        "-t", f"{shot_timeline_dur:.3f}",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
                         "-c:a", "aac", "-b:a", "192k",
-                        "-shortest",
                         mp4_path
                     ]
                     res = subprocess.run(merge_cmd, capture_output=True, text=True)
@@ -509,16 +571,24 @@ class MediaProducerAgent:
 
             concat_lines.append(f"file '{mp4_path}'")
 
+            # Probe the REAL rendered clip duration (post-encode) so the master
+            # subtitle offsets exactly match the concatenated media clock — this
+            # removes any fps/rounding drift between shots.
+            real_dur = _probe_duration(mp4_path) or shot_timeline_dur
+            shot_timings.append(real_dur)
+
         # Create Concat List File for FFmpeg
         concat_list_path = os.path.join(self.storage_dir, "concat_list.txt")
         with open(concat_list_path, "w") as f:
             f.write("\n".join(concat_lines))
 
-        # Merge all shot subtitles into a single master .ass timeline file
+        # Merge all shot subtitles into a single master .ass timeline file,
+        # offsetting by the MEASURED real clip durations (not script estimates).
         ass_paths = [asset_paths.subtitles[f"shot_{shot.shot_id}"] for shot in script.shots if f"shot_{shot.shot_id}" in asset_paths.subtitles]
-        shot_durs = [max(shot.duration_estimate, 2.0) for shot in script.shots]
+        shot_durs = [max(t, 2.0) for t in shot_timings]
         master_sub_path = os.path.join(self.storage_dir, "master_subtitles.ass")
         merge_ass_subtitle_files(ass_paths, shot_durs, master_sub_path)
+        print(f"[MediaProducer] Master subtitle offsets (measured, seconds): {[round(t, 2) for t in shot_durs]}")
 
         # Assemble Final Timeline
         final_video_path = os.path.join(self.storage_dir, "final_video_1080p.mp4")
@@ -535,12 +605,30 @@ class MediaProducerAgent:
             with open(bgm_final_path, "w") as f:
                 f.write("DUMMY_BGM")
 
-        await assemble_ffmpeg_timeline(TimelineAssemblyRequest(
-            concat_list_path=concat_list_path,
-            subtitle_path=master_sub_path,
-            bgm_path=bgm_final_path,
-            output_video_path=final_video_path
-        ))
+        if renderer == "moviepy":
+            try:
+                self._assemble_moviepy(
+                    clip_paths=[asset_paths.visuals[f"shot_{shot.shot_id}"] for shot in script.shots],
+                    shot_timings=shot_timings,
+                    master_sub_path=master_sub_path,
+                    bgm_path=bgm_final_path,
+                    output_video_path=final_video_path
+                )
+            except Exception as mp_err:
+                print(f"[MediaProducer] MoviePy assembly failed ({mp_err}); falling back to ffmpeg timeline.")
+                await assemble_ffmpeg_timeline(TimelineAssemblyRequest(
+                    concat_list_path=concat_list_path,
+                    subtitle_path=master_sub_path,
+                    bgm_path=bgm_final_path,
+                    output_video_path=final_video_path
+                ))
+        else:
+            await assemble_ffmpeg_timeline(TimelineAssemblyRequest(
+                concat_list_path=concat_list_path,
+                subtitle_path=master_sub_path,
+                bgm_path=bgm_final_path,
+                output_video_path=final_video_path
+            ))
 
         # Generate dynamic widescreen high-CTR Thumbnail (uses the CTR-optimized brief)
         thumbnail_path = os.path.join(self.storage_dir, "thumbnail.png")
@@ -572,6 +660,120 @@ class MediaProducerAgent:
         state.asset_paths = asset_paths
         state.execution_stage = "MEDIA_PRODUCED"
         return asset_paths
+
+    # ----------------------------------------------------------------------
+    # MoviePy timeline composer (opt-in via --renderer moviepy)
+    #
+    # Builds the final master from the SAME measured per-shot clips used by the
+    # ffmpeg path, but expresses the timeline in MoviePy's absolute-time model:
+    # each shot's video is placed at its measured start; narration (already in
+    # each clip) + ducked music are mixed on a composite audio track; subtitles
+    # are burned from the master .ass (converted to .srt). Timings come ONLY
+    # from ffprobe-measured durations, so video/audio/subtitle/music stay in sync.
+    #
+    # Requirements: `pip install moviepy` (+ ImageMagick only if you want the
+    # TextClip subtitle burn). If moviepy (or ImageMagick) is missing, this
+    # raises and the caller falls back to the ffmpeg assembler.
+    # ----------------------------------------------------------------------
+    def _assemble_moviepy(self, clip_paths, shot_timings, master_sub_path,
+                          bgm_path, output_video_path):
+        try:
+            from moviepy.editor import (
+                VideoFileClip, AudioFileClip, CompositeAudioClip,
+                CompositeVideoClip, concatenate_videoclips
+            )
+        except Exception as e:
+            print(f"[MoviePy] moviepy not installed or import failed: {e}. "
+                  f"Falling back to ffmpeg assembly.")
+            raise RuntimeError("MoviePy unavailable; use --renderer ffmpeg")
+
+        # 1. Load each shot clip and clamp to its measured duration.
+        clips = []
+        try:
+            for path, dur in zip(clip_paths, shot_timings):
+                c = VideoFileClip(path)
+                if c.duration is not None and dur < c.duration - 0.05:
+                    c = c.subclip(0, dur)
+                clips.append(c)
+        except Exception as e:
+            print(f"[MoviePy] Failed to load a shot clip: {e}")
+            for c in clips:
+                c.close()
+            raise RuntimeError(f"MoviePy clip load failed: {e}")
+
+        video = concatenate_videoclips(clips, method="compose")
+        video = video.resize((RESOLUTION[0], RESOLUTION[1]))
+
+        # 2. Mix background music under narration.
+        narration = video.audio
+        if os.path.exists(bgm_path) and os.path.getsize(bgm_path) > 1000:
+            try:
+                bgm = AudioFileClip(bgm_path)
+                bgm = bgm.audio_loop(duration=video.duration).volumex(BGM_VOLUME)
+                video = video.set_audio(CompositeAudioClip([narration, bgm]))
+                print("[MoviePy] Background music mixed under narration.")
+            except Exception as e:
+                print(f"[MoviePy] BGM mix skipped (keeping narration only): {e}")
+        else:
+            print("[MoviePy] No valid BGM; narration only.")
+
+        # 3. Burn subtitles from master .ass -> .srt (needs moviepy TextClip/ImageMagick).
+        subs_path = os.path.join(self.storage_dir, "master_subtitles.srt")
+        try:
+            self._ass_to_srt(master_sub_path, subs_path)
+            from moviepy.video.tools.subtitles import SubtitlesClip
+            from moviepy.video.VideoClip import TextClip
+
+            def make_text(txt):
+                return TextClip(
+                    txt, fontsize=46, color="white", stroke_color="black",
+                    stroke_width=2, font="Montserrat", method="caption",
+                    size=(RESOLUTION[0] * 0.92, None)
+                )
+            subs = SubtitlesClip(subs_path, make_text)
+            final = CompositeVideoClip([
+                video,
+                subs.set_position(("center", "bottom")).set_duration(video.duration)
+            ])
+            print("[MoviePy] Subtitles burned via MoviePy SubtitlesClip.")
+        except Exception as e:
+            print(f"[MoviePy] Subtitle burn via TextClip unavailable ({e}); "
+                  f"rendering without subtitle overlay.")
+            final = video
+
+        print(f"[MoviePy] Rendering master through MoviePy -> {output_video_path}")
+        final.write_videofile(
+            output_video_path, fps=25, codec="libx264", preset="fast",
+            audio_codec="aac", audio_bitrate="192k",
+            ffmpeg_params=["-pix_fmt", "yuv420p"]
+        )
+        final.close()
+        video.close()
+        for c in clips:
+            c.close()
+
+    def _ass_to_srt(self, ass_path: str, srt_path: str):
+        """Minimal .ass -> .srt converter for the MoviePy subtitle burn."""
+        subs = []
+        if not os.path.exists(ass_path):
+            return
+        with open(ass_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if not line.startswith("Dialogue:"):
+                    continue
+                parts = line.split(",", 9)
+                if len(parts) != 10:
+                    continue
+
+                def to_srt(t):
+                    h, m, s = t.strip().split(":")
+                    ms = int(round(float(s) * 1000))
+                    return f"{int(h):02d}:{int(m):02d}:{ms // 1000:02d},{ms % 1000:03d}"
+                subs.append((to_srt(parts[1]), to_srt(parts[2]), parts[9].rstrip("\n")))
+
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for i, (start, end, text) in enumerate(subs, start=1):
+                f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
 
     def _generate_shorts(self, final_video: str, n: int = 3, seg_len: float = 45.0) -> List[str]:
         """
@@ -619,7 +821,7 @@ class MediaProducerAgent:
                 paths.append(out)
         return paths
 
-    async def process(self, state: GlobalState, dummy_frames: bool = False) -> A2AMessage:
+    async def process(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None) -> A2AMessage:
         """
         Executes Media Producer workflow:
         1. Reads state.script_data
@@ -627,7 +829,7 @@ class MediaProducerAgent:
         3. Updates state.asset_paths
         4. Emits MEDIA_READY A2AMessage to Orchestrator
         """
-        assets = await self.produce_all_media(state, dummy_frames=dummy_frames)
+        assets = await self.produce_all_media(state, dummy_frames=dummy_frames, renderer=renderer)
 
         msg = A2AMessage(
             message_id=f"msg-{uuid.uuid4().hex[:8]}",

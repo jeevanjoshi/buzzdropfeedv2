@@ -19,6 +19,19 @@ PI5_IP="100.108.116.100"
 PI5_USER="jeevanjoshi"
 PI5_TARGET_DIR="/home/jeevanjoshi/buzzdropfeedv2"
 
+# Extract a --renderer moviepy|ffmpeg switch if supplied by the caller so it
+# survives the background detach and is passed to the pipeline.
+RENDERER_ARG=""
+if [[ "$*" == *"--renderer"* ]]; then
+    for ((i=1; i<=$#; i++)); do
+        if [[ "${!i}" == "--renderer" ]]; then
+            j=$((i+1))
+            RENDERER_ARG="--renderer ${!j}"
+            break
+        fi
+    done
+fi
+
 # Check if we should detach into the background
 if [ "${1:-}" != "--no-detach" ]; then
     LATEST_STATE=$(ls -t logs/state_*.json 2>/dev/null | head -n 1)
@@ -40,8 +53,8 @@ if [ "${1:-}" != "--no-detach" ]; then
     fi
 
     echo "[LAUNCH] Launching CSVG Production Pipeline in the background..."
-    # Launch itself with --no-detach in the background, forwarding resume argument
-    nohup "$0" --no-detach ${RESUME_ARG} > /dev/null 2>&1 &
+    # Launch itself with --no-detach in the background, forwarding resume + renderer arguments
+    nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} > /dev/null 2>&1 &
     PID=$!
     echo "[SUCCESS] Pipeline successfully spawned in background (PID: ${PID})."
     echo "[LOGS] Real-time logs: tail -f ${LOG_FILE}"
@@ -64,6 +77,7 @@ else
 fi
 
 # Run the pipeline
+# --renderer is already present in "$@" (survived the detach), so just forward.
 if [[ "$*" == *"--resume"* ]]; then
     python3 main.py "$@" >> "${LOG_FILE}" 2>&1
 else

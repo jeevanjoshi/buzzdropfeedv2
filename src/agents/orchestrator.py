@@ -49,11 +49,15 @@ class OrchestratorAgent:
         region: str = "all",
         publish: bool = True,
         dummy_frames: bool = False,
-        state: Optional[GlobalState] = None
+        state: Optional[GlobalState] = None,
+        renderer: str = "ffmpeg"
     ) -> GlobalState:
         """
         Executes complete autonomous pipeline run with structured logging & trajectory tracing.
         """
+        # Renderer switch: "ffmpeg" (default, probe-driven concat) or "moviepy" (timeline composer).
+        if renderer in ("moviepy", "ffmpeg"):
+            self.media_producer.renderer = renderer
         if state is None:
             p_id = pipeline_id or f"csvg-exec-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
             state = GlobalState(

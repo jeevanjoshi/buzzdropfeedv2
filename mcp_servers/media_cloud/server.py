@@ -501,20 +501,35 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
             cmd.extend(["-i", req.audio_path])
             has_audio = True
 
-        cmd.extend([
-            "-vf", f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={nb_frames}:s=1920x1080,fps=25",
-            "-t", str(dur),
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-pix_fmt", "yuv420p"
-        ])
+        zoompan = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+                   "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+                   f"zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={nb_frames}:s=1920x1080,fps=25,format=yuv420p")
 
         if has_audio:
-            cmd.extend(["-c:a", "aac", "-b:a", "192k", "-shortest"])
+            # Pad audio with silence up to `dur` and cap total length with -t, so the
+            # clip is EXACTLY `dur` (narration fully audible + trailing hold). This
+            # makes the concatenated timeline match ffprobe-measured durations exactly.
+            cmd.extend([
+                "-filter_complex", f"[0:v]{zoompan}[v];[1:a]apad[a]",
+                "-map", "[v]", "-map", "[a]",
+                "-t", str(dur),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                req.output_mp4_path
+            ])
         else:
-            cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-c:a", "aac", "-shortest"])
-
-        cmd.append(req.output_mp4_path)
+            cmd.extend([
+                "-vf", zoompan,
+                "-t", str(dur),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-pix_fmt", "yuv420p",
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-c:a", "aac", "-shortest",
+                req.output_mp4_path
+            ])
 
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0:
