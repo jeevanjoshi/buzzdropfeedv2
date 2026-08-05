@@ -57,6 +57,10 @@ class TimelineAssemblyRequest(BaseModel):
     subtitle_path: str
     bgm_path: str
     output_video_path: str
+    # Crossfade between consecutive shots (seconds). 0.0 = hard-cut concat (legacy).
+    # >0 enables an ffmpeg xfade/acrossfade dissolve chain ("fade" transition).
+    crossfade: float = 0.0
+    transition: str = "fade"
 
 
 def generate_synthetic_png(output_path: str, title: str = "16:9 CSVG MEDIA"):
@@ -542,22 +546,143 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _read_concat_paths(concat_list_path: str) -> List[str]:
+    """Parse `file 'path'` lines from an ffmpeg concat list."""
+    paths = []
+    try:
+        with open(concat_list_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("file '") and line.endswith("'"):
+                    paths.append(line[6:-1])
+    except Exception:
+        pass
+    return [p for p in paths if os.path.exists(p)]
+
+
+def _probe_dur(path: str) -> float:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30)
+        val = float(r.stdout.strip())
+        return val if val > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
+                         subtitle_path, output_video_path, bgm_path=None):
+    """
+    Builds an ffmpeg command that concatenates shots with a crossfade dissolve
+    between each pair (xfade for video, acrossfade for audio). Returns the
+    `cmd` list, or None if there are < 2 eligible clips.
+    """
+    n = len(clip_paths)
+    if n < 2:
+        return None
+
+    cf = crossfade
+    min_d = min(durs)
+    cf = max(0.1, min(cf, min_d * 0.45))  # never overlap more than ~half the shortest shot
+
+    # Prefix sums of clip durations (for xfade offset math).
+    prefix = []
+    s = 0.0
+    for d in durs:
+        s += d
+        prefix.append(s)
+
+    has_sub = subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 50
+    has_bgm = bgm_path and os.path.exists(bgm_path) and os.path.getsize(bgm_path) > 1000
+
+    parts = []
+
+    # Normalize each video stream (trim to exact length, uniform format) for xfade.
+    for i in range(n):
+        parts.append(
+            f"[{i}:v]trim=end={durs[i]:.3f},setpts=PTS-STARTPTS,fps=25,"
+            f"scale=1920:1080:force_original_aspect_ratio=decrease,"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v{i}]"
+        )
+    cur = "[v0]"
+    for i in range(1, n):
+        off = prefix[i - 1] - i * cf
+        parts.append(f"{cur}[v{i}]xfade=transition={transition}:duration={cf:.3f}:offset={off:.3f}[vx{i}]")
+        cur = f"[vx{i}]"
+
+    # Normalize each audio stream (trim + common rate/channels) so acrossfade works.
+    for i in range(n):
+        parts.append(
+            f"[{i}:a]atrim=end={durs[i]:.3f},asetpts=PTS-STARTPTS,"
+            f"aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
+        )
+    cura = "[a0]"
+    for i in range(1, n):
+        parts.append(f"{cura}[a{i}]acrossfade=d={cf:.3f}:c1=tri:c2=tri[ax{i}]")
+        cura = f"[ax{i}]"
+
+    # Burn subtitles on the final composited video stream.
+    if has_sub:
+        esc = subtitle_path.replace(":", "\\:").replace("'", "'\\''")
+        parts.append(f"{cur}ass='{esc}',format=yuv420p[v]")
+    else:
+        parts.append(f"{cur}format=yuv420p[v]")
+
+    # Voice + ducked BGM, or narration only.
+    if has_bgm:
+        parts.append(f"{cura}volume=1.0[voice]")
+        parts.append(f"[{n}:a]volume=0.12[bgm]")
+        parts.append("[voice][bgm]amix=inputs=2:duration=first[a]")
+    else:
+        parts.append(f"{cura}acopy[a]")
+
+    cmd = ["ffmpeg", "-y"]
+    for p in clip_paths:
+        cmd += ["-i", p]
+    if has_bgm:
+        cmd += ["-stream_loop", "-1", "-i", bgm_path]
+    cmd += ["-filter_complex", ";".join(parts)]
+    cmd += ["-map", "[v]", "-map", "[a]"]
+    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "22"]
+    cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+    cmd += [output_video_path]
+    return cmd
+
+
 @app.post("/tools/assemble_ffmpeg_timeline")
 async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
     """
     Executes FFmpeg timeline assembly: concatenates shot MP4s, burns .ass subtitles,
     enforces strict 16:9 1920x1080 video resolution.
+    When `crossfade > 0`, uses an xfade/acrossfade dissolve between shots instead of
+    a hard-cut concat, producing smooth professional transitions.
     """
     import shutil
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_video_path)), exist_ok=True)
 
         if not shutil.which("ffmpeg"):
-            # Fallback if FFmpeg binary is missing from local system PATH
             print("WARNING: FFmpeg binary not found in system PATH. Writing synthetic final video placeholder.")
             with open(req.output_video_path, "w") as f:
                 f.write("DUMMY_FINAL_1080P_VIDEO")
             return {"status": "fallback_placeholder", "engine": "synthetic_video", "path": req.output_video_path}
+
+        # Crossfade path: xfade/acrossfade dissolve between shots.
+        if req.crossfade > 0:
+            clip_paths = _read_concat_paths(req.concat_list_path)
+            durs = [_probe_dur(p) for p in clip_paths]
+            cmd = _build_crossfade_cmd(
+                clip_paths, durs, req.crossfade, req.transition,
+                req.subtitle_path, req.output_video_path, req.bgm_path,
+            )
+            if cmd:
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode == 0:
+                    return {"status": "success", "engine": f"ffmpeg_xfade_{req.transition}",
+                            "path": req.output_video_path, "crossfade": req.crossfade}
+                print(f"FFmpeg XFade Error: {res.stderr}")
 
         has_subtitles = req.subtitle_path and os.path.exists(req.subtitle_path) and os.path.getsize(req.subtitle_path) > 50
 

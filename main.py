@@ -15,6 +15,7 @@ def main():
     publish = True
     dummy_frames = False
     renderer = "ffmpeg"
+    crossfade = 0.5
 
     state = None
     if len(sys.argv) > 1:
@@ -32,6 +33,13 @@ def main():
             for i, arg in enumerate(sys.argv):
                 if arg == "--renderer" and i + 1 < len(sys.argv):
                     renderer = sys.argv[i + 1]
+        if "--crossfade" in sys.argv:
+            for i, arg in enumerate(sys.argv):
+                if arg == "--crossfade" and i + 1 < len(sys.argv):
+                    try:
+                        crossfade = float(sys.argv[i + 1])
+                    except ValueError:
+                        crossfade = 0.5
         
         # Parse --resume <pipeline_id>
         for i, arg in enumerate(sys.argv):
@@ -55,7 +63,8 @@ def main():
         publish=publish,
         dummy_frames=dummy_frames,
         state=state,
-        renderer=renderer
+        renderer=renderer,
+        crossfade=crossfade
     ))
 
     print(f"Summary of Pipeline Execution:")

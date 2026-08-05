@@ -105,6 +105,11 @@ class AssetPaths(BaseModel):
     shorts_clip: Optional[str] = None        # 1080x1920 vertical 60-90s Shorts clip
     shorts: List[str] = Field(default_factory=list, description="Generated vertical Shorts clips (1080x1920)")
     storage_dir: Optional[str] = "/tmp/csvg_media"
+    # Measured (ffprobe) per-shot durations + the crossfade used at assembly, so
+    # pre-upload gates can check the master duration against the REAL timeline
+    # (not the script-time estimate).
+    measured_durations: List[float] = Field(default_factory=list)
+    crossfade_used: float = 0.0
 
 
 class UploadMetadata(BaseModel):
@@ -129,6 +134,7 @@ class GlobalState(BaseModel):
     pipeline_id: str
     timestamp: str
     execution_stage: str = "INITIALIZATION"
+    region: str = "all"  # pipeline-run region ("all" | "india" | "global")
     selected_topic: Optional[TopicCandidate] = None
     verified_facts: List[VerifiedFact] = Field(default_factory=list)
     crawled_content: str = ""

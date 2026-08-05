@@ -19,15 +19,20 @@ PI5_IP="100.108.116.100"
 PI5_USER="jeevanjoshi"
 PI5_TARGET_DIR="/home/jeevanjoshi/buzzdropfeedv2"
 
-# Extract a --renderer moviepy|ffmpeg switch if supplied by the caller so it
-# survives the background detach and is passed to the pipeline.
+# Extract switches that must survive the background detach and reach the pipeline.
 RENDERER_ARG=""
+CROSSFADE_ARG=""
 if [[ "$*" == *"--renderer"* ]]; then
     for ((i=1; i<=$#; i++)); do
         if [[ "${!i}" == "--renderer" ]]; then
-            j=$((i+1))
-            RENDERER_ARG="--renderer ${!j}"
-            break
+            j=$((i+1)); RENDERER_ARG="--renderer ${!j}"; break
+        fi
+    done
+fi
+if [[ "$*" == *"--crossfade"* ]]; then
+    for ((i=1; i<=$#; i++)); do
+        if [[ "${!i}" == "--crossfade" ]]; then
+            j=$((i+1)); CROSSFADE_ARG="--crossfade ${!j}"; break
         fi
     done
 fi
@@ -53,8 +58,8 @@ if [ "${1:-}" != "--no-detach" ]; then
     fi
 
     echo "[LAUNCH] Launching CSVG Production Pipeline in the background..."
-    # Launch itself with --no-detach in the background, forwarding resume + renderer arguments
-    nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} > /dev/null 2>&1 &
+    # Launch itself with --no-detach in the background, forwarding resume + renderer + crossfade
+    nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} > /dev/null 2>&1 &
     PID=$!
     echo "[SUCCESS] Pipeline successfully spawned in background (PID: ${PID})."
     echo "[LOGS] Real-time logs: tail -f ${LOG_FILE}"

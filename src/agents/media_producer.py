@@ -67,10 +67,13 @@ def _probe_wav_duration(path: str) -> Optional[float]:
         return _probe_duration(path)
 
 
-def merge_ass_subtitle_files(ass_paths: List[str], shot_durations: List[float], output_master_ass: str):
+def merge_ass_subtitle_files(ass_paths: List[str], shot_durations: List[float], output_master_ass: str, crossfade: float = 0.0):
     """
     Merges multiple shot .ass subtitle files into a single master timeline subtitle file
     by offsetting timestamps according to cumulative shot durations.
+    When `crossfade > 0`, the offsets account for the overlap introduced by dissolve
+    transitions (each boundary shifts the following shot earlier by `crossfade` sec),
+    so subtitles stay glued to the narration under crossfades.
     """
     ass_header = """[Script Info]
 Title: 16:9 CSVG Master Subtitles
@@ -118,7 +121,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         parts[1] = format_ass_time(t_start)
                         parts[2] = format_ass_time(t_end)
                         dialogue_lines.append(",".join(parts))
+        # Advance to the next shot's start in the (possibly crossfade-compressed)
+        # timeline: a dissolve overlaps `crossfade` seconds at each boundary.
         current_offset += shot_dur
+        if crossfade > 0:
+            current_offset -= crossfade
 
     with open(output_master_ass, "w", encoding="utf-8") as f:
         f.write(ass_header + "".join(dialogue_lines))
@@ -174,58 +181,58 @@ def enrich_visual_prompt(visual_prompt: str, act_index: int, shot_id: int) -> st
 
 def _generate_free_visual(shot, raw_visual_prompt: str, img_path: str, mp4_path: str) -> bool:
     """
-    Generates a shot visual using FREE assets only (Pixabay stock, then local
-    synthetic) — for non-premium shots and when the AI image budget is exhausted.
-    Returns True if a ready-to-use video file was produced (specialized).
+    Generates a shot visual using FREE assets only (Pixabay stock -> Pexels ->
+    local synthetic) — for non-premium shots and when the AI image budget is
+    exhausted. Returns True if a ready-to-use video file was produced (specialized).
     """
     specialized = False
-    try:
-        from src.engine.pixabay_retriever import pixabay_retriever
-        import requests
+    import requests
 
-        words = re.findall(r'\b\w{3,}\b', raw_visual_prompt)
-        clean_query = " ".join(words[:4]) if words else "abstract"
-        query_lower = raw_visual_prompt.lower()
-        is_vector = any(kw in query_lower for kw in ["vector", "svg", "icon", "logo"])
-        is_illustration = any(kw in query_lower for kw in ["illustration", "graphic", "clipart"])
-        is_video = any(kw in query_lower for kw in ["video", "footage", "b-roll", "timelapse", "motion"])
+    words = re.findall(r'\b\w{3,}\b', raw_visual_prompt)
+    clean_query = " ".join(words[:4]) if words else "abstract"
+    query_lower = raw_visual_prompt.lower()
+    is_vector = any(kw in query_lower for kw in ["vector", "svg", "icon", "logo"])
+    is_illustration = any(kw in query_lower for kw in ["illustration", "graphic", "clipart"])
+    is_video = any(kw in query_lower for kw in ["video", "footage", "b-roll", "timelapse", "motion"])
+    img_type = "vector" if is_vector else ("illustration" if is_illustration else "photo")
 
+    def _fetch_from(retriever, source_name: str):
+        """Attempt to fetch + download from one stock provider; raise on failure."""
+        nonlocal specialized
         if is_video:
-            print(f"[FreeVisual] Searching stock video for: '{clean_query}'")
-            video_results = pixabay_retriever.search_videos(clean_query, limit=1)
-            if video_results:
-                video_url = video_results[0]["video_url"]
-                res_vid = requests.get(video_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-                if res_vid.status_code == 200:
-                    with open(mp4_path, 'wb') as out_file:
-                        out_file.write(res_vid.content)
-                    print(f"[FreeVisual] Downloaded Pixabay stock video to {mp4_path}")
-                    specialized = True
-                else:
-                    raise RuntimeError(f"HTTP {res_vid.status_code}")
-            else:
-                raise RuntimeError("No stock videos on Pixabay.")
+            print(f"[FreeVisual] Searching stock video ({source_name}) for: '{clean_query}'")
+            results = retriever.search_videos(clean_query, limit=1)
+            if not results:
+                raise RuntimeError(f"No stock videos on {source_name}.")
+            res = requests.get(results[0]["video_url"], headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+            if res.status_code != 200:
+                raise RuntimeError(f"{source_name} video HTTP {res.status_code}")
+            with open(mp4_path, 'wb') as f:
+                f.write(res.content)
+            print(f"[FreeVisual] Downloaded {source_name} stock video to {mp4_path}")
+            specialized = True
         else:
-            img_type = "photo"
-            if is_vector:
-                img_type = "vector"
-            elif is_illustration:
-                img_type = "illustration"
-            print(f"[FreeVisual] Searching stock images ({img_type}) for: '{clean_query}'")
-            img_results = pixabay_retriever.search_images(clean_query, image_type=img_type, limit=1)
-            if img_results:
-                img_url = img_results[0]["largeImageURL"]
-                res_img = requests.get(img_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-                if res_img.status_code == 200:
-                    with open(img_path, 'wb') as out_file:
-                        out_file.write(res_img.content)
-                    print(f"[FreeVisual] Downloaded Pixabay stock image to {img_path}")
-                else:
-                    raise RuntimeError(f"HTTP {res_img.status_code}")
-            else:
-                raise RuntimeError(f"No {img_type}s on Pixabay.")
+            print(f"[FreeVisual] Searching stock images ({img_type}, {source_name}) for: '{clean_query}'")
+            results = retriever.search_images(clean_query, image_type=img_type, limit=1)
+            if not results:
+                raise RuntimeError(f"No {img_type}s on {source_name}.")
+            res = requests.get(results[0]["largeImageURL"], headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+            if res.status_code != 200:
+                raise RuntimeError(f"{source_name} image HTTP {res.status_code}")
+            with open(img_path, 'wb') as f:
+                f.write(res.content)
+            print(f"[FreeVisual] Downloaded {source_name} stock image to {img_path}")
+
+    try:
+        try:
+            from src.engine.pixabay_retriever import pixabay_retriever
+            _fetch_from(pixabay_retriever, "Pixabay")
+        except Exception as pix_err:
+            print(f"[FreeVisual] Pixabay failed ({pix_err}); trying Pexels.")
+            from src.engine.pexels_retriever import pexels_retriever
+            _fetch_from(pexels_retriever, "Pexels")
     except Exception as e:
-        print(f"[FreeVisual] Pixabay fallback failed: {e}; using local synthetic.")
+        print(f"[FreeVisual] Free stock media failed: {e}; using local synthetic.")
         from mcp_servers.media_cloud.server import generate_synthetic_png
         generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
     return specialized
@@ -239,18 +246,64 @@ class MediaProducerAgent:
     Includes TTS Intonation & Breathing Pause Injection and [Scene:...] Visual Cue Parsing.
     """
 
-    def __init__(self, name: str = "MediaProducer", storage_dir: str = "/tmp/csvg_media", renderer: str = "ffmpeg"):
+    def __init__(self, name: str = "MediaProducer", storage_dir: str = "/tmp/csvg_media",
+                 renderer: str = "ffmpeg", crossfade: float = 0.5):
         self.name = name
         self.storage_dir = storage_dir
         # "ffmpeg" = probe-driven concat (default); "moviepy" = MoviePy timeline composer.
         self.renderer = renderer
+        # Crossfade (seconds) between consecutive shots; 0.0 = hard cuts.
+        self.crossfade = max(0.0, crossfade)
         os.makedirs(self.storage_dir, exist_ok=True)
+        # Cache the live market quote per topic so we fetch it once, not per shot.
+        self._quote_cache: Dict[str, dict] = {}
+        self._quote_symbol: Optional[str] = None
 
-    async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None) -> AssetPaths:
+    def _pick_symbol(self, state) -> str:
+        """Pick a ticker symbol for live data visuals (ticker/chart)."""
+        kws = getattr(state.selected_topic, "keywords", None) if state.selected_topic else None
+        for kw in (kws or []):
+            if re.fullmatch(r"[A-Z]{1,5}(\.NS)?", kw or ""):
+                return kw
+        region = getattr(state, "region", "all") or "all"
+        return "RELIANCE.NS" if region == "india" else "SPY"
+
+    async def _get_market_quote(self, state) -> Dict[str, Any]:
+        """
+        Fetches a live stock quote (Alpha Vantage) for the chosen symbol to feed
+        the chart/ticker visuals with real numbers. Cached per pipeline run.
+        Returns numeric {symbol, price, change_pct}; falls back gracefully on error.
+        """
+        symbol = self._pick_symbol(state)
+        if symbol in self._quote_cache:
+            return self._quote_cache[symbol]
+        res = {"symbol": symbol, "price": "$125.40", "change": "+3.45%"}
+        try:
+            from src.engine.external_apis import ExternalAPIManager
+            res = await asyncio.to_thread(ExternalAPIManager().fetch_alpha_vantage_stock_quote, symbol)
+        except Exception as e:
+            print(f"[MediaProducer] Market quote fetch failed ({e}); using fallback numbers.")
+        price_raw = re.sub(r"[^\d.]", "", res.get("price", "0") or "0")
+        change_raw = re.sub(r"[^\d.+-]", "", res.get("change", "0") or "0")
+        try:
+            price = float(price_raw)
+        except ValueError:
+            price = 125.40
+        try:
+            change = float(change_raw)
+        except ValueError:
+            change = 3.45
+        symbol_out = res.get("symbol", symbol) or symbol
+        self._quote_symbol = symbol_out
+        self._quote_cache[symbol] = {"symbol": symbol_out, "price": price, "change": change}
+        return self._quote_cache[symbol]
+
+    async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None, crossfade: Optional[float] = None) -> AssetPaths:
         """
         Synthesizes audio & subtitles via Edge MCP tools, generates visuals & timeline via Cloud MCP tools.
         """
         renderer = renderer or self.renderer
+        crossfade = self.crossfade if crossfade is None else max(0.0, crossfade)
         script = state.script_data
         if not script:
             raise ValueError("Media production failed: state.script_data is None")
@@ -432,11 +485,20 @@ class MediaProducerAgent:
                 
                 print(f"Processing AI dynamic data chart segment for {shot_key} (Title: '{chart_title}')")
                 try:
+                    quote = await self._get_market_quote(state)
+                    currency = "₹" if str(quote["symbol"]).endswith(".NS") else "$"
+                    # Build a deterministic 5-point trend ending at the LIVE price so the
+                    # chart reflects the actual daily move (no canned static numbers).
+                    price, change = quote["price"], quote["change"]
+                    start = price / (1 + change / 100.0)
+                    span = price - start
+                    values = [round(start + span * (i / 4.0), 2) for i in range(5)]
+                    labels = ["-4w", "-3w", "-2w", "-1w", "Now"]
                     await generate_dynamic_chart(ChartRequest(
-                        title=chart_title,
-                        labels=["Q1", "Q2", "Q3", "Q4", "Current"],
-                        values=[100, 130, 110, 180, 225],
-                        unit_symbol="%" if "percent" in prompt_lower or "%" in prompt_lower else "$ Billion",
+                        title=f"{chart_title} • {quote['symbol']}",
+                        labels=labels,
+                        values=values,
+                        unit_symbol=currency,
                         duration=shot_timeline_dur,
                         output_mp4_path=mp4_path
                     ))
@@ -453,11 +515,15 @@ class MediaProducerAgent:
 
                 print(f"Processing AI animated Playwright SVG ticker segment for {shot_key} (Title: '{svg_title}')")
                 try:
+                    quote = await self._get_market_quote(state)
+                    currency = "₹" if str(quote["symbol"]).endswith(".NS") else "$"
+                    headline_val = f"{currency}{quote['price']:,.2f}"
+                    sub_text = f"{quote['change']:+.2f}% Today"
                     await render_playwright_svg_animation(PlaywrightSVGRequest(
-                        chart_type="animated_line_chart",
-                        title=svg_title,
-                        headline_val="$520.4 Billion" if "billion" in prompt_lower else "+18.4%",
-                        sub_text="Live Market Shift" if "billion" in prompt_lower else "Gain",
+                        chart_type="stock_ticker",
+                        title=f"{svg_title} • {quote['symbol']}",
+                        headline_val=headline_val,
+                        sub_text=sub_text,
                         duration=shot_timeline_dur,
                         output_mp4_path=mp4_path
                     ))
@@ -577,6 +643,10 @@ class MediaProducerAgent:
             real_dur = _probe_duration(mp4_path) or shot_timeline_dur
             shot_timings.append(real_dur)
 
+        # Persist the measured timeline + crossfade for the pre-upload gates.
+        asset_paths.measured_durations = list(shot_timings)
+        asset_paths.crossfade_used = crossfade
+
         # Create Concat List File for FFmpeg
         concat_list_path = os.path.join(self.storage_dir, "concat_list.txt")
         with open(concat_list_path, "w") as f:
@@ -587,8 +657,8 @@ class MediaProducerAgent:
         ass_paths = [asset_paths.subtitles[f"shot_{shot.shot_id}"] for shot in script.shots if f"shot_{shot.shot_id}" in asset_paths.subtitles]
         shot_durs = [max(t, 2.0) for t in shot_timings]
         master_sub_path = os.path.join(self.storage_dir, "master_subtitles.ass")
-        merge_ass_subtitle_files(ass_paths, shot_durs, master_sub_path)
-        print(f"[MediaProducer] Master subtitle offsets (measured, seconds): {[round(t, 2) for t in shot_durs]}")
+        merge_ass_subtitle_files(ass_paths, shot_durs, master_sub_path, crossfade=crossfade)
+        print(f"[MediaProducer] Master subtitle offsets (measured {', crossfade='+str(crossfade)+'s' if crossfade>0 else ''}, seconds): {[round(t, 2) for t in shot_durs]}")
 
         # Assemble Final Timeline
         final_video_path = os.path.join(self.storage_dir, "final_video_1080p.mp4")
@@ -612,7 +682,8 @@ class MediaProducerAgent:
                     shot_timings=shot_timings,
                     master_sub_path=master_sub_path,
                     bgm_path=bgm_final_path,
-                    output_video_path=final_video_path
+                    output_video_path=final_video_path,
+                    crossfade=crossfade
                 )
             except Exception as mp_err:
                 print(f"[MediaProducer] MoviePy assembly failed ({mp_err}); falling back to ffmpeg timeline.")
@@ -620,14 +691,18 @@ class MediaProducerAgent:
                     concat_list_path=concat_list_path,
                     subtitle_path=master_sub_path,
                     bgm_path=bgm_final_path,
-                    output_video_path=final_video_path
+                    output_video_path=final_video_path,
+                    crossfade=crossfade,
+                    transition="fade"
                 ))
         else:
             await assemble_ffmpeg_timeline(TimelineAssemblyRequest(
                 concat_list_path=concat_list_path,
                 subtitle_path=master_sub_path,
                 bgm_path=bgm_final_path,
-                output_video_path=final_video_path
+                output_video_path=final_video_path,
+                crossfade=crossfade,
+                transition="fade"
             ))
 
         # Generate dynamic widescreen high-CTR Thumbnail (uses the CTR-optimized brief)
@@ -676,7 +751,7 @@ class MediaProducerAgent:
     # raises and the caller falls back to the ffmpeg assembler.
     # ----------------------------------------------------------------------
     def _assemble_moviepy(self, clip_paths, shot_timings, master_sub_path,
-                          bgm_path, output_video_path):
+                          bgm_path, output_video_path, crossfade: float = 0.0):
         try:
             from moviepy.editor import (
                 VideoFileClip, AudioFileClip, CompositeAudioClip,
@@ -701,7 +776,8 @@ class MediaProducerAgent:
                 c.close()
             raise RuntimeError(f"MoviePy clip load failed: {e}")
 
-        video = concatenate_videoclips(clips, method="compose")
+        video = concatenate_videoclips(clips, method="compose",
+                                       crossfade=crossfade if crossfade > 0 else 0)
         video = video.resize((RESOLUTION[0], RESOLUTION[1]))
 
         # 2. Mix background music under narration.

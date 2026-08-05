@@ -14,11 +14,12 @@ class PixabayMediaRetriever:
         Searches Pixabay for images (photo, illustration, vector).
         """
         url = "https://pixabay.com/api/"
+        # Pixabay API requires 3 <= per_page <= 200; clamp so limit=1 still works.
         params = {
             "key": self.api_key,
             "q": query,
             "image_type": image_type,
-            "per_page": limit
+            "per_page": max(3, min(int(limit), 200))
         }
         try:
             res = requests.get(url, params=params, timeout=5)
@@ -47,7 +48,7 @@ class PixabayMediaRetriever:
         params = {
             "key": self.api_key,
             "q": query,
-            "per_page": limit
+            "per_page": max(3, min(int(limit), 200))
         }
         try:
             res = requests.get(url, params=params, timeout=5)

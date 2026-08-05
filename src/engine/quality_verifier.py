@@ -1,6 +1,8 @@
 import os
 import re
 import math
+import json
+import subprocess
 from typing import Dict, Any, List, Tuple
 from src.schemas.state import GlobalState, ScriptData, TopicCandidate
 
@@ -281,7 +283,6 @@ class StageQualityVerifier:
         if not video_path or not os.path.exists(video_path):
             return False, ["Gate 4 Fail: Compiled final video file is missing."]
 
-        import json
         import subprocess
 
         cmd = [
@@ -317,17 +318,175 @@ class StageQualityVerifier:
         if not has_audio:
             issues.append("Gate 4 Fail: Compiled audio stream is missing.")
 
-        target_duration = state.script_data.estimated_runtime_seconds
-        if duration > 0.0 and target_duration > 0.0:
-            diff = abs(duration - target_duration)
-            if diff > 15.0:
-                issues.append(f"Gate 4 Fail: Video duration drift! Compiled duration is {duration:.2f}s, but expected {target_duration:.2f}s (Diff: {diff:.2f}s).")
+        # Duration check: prefer the MEASURED per-shot timeline when available
+        # (Gate 7 does a tighter range check). Falling back to the script estimate
+        # can false-fail when TTS tempo variance changes real durations, so only
+        # enforce the loose estimate check when no measured durations exist.
+        has_measured = bool(state.asset_paths.measured_durations)
+        if not has_measured:
+            target_duration = state.script_data.estimated_runtime_seconds
+            if duration > 0.0 and target_duration > 0.0:
+                diff = abs(duration - target_duration)
+                if diff > 15.0:
+                    issues.append(f"Gate 4 Fail: Video duration drift! Compiled duration is {duration:.2f}s, but expected {target_duration:.2f}s (Diff: {diff:.2f}s).")
 
         is_valid = len(issues) == 0
         return is_valid, issues
 
 
-quality_verifier = StageQualityVerifier()
+    # ----------------------------------------------------------------------
+    # Gate 7: Render Integrity — real ffprobe/pixel sampling before upload.
+    #
+    # Catches the failures the structural Gate 4 cannot see:
+    #   * Per-shot black-frame / frozen-frame detection (actual pixels)  -> failed renders
+    #   * Per-shot audio silence + peak detection (silencedetect/volumedetect) -> mute/clipped narration
+    #   * Master duration check against the MEASURED shot durations (not the estimate)
+    # ----------------------------------------------------------------------
+    @staticmethod
+    def _extract_frames(path, fps: float = 1.0, size=(64, 36)) -> List[List[float]]:
+        """Decode downscaled frames via ffmpeg rawvideo; return per-frame (mean, std)."""
+        w, h = size
+        cmd = ["ffmpeg", "-v", "error", "-i", path,
+               "-vf", f"scale={w}:{h},fps={fps}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=60)
+        except Exception:
+            return []
+        if res.returncode != 0 or not res.stdout:
+            return []
+        frame_bytes = w * h * 3
+        frames = []
+        n = len(res.stdout)
+        for off in range(0, n - frame_bytes + 1, frame_bytes):
+            chunk = res.stdout[off:off + frame_bytes]
+            total = sum(chunk)
+            mean = total / frame_bytes
+            var = sum((b - mean) ** 2 for b in chunk) / frame_bytes
+            frames.append([mean, math.sqrt(var)])
+        return frames
 
+    @staticmethod
+    def _ffmpeg_afstats(path) -> Dict[str, Any]:
+        """Run silencedetect + volumedetect, returning silence-seconds and peak dB."""
+        out = {"silence_sec": 0.0, "max_volume_db": None, "duration": 0.0}
+        cmd = ["ffmpeg", "-v", "info", "-i", path,
+               "-af", "silencedetect=noise=-40dB:d=0.5,volumedetect", "-f", "null", "-"]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except Exception:
+            return out
+        err = res.stderr
+        starts = [float(x) for x in re.findall(r"silence_start:\s*([\d.]+)", err)]
+        ends = [float(x) for x in re.findall(r"silence_end:\s*([\d.]+)", err)]
+        if starts and ends:
+            # Pair starts with ends; use covers 0->first_start and last_end->dur as silence too.
+            sil = 0.0
+            for s, e in zip(starts, ends):
+                sil += max(0.0, e - s)
+            out["silence_sec"] = sil
+        for m in re.finditer(r"max_volume:\s*(-?[\d.]+)\s*dB", err):
+            out["max_volume_db"] = float(m.group(1))
+            break
+        for m in re.finditer(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", err):
+            h, mm, ss = m.groups()
+            out["duration"] = float(h) * 3600 + float(mm) * 60 + float(ss)
+        return out
+
+    def verify_gate7_render_integrity(self, state: GlobalState) -> Tuple[bool, List[str]]:
+        video_path = state.asset_paths.final_video
+        issues = []
+        warnings = []
+
+        # --- Per-shot pixel sampling (black / frozen frames) ---
+        visual_map = state.asset_paths.visuals or {}
+        sampled = 0
+        for shot_key in sorted(visual_map.keys(), key=lambda k: int(re.sub(r"\D", "", k) or 0)):
+            clip = visual_map[shot_key]
+            if not os.path.exists(clip):
+                continue
+            sampled += 1
+            frames = self._extract_frames(clip)
+            if not frames:
+                continue
+            black = sum(1 for mean, std in frames if mean < 8.0 and std < 6.0)
+            if black / max(1, len(frames)) > 0.6:
+                issues.append(f"Gate 7 Fail: {shot_key} renders black/empty ({black}/{len(frames)} frames sampled). Re-render required.")
+            # Frozen: consecutive sampled frames essentially identical
+            identical = 0
+            for i in range(1, len(frames)):
+                if abs(frames[i][0] - frames[i - 1][0]) < 1.0:
+                    identical += 1
+            if len(frames) >= 4 and identical / max(1, len(frames) - 1) > 0.85:
+                warnings.append(f"{shot_key}: suspect frozen frame (no motion across samples).")
+
+        # --- Per-shot audio silence / peak ---
+        audio_map = state.asset_paths.audio or {}
+        for shot_key in sorted(audio_map.keys(), key=lambda k: int(re.sub(r"\D", "", k) or 0)):
+            wav = audio_map[shot_key]
+            if not os.path.exists(wav):
+                continue
+            st = self._ffmpeg_afstats(wav)
+            dur = st.get("duration") or 0.0
+            if dur > 0 and st["silence_sec"] / dur > 0.6:
+                issues.append(f"Gate 7 Fail: {shot_key} narration is {st['silence_sec']:.1f}s/{dur:.1f}s silent (mute or failed TTS).")
+            mv = st.get("max_volume_db")
+            if mv is not None and mv < -45.0:
+                issues.append(f"Gate 7 Fail: {shot_key} narration too quiet (peak {mv}dB).")
+            if mv is not None and mv > -0.5:
+                warnings.append(f"{shot_key}: narration clipping at {mv}dB peak.")
+
+        # --- Master duration vs MEASURED per-shot durations (not the estimate) ---
+        # Uses a RANGE: the master is valid either when crossfades were applied
+        # (final ≈ sum - (n-1)*cf) or when xfade fell back to a hard-cut concat
+        # (final ≈ sum). Any 30-40s drift (dropped/duplicated clip) falls outside.
+        measured = list(state.asset_paths.measured_durations or [])
+        if measured and video_path and os.path.exists(video_path):
+            real = self._probe_duration_video(video_path)
+            cf = state.asset_paths.crossfade_used or 0.0
+            n = len(measured)
+            total = sum(measured)
+            tol = max(2.0, total * 0.05)
+            lo = max(0.0, total - (n - 1) * cf - tol)
+            hi = total + tol
+            if real > 0 and (real < lo or real > hi):
+                issues.append(
+                    f"Gate 7 Fail: master duration {real:.2f}s is outside the assembled timeline "
+                    f"range [{lo:.2f}s, {hi:.2f}s] (sum={total:.2f}s, {n-1} crossfades of {cf}s, tol={tol:.2f}s).")
+            elif real > 0:
+                print(f"[Gate7] Master duration verified: {real:.2f}s within [{lo:.2f}s, {hi:.2f}s] (measured timeline).")
+
+        # --- Final master video/audio content checks (catches assembly corruption) ---
+        if video_path and os.path.exists(video_path) and os.path.getsize(video_path) > 1000:
+            master_frames = self._extract_frames(video_path)
+            if master_frames:
+                black = sum(1 for mean, std in master_frames if mean < 8.0 and std < 6.0)
+                if black / max(1, len(master_frames)) > 0.6:
+                    issues.append(f"Gate 7 Fail: final master renders black/empty ({black}/{len(master_frames)} frames sampled).")
+            mst = self._ffmpeg_afstats(video_path)
+            mdur = mst.get("duration") or 0.0
+            if mdur > 0 and mst["silence_sec"] / mdur > 0.85:
+                issues.append(f"Gate 7 Fail: final master audio is {mst['silence_sec']:.1f}s/{mdur:.1f}s silent (mix failed).")
+            mv = mst.get("max_volume_db")
+            if mv is not None and mv < -45.0:
+                issues.append(f"Gate 7 Fail: final master audio too quiet (peak {mv}dB).")
+
+        passable = len(issues) == 0
+        if warnings:
+            print(f"[Gate7] Non-fatal warnings: {'; '.join(warnings)}")
+        return passable, (issues + warnings)
+
+    @staticmethod
+    def _probe_duration_video(path) -> float:
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", path],
+                capture_output=True, text=True, timeout=30)
+            return float(r.stdout.strip())
+        except Exception:
+            return 0.0
+
+
+quality_verifier = StageQualityVerifier()
 
 

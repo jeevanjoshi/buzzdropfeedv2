@@ -50,7 +50,8 @@ class OrchestratorAgent:
         publish: bool = True,
         dummy_frames: bool = False,
         state: Optional[GlobalState] = None,
-        renderer: str = "ffmpeg"
+        renderer: str = "ffmpeg",
+        crossfade: float = 0.5
     ) -> GlobalState:
         """
         Executes complete autonomous pipeline run with structured logging & trajectory tracing.
@@ -58,6 +59,7 @@ class OrchestratorAgent:
         # Renderer switch: "ffmpeg" (default, probe-driven concat) or "moviepy" (timeline composer).
         if renderer in ("moviepy", "ffmpeg"):
             self.media_producer.renderer = renderer
+        self.media_producer.crossfade = max(0.0, crossfade)
         if state is None:
             p_id = pipeline_id or f"csvg-exec-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
             state = GlobalState(
@@ -66,6 +68,8 @@ class OrchestratorAgent:
             )
         else:
             p_id = state.pipeline_id
+
+        state.region = region  # persist so downstream agents (e.g. media producer) know the market region
 
         # ── Load Channel Phase (GROWTH / REVENUE / SCALE) ──────────────────
         channel_stats = channel_phase_manager.get_channel_stats()
@@ -291,6 +295,15 @@ class OrchestratorAgent:
                 )
             else:
                 logger.info("PHASE_3B_QUALITY_GATES", "Stage 8: All shots passed FVD + Optical Flow gates.", pipeline_id=p_id, component="VIDEO_QUALITY")
+
+            # Gate 7: Real Render-Integrity Gate (pixel + audio + measured-duration pre-upload check)
+            gate7_pass, gate7_issues = quality_verifier.verify_gate7_render_integrity(state)
+            if not gate7_pass:
+                raise RuntimeError(
+                    f"Gate 7 (Render Integrity) Fail: {'; '.join(gate7_issues)}. "
+                    f"Aborting publishing to avoid uploading a broken/mute video."
+                )
+            logger.info("PHASE_3B_QUALITY_GATES", "Gate 7 Render Integrity passed (black/frozen frames, audio silence/peak, measured-duration check).", pipeline_id=p_id, component="QUALITY_VERIFIER")
 
             tracer.record_step(state, "QUALITY_GATES_PASSED")
 
