@@ -125,11 +125,38 @@ class MonetizationYieldOptimizer:
         predicted_views = base_views * tvs_factor * ctr_factor * novelty_factor * saturation_penalty
         return float(np.round(predicted_views, 2))
 
+    # Monthly seasonal RPM factor (planning, based on industry data: Q4 = holiday
+    # ad-spend peak, Q1 = annual low). Applied to the revenue forecast.
+    _SEASONAL_MULTIPLIER = {
+        1: 0.80, 2: 0.82, 3: 0.88,   # Q1 low
+        4: 0.93, 5: 0.96, 6: 0.95,   # Q2 recovery
+        7: 0.98, 8: 1.00, 9: 1.05,   # Q3 growth
+        10: 1.25, 11: 1.40, 12: 1.45,  # Q4 peak
+    }
+
+    def _seasonal_multiplier(self, now=None) -> float:
+        import datetime as _dt
+        now = now or _dt.datetime.now(_dt.timezone.utc)
+        return self._SEASONAL_MULTIPLIER.get(now.month, 1.0)
+
+    def _locale_multiplier(self, region: str) -> float:
+        """
+        Audience-locale RPM factor. Our global high-RPM feeds target US/UK/CA/AU
+        (net-RPM ~$5-15+, the highest ad markets). Lower-RPM regions scale down.
+        """
+        r = (region or "all").lower()
+        if any(k in r for k in ("india", "asia", "sa", "africa", "pakistan", "philippines", "indonesia", "ph", "in")):
+            return 0.25
+        if any(k in r for k in ("eu", "europe", "de", "nl", "no")):
+            return 0.90
+        return 1.00  # us/uk/ca/au / all / global
+
     def calculate_revenue_yield(
-        self, candidate: TopicCandidate, estimated_runtime_mins: float = 13.0
+        self, candidate: TopicCandidate, estimated_runtime_mins: float = 13.0, region: str = "all"
     ) -> Dict[str, float]:
         """
         Calculates total expected ad revenue yield in USD R(i) for a topic candidate.
+        Applies niche net-RPM plus audience-locale and seasonal planning multipliers.
         """
         rpm = self._net_rpm_usd(candidate)  # realistic creator-net RPM for the niche
         ctr_est = 0.08 + (candidate.idi_score * 0.04)  # Estimated CTR between 8% and 12%
@@ -143,12 +170,17 @@ class MonetizationYieldOptimizer:
 
         midroll_multiplier = self.calculate_midroll_multiplier(estimated_runtime_mins)
         base_ad_revenue = (predicted_views / 1000.0) * rpm
-        total_revenue_yield = base_ad_revenue * midroll_multiplier
+        total_revenue_yield = (
+            base_ad_revenue * midroll_multiplier
+            * self._locale_multiplier(region) * self._seasonal_multiplier()
+        )
 
         return {
             "predicted_views": round(predicted_views, 0),
             "estimated_rpm_usd": round(rpm, 2),
             "midroll_multiplier": midroll_multiplier,
+            "locale_multiplier": self._locale_multiplier(region),
+            "seasonal_multiplier": self._seasonal_multiplier(),
             "base_ad_revenue_usd": round(base_ad_revenue, 2),
             "total_expected_revenue_usd": round(total_revenue_yield, 2)
         }

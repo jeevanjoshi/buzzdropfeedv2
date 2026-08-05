@@ -146,7 +146,7 @@ class FactRetrieverAgent:
             
             # 2. Revenue Gate (in REVENUE / SCALE phases, expected revenue must be >= MIN)
             if channel_phase in ("REVENUE", "SCALE"):
-                rev = monetization_optimizer.calculate_revenue_yield(cand, estimated_runtime_mins=13.0)
+                rev = monetization_optimizer.calculate_revenue_yield(cand, estimated_runtime_mins=13.0, region=region)
                 from src.engine.channel_phase_manager import channel_phase_manager
                 if rev["total_expected_revenue_usd"] < channel_phase_manager.REVENUE_GATE_MIN_USD:
                     continue
@@ -167,7 +167,7 @@ class FactRetrieverAgent:
             winner = ranked_candidates[0]
 
         # Compute revenue forecast for the winning topic
-        rev = monetization_optimizer.calculate_revenue_yield(winner, estimated_runtime_mins=13.0)
+        rev = monetization_optimizer.calculate_revenue_yield(winner, estimated_runtime_mins=13.0, region=region)
         state.revenue_forecast = RevenueForecast(
             predicted_views=rev["predicted_views"],
             estimated_rpm_usd=rev["estimated_rpm_usd"],
