@@ -9,6 +9,57 @@ import datetime as _dt
 from typing import Dict, Any, List, Tuple, Set
 from src.schemas.state import TopicCandidate, VerifiedFact
 
+# ── RAG Corpus Sufficiency Gate thresholds ─────────────────────────────
+# A 15-shot / 10-15 min script needs ~1,500+ narration words grounded in a
+# corpus that is genuinely ON-TOPIC. These floors gate script generation so
+# the pipeline never burns LLM spend on an undersupplied/polluted fact base.
+MIN_ON_TOPIC_FACTS = 6          # distinct on-topic fact/snippet lines (>=1 token match)
+MIN_ON_TOPIC_CORPUS_WORDS = 250 # on-topic words from lines with >=2 topic tokens
+MIN_ON_TOPIC_SOURCES = 2        # distinct on-topic sources/publishers
+MIN_DEEP_SOURCE_WORDS = 250     # a rich on-topic article grounds a full script alone
+
+# Max retrieved lines surfaced into the RAG pack. Higher than the old hard 8-line
+# cap so the rich keyword-driven retrieval actually reaches the LLM prompt.
+MAX_RETRIEVED_LINES = 15
+
+_TOPIC_STOPWORDS = {
+    "with", "from", "that", "this", "have", "their", "there", "would",
+    "about", "which", "across", "more", "than", "into", "what", "they",
+    "these", "those", "being", "been", "still", "while", "after", "before",
+    "other", "under", "again", "through", "every", "where", "because",
+    "between", "during", "without", "around", "however", "the", "and",
+    "for", "are", "was", "are", "its", "has", "not", "but", "you", "can",
+}
+
+
+def _build_topic_tokens(headline: str, summary: str, keywords: List[str]) -> Set[str]:
+    """Topic keywords from headline + summary + keywords, minus stopwords."""
+    tokens: Set[str] = set()
+    for txt in (headline or "", summary or ""):
+        tokens.update(re.findall(r"[a-z][a-z0-9'-]{3,}", txt.lower()))
+    tokens.update(k.lower() for k in (keywords or []) if len(k) > 3)
+    tokens -= _TOPIC_STOPWORDS
+    if not tokens:
+        tokens = set(re.findall(r"[a-z][a-z0-9'-]{3,}", (headline or "").lower()))
+    return tokens
+
+
+def _on_topic_hits(line: str, topic_tokens: Set[str]) -> int:
+    """Count of distinct topic tokens present in a line (word-boundary match, so
+    'tech' only counts when it appears as the word 'tech', not inside 'detect')."""
+    ll = (line or "").lower()
+    hits = 0
+    for t in topic_tokens:
+        if re.search(rf"\b{re.escape(t)}\b", ll):
+            hits += 1
+    return hits
+
+
+def _line_snippet_text(line: str) -> str:
+    """Strip a bullet's '[Source: title]' prefix, returning just the snippet body."""
+    parts = line.split("]:", 1)
+    return parts[1].strip() if len(parts) > 1 else line
+
 _YEAR_RE = re.compile(r'\b(20[0-2]\d)\b')
 _current_year_val = None
 
@@ -264,6 +315,68 @@ class RAGTopicRetriever:
             print(f"[RAGRetriever] Firecrawl Warning: {e}")
             return []
 
+    def _html_to_text(self, raw_html: str) -> str:
+        """Strips HTML tags, script/style/nav/footer blocks, and normalises whitespace."""
+        s = re.sub(r"(?is)<script.*?</script>", " ", raw_html)
+        s = re.sub(r"(?is)<style.*?</style>", " ", s)
+        s = re.sub(r"(?is)<noscript.*?</noscript>", " ", s)
+        s = re.sub(r"(?is)<(head|header|nav|footer|aside).*?</\1>", " ", s)
+        s = re.sub(r"(?is)<[^>]+>", " ", s)
+        s = html.unescape(s)
+        s = re.sub(r"\s+", " ", s)
+        return s.strip()
+
+    def _clean_article_markdown(self, md: str) -> str:
+        """Lightly cleans a markdown article body (Firecrawl returns markdown)."""
+        s = re.sub(r"```.*?```", " ", md, flags=re.S)
+        s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)
+        s = re.sub(r"^\s*(#|>|[-*]\s*)", "", s, flags=re.M)
+        s = re.sub(r"\s+", " ", s)
+        return s.strip()
+
+    def _scrape_selected_article(self, url: str, max_chars: int = 4000) -> str:
+        """
+        Deep-crawls the selected topic's OWN source URL to get the full article
+        body (headline + summary only are stored in the RSS feed).  Returns the
+        cleaned text or an empty string if the scrape fails or returns garbage.
+
+        Tries Firecrawl ``/v1/scrape`` first (returns structured markdown), then
+        falls back to a plain urllib GET + HTML stripping.
+        """
+        if not url or not url.startswith("http"):
+            return ""
+        src_name = ""
+        fc_key = os.getenv("FIRECRAWL_API_KEY")
+        if fc_key:
+            try:
+                import requests
+                resp = requests.post(
+                    "https://api.firecrawl.dev/v1/scrape",
+                    headers={"Authorization": f"Bearer {fc_key}", "Content-Type": "application/json"},
+                    json={"url": url},
+                    timeout=20,
+                )
+                data = resp.json()
+                md = data.get("data", {}).get("markdown") or data.get("markdown", "")
+                if md:
+                    text = self._clean_article_markdown(md)
+                    if len(text) >= 200:
+                        return text[:max_chars]
+            except Exception as e:
+                print(f"[RAGRetriever] Firecrawl scrape failed: {e}")
+        # Fallback: urllib GET + HTML -> text
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=12) as response:
+                raw = response.read().decode("utf-8", errors="ignore")
+            text = self._html_to_text(raw)
+            if len(text) >= 200:
+                return text[:max_chars]
+        except Exception as e:
+            print(f"[RAGRetriever] Article scrape fallback failed: {e}")
+        return ""
+
     def extract_graph_triplets(self, text: str) -> List[Tuple[str, str, str]]:
         """
         Extracts semantic (Subject, Predicate, Object) triplets from retrieved research text.
@@ -349,8 +462,95 @@ class RAGTopicRetriever:
         msg = "Verified against GraphRAG evidence." if is_verified else "Potential hallucination detected; low graph support."
         return is_verified, float(round(confidence, 2)), msg
 
+    def assess_corpus_sufficiency(
+        self, pack: Dict[str, Any], topic: TopicCandidate
+    ) -> Dict[str, Any]:
+        """
+        Evaluate whether the RAG corpus is rich enough to ground a full
+        15-shot / 10-15 min script. Returns ``{"pass": bool, "reason": str,
+        "metrics": {...}}``.
+
+        * Extracts topic tokens from headline + summary + keywords.
+        * Counts fact/snippet lines in the corpus that share at least one
+          meaningful topic token → on-topic facts, words, source diversity.
+        * Compares against ``MIN_ON_TOPIC_*`` thresholds.
+        """
+        headline = (pack.get("topic_headline") or topic.headline or "").lower()
+        summary = (pack.get("summary") or topic.summary or "").lower()
+        keywords = [k.lower() for k in (pack.get("keywords") or topic.keywords or [])]
+
+        topic_tokens = _build_topic_tokens(headline, summary, keywords)
+
+        fact_corpus = pack.get("fact_corpus") or ""
+        fact_lines = [l.strip() for l in fact_corpus.splitlines() if l.strip()]
+
+        on_topic_words = 0
+        on_topic_source_names: Set[str] = set()
+        on_topic_count = 0
+        for line in fact_lines:
+            hits = _on_topic_hits(line, topic_tokens)
+            if hits < 1:
+                continue
+            on_topic_count += 1
+            # Words only count toward the "corpus words" metric when the line is
+            # GENUINELY on-topic (>=2 topic tokens), so loosely-shared tokens
+            # from a polluted feed can't inflate the grounding budget.
+            if hits >= 2:
+                on_topic_words += len(line.split())
+            m = re.search(r"\(Source:\s*([^)]+)\)", line)
+            if m:
+                src = m.group(1).strip()
+                if src not in ("Verified Reports", "Verified Market Reports"):
+                    on_topic_source_names.add(src)
+            else:
+                m2 = re.search(r"^• \[([^\]]+)\]", line)
+                if m2:
+                    on_topic_source_names.add(m2.group(1).strip())
+
+        total_corpus_words = sum(len(l.split()) for l in fact_lines)
+
+        metrics = {
+            "on_topic_facts": on_topic_count,
+            "on_topic_corpus_words": on_topic_words,
+            "on_topic_sources": len(on_topic_source_names),
+            "total_corpus_words": total_corpus_words,
+        }
+        reasons = []
+        passed = True
+
+        # Deep-source exception: a single deep-crawled article (the SELECTED source
+        # story) that yields a large amount of on-topic text can ground a full
+        # script on its own, even though it is only 1 "fact" from 1 source. Without
+        # this, a rich deep article would be wrongly rejected by the diversity gates.
+        deep_source = on_topic_words >= MIN_DEEP_SOURCE_WORDS and on_topic_count >= 1
+
+        if not deep_source:
+            if on_topic_count < MIN_ON_TOPIC_FACTS:
+                passed = False
+                reasons.append(
+                    f"only {on_topic_count} on-topic facts (min {MIN_ON_TOPIC_FACTS})"
+                )
+            if on_topic_words < MIN_ON_TOPIC_CORPUS_WORDS:
+                passed = False
+                reasons.append(
+                    f"only {on_topic_words} on-topic words (min {MIN_ON_TOPIC_CORPUS_WORDS})"
+                )
+            if len(on_topic_source_names) < MIN_ON_TOPIC_SOURCES:
+                passed = False
+                reasons.append(
+                    f"only {len(on_topic_source_names)} on-topic sources "
+                    f"(min {MIN_ON_TOPIC_SOURCES})"
+                )
+
+        return {
+            "pass": passed,
+            "reason": "; ".join(reasons) if reasons else "RAG corpus sufficient.",
+            "metrics": metrics,
+        }
+
     def build_rag_knowledge_pack(
-        self, topic: TopicCandidate, verified_facts: List[VerifiedFact]
+        self, topic: TopicCandidate, verified_facts: List[VerifiedFact],
+        refresh: bool = False
     ) -> Dict[str, Any]:
         """
         Constructs a comprehensive 1,000+ word RAG Knowledge Pack containing:
@@ -365,23 +565,68 @@ class RAGTopicRetriever:
         keywords = [k for k in topic.keywords if len(k) > 3][:6]
 
         # Cache: return recent RAG pack for the same headline/fact-count to avoid
-        # redundant paid/network searches.
+        # redundant paid/network searches.  Passing ``refresh=True`` bypasses the
+        # cache (forces a fresh retrieval) and stores the result so subsequent
+        # non-refresh calls reuse the refreshed pack.
         cache_key = f"{headline}|{len(verified_facts)}"
         _now = time.time()
         _hit = self._rag_cache.get(cache_key)
-        if _hit and (_now - _hit[0]) < self._rag_cache_ttl_s:
+        if not refresh and _hit and (_now - _hit[0]) < self._rag_cache_ttl_s:
             return _hit[1]
 
-        # Combine verified facts into core ground truth block
-        verified_snippets = [f"{vf.headline}: {vf.summary} (Source: {vf.source_name})" for vf in verified_facts]
+        # Combine verified facts into core ground truth block — but only ON-TOPIC
+        # facts. The full RSS corpus is polluted with unrelated feed items, so
+        # feeding every headline into the prompt makes the LLM wander and starves
+        # the script of real grounding.
+        topic_tokens = _build_topic_tokens(headline, summary, keywords)
+        # Dedup facts by headline (the RSS corpus commonly carries the same story
+        # from the same feed more than once) before scoring/keeping.
+        seen_facts: Set[str] = set()
+        unique_facts = []
+        for vf in verified_facts:
+            key = (vf.headline or "").strip().lower()
+            if key and key not in seen_facts:
+                seen_facts.add(key)
+                unique_facts.append(vf)
+        verified_facts = unique_facts
+
+        scored_facts = []
+        for vf in verified_facts:
+            line = f"{vf.headline}: {vf.summary} (Source: {vf.source_name})"
+            score = _on_topic_hits(line, topic_tokens)
+            # >=2 token matches: generic shared words ('tech', 'ones', 'over')
+            # from the summary must not pull unrelated RSS feed noise into the
+            # prompt's ground-truth block.
+            if score >= 2:
+                scored_facts.append((score, vf))
+        # Always keep the topic's own RSS fact even if token matching misses it.
+        own_head = headline.strip().lower()
+        if not any(vf.headline.strip().lower() == own_head for _, vf in scored_facts):
+            for vf in verified_facts:
+                if vf.headline.strip().lower() == own_head:
+                    scored_facts.append((100, vf))
+                    break
+        scored_facts.sort(key=lambda x: x[0], reverse=True)
+        kept_facts = [vf for _, vf in scored_facts]
+        verified_snippets = [
+            f"{vf.headline}: {vf.summary} (Source: {vf.source_name})" for vf in kept_facts
+        ]
         ground_truth_block = "\n".join(verified_snippets) if verified_snippets else summary
 
-        # Perform targeted RAG web queries to enrich depth
-        search_queries = [
+        # Perform targeted RAG web queries — drive search with BOTH the headline
+        # and the keyword vector (keyword-only queries often out-recall the long
+        # headline phrasing on NewsAPI/Tavily/Wikipedia).
+        kw_query = " ".join(k for k in keywords if k not in _TOPIC_STOPWORDS and len(k) > 2).strip()
+        search_queries = []
+        for q in (
             f"{headline} background timeline history",
             f"{headline} key facts statistics analysis",
-            f"{' '.join(keywords[:3])} strategic future impact"
-        ]
+            f"{kw_query} strategic future impact" if kw_query else f"{headline} strategic future impact",
+            f"{kw_query} latest developments statistics" if kw_query else None,
+        ):
+            q = (q or "").strip()
+            if q and q not in search_queries:
+                search_queries.append(q)
 
         retrieved_facts = []
         all_text_corpus = summary + " " + ground_truth_block
@@ -451,6 +696,76 @@ class RAGTopicRetriever:
         # Promotional/advertorial content filter across ALL sources: drop any
         # snippet that reads like marketing/web-chatter so it can't pollute the pack.
         retrieved_facts = [l for l in retrieved_facts if not _is_promotional(l)]
+        # Dedup: the same result is often returned across the multiple queries.
+        seen_lines: Set[str] = set()
+        unique_lines = []
+        for l in retrieved_facts:
+            key = _line_snippet_text(l).strip().lower()
+            if key and key not in seen_lines:
+                seen_lines.add(key)
+                unique_lines.append(l)
+        retrieved_facts = unique_lines
+        retrieved_facts_all = retrieved_facts
+
+        # On-topic relevance filter: rank retrieved lines by topic-token density
+        # and DROP clearly off-topic hits (e.g. a generic "History of the Jews in
+        # China" Wikipedia page for an AI-in-Africa query). Keeps the best 2+
+        # token matches first so the LLM gets dense, relevant grounding.
+        scored_retrieved = []
+        for l in retrieved_facts:
+            score = _on_topic_hits(l, topic_tokens)
+            if score >= 2:
+                scored_retrieved.append((score, l))
+        scored_retrieved.sort(key=lambda x: x[0], reverse=True)
+        retrieved_facts = [l for _, l in scored_retrieved]
+
+        # Fallback: if strict (>=2 token) filtering leaves too few lines, also keep
+        # the highest 1-token matches so a genuinely-relevant-but-terse retrieval
+        # isn't wiped out by token gaps (the RAG gate still catches thinness).
+        if len(retrieved_facts) < 4:
+            one_match = [
+                (score, l) for l in retrieved_facts_all
+                if (score := _on_topic_hits(l, topic_tokens)) == 1
+            ]
+            one_match.sort(key=lambda x: _on_topic_hits(x[1], topic_tokens), reverse=True)
+            seen = set(retrieved_facts)
+            for _, l in one_match:
+                if l not in seen:
+                    retrieved_facts.append(l)
+                    seen.add(l)
+                if len(retrieved_facts) >= 4:
+                    break
+
+        # Rebuild the graph/TrumorGPT corpus from the FILTERED content so graph
+        # triplets and verification reflect the on-topic reality, not feed noise.
+        all_text_corpus = summary + " " + ground_truth_block
+        all_text_corpus += " " + " ".join(_line_snippet_text(l) for l in retrieved_facts)
+
+        # Deep-crawl the SELECTED source article — the winning story's own URL.
+        # It is the single most relevant grounding by construction, but RSS only
+        # kept its ~1-2 line summary. Scrape the full body and inject it ONLY if
+        # it passes pollution guards, so it can never degrade the story designer:
+        #   * >= 200 chars (real content, not an empty/paywall stub)
+        #   * on-topic (>=2 topic-token matches, word-boundary)
+        # NOTE: we deliberately do NOT run _is_promotional on the body — the regex
+        # matches "cheap"/"subscribe", which falsely rejects genuinely on-topic
+        # articles about "cheap AI models".
+        selected_article = ""
+        src_url = getattr(topic, "source_url", "") or ""
+        if src_url:
+            try:
+                article_text = self._scrape_selected_article(src_url)
+            except Exception as e:
+                print(f"[RAGRetriever] Selected article scrape exception: {e}")
+                article_text = ""
+            if article_text:
+                score = _on_topic_hits(article_text, topic_tokens)
+                if len(article_text) >= 200 and score >= 2:
+                    selected_article = article_text
+                    all_text_corpus += " " + selected_article
+                    print(f"[RAGRetriever] Injected selected source article ({len(selected_article)} chars, {score} topic-token hits).")
+                else:
+                    print(f"[RAGRetriever] Selected article rejected (len={len(article_text)}, topic-hits={score}); skipped to avoid pollution.")
 
         # 1. GraphRAG Triplet Extraction & In-Memory Graph Indexing
         triplets = self.extract_graph_triplets(all_text_corpus)
@@ -476,10 +791,10 @@ class RAGTopicRetriever:
             else:
                 recent_lines.append(f"{line}{_recency_tag(line)}")
 
-        rag_recent_block = "\n".join(recent_lines[:8]) if recent_lines else "No clearly recent snippets retrieved."
-        rag_historical_block = "\n".join(historic_lines) if historic_lines else "No distinctly historical snippets."
+        rag_recent_block = "\n".join(recent_lines[:MAX_RETRIEVED_LINES]) if recent_lines else "No clearly recent snippets retrieved."
+        rag_historical_block = "\n".join(historic_lines[:MAX_RETRIEVED_LINES]) if historic_lines else "No distinctly historical snippets."
         # Primary snippet pool for the script editor (all bullets, tag-free for fluent padding)
-        rag_retrieved_block = "\n".join(retrieved_facts[:8]) if retrieved_facts else "No additional web snippets retrieved."
+        rag_retrieved_block = "\n".join(retrieved_facts[:MAX_RETRIEVED_LINES]) if retrieved_facts else "No additional web snippets retrieved."
         graph_paths_block = "\n".join([f"• {p}" for p in graph_paths[:6]]) if graph_paths else "No multi-hop paths traversed."
 
         # Derive core domain category. Prefer the RSS/audience classification
@@ -528,9 +843,11 @@ class RAGTopicRetriever:
             },
             "rag_recent_context": rag_recent_block,
             "rag_historical_context": rag_historical_block,
+            "selected_article": selected_article,
             "fact_corpus": (
                 f"{ground_truth_block}\n"
                 f"{rag_retrieved_block}"
+                + (f"\n• [SELECTED SOURCE ARTICLE]: {selected_article}" if selected_article else "")
             ),
             "full_rag_context_text": (
                 f"TOPIC CATEGORY: {category}\n"
@@ -549,6 +866,7 @@ class RAGTopicRetriever:
                 f"GRAPHRAG KNOWLEDGE GRAPH TRIPLETS:\n{graph_triplets_block}\n\n"
                 f"GRAPHRAG MULTI-HOP RELATIONAL PATHS:\n{graph_paths_block}\n\n"
                 f"RETRIEVED DEEP CONTEXT & BACKGROUND:\n{rag_retrieved_block}"
+                + (f"\n\nPRIMARY SOURCE ARTICLE (the selected story, deep-crawled):\n{selected_article}" if selected_article else "")
             )
         }
 

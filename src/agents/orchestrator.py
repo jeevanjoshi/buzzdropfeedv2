@@ -3,7 +3,7 @@ import json
 import uuid
 import datetime
 import asyncio
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from src.schemas.state import GlobalState
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.agents.fact_retriever import FactRetrieverAgent
@@ -14,6 +14,7 @@ from src.agents.publisher import PublisherAgent
 from src.engine.quality_verifier import quality_verifier
 from src.engine.video_quality_metrics import video_quality_metrics
 from src.engine.channel_phase_manager import channel_phase_manager, get_ypp_progress_report
+from src.engine.rag_retriever import rag_retriever
 from src.engine.logger import logger
 from src.engine.tracer import tracer
 
@@ -112,6 +113,93 @@ class OrchestratorAgent:
                 tracer.record_step(state, "TOPIC_SELECTED", message=msg_topic)
             else:
                 logger.info("PHASE_1_TOPIC_SELECTION", f"Resuming: Using existing selected topic: '{state.selected_topic.headline}'", pipeline_id=p_id, component="FACT_RETRIEVER")
+
+            # ── PHASE 1B: RAG CORPUS QUALITY GATE ──────────────────────────
+            # Never burn LLM spend generating a script from an undersupplied /
+            # polluted RAG corpus. Build the RAG pack, assess sufficiency, retry
+            # the build (up to 2 refreshes) for the same topic, and only then
+            # fall back to re-running the Fact Retriever on a DIFFERENT topic
+            # (previously-failed topics are excluded so they aren't re-picked).
+            # This also seeds state.crawled_content so the Observer later audits
+            # the script against the exact same fact corpus StoryDesigner used.
+            if not state.script_data:
+                MAX_RAG_BUILDS = 3          # initial build + 2 refresh retries
+                MAX_TOPIC_SWITCHES = 2      # at most 2 alternate topics after the first
+                excluded_headlines: List[str] = []
+                topic_switch_count = 0
+                rag_pass = False
+
+                while not rag_pass:
+                    pack = rag_retriever.build_rag_knowledge_pack(state.selected_topic, state.verified_facts)
+                    state.crawled_content = pack.get("fact_corpus", pack.get("full_rag_context_text", ""))
+                    report = rag_retriever.assess_corpus_sufficiency(pack, state.selected_topic)
+
+                    # Retry RAG build for the same topic (fresh retrieval each time).
+                    for build in range(2, MAX_RAG_BUILDS + 1):
+                        if report["pass"]:
+                            break
+                        logger.warning(
+                            "PHASE_1B_RAG_QUALITY",
+                            f"RAG corpus insufficient for '{state.selected_topic.headline}': {report['reason']}. "
+                            f"Rebuilding RAG (attempt {build}/{MAX_RAG_BUILDS})...",
+                            pipeline_id=p_id, component="RAG_RETRIEVER",
+                            extra_data=report.get("metrics", {})
+                        )
+                        pack = rag_retriever.build_rag_knowledge_pack(
+                            state.selected_topic, state.verified_facts, refresh=True
+                        )
+                        state.crawled_content = pack.get("fact_corpus", pack.get("full_rag_context_text", ""))
+                        report = rag_retriever.assess_corpus_sufficiency(pack, state.selected_topic)
+
+                    if report["pass"]:
+                        logger.info(
+                            "PHASE_1B_RAG_QUALITY",
+                            f"RAG corpus sufficient for '{state.selected_topic.headline}': "
+                            f"{report['metrics']['on_topic_facts']} on-topic facts, "
+                            f"{report['metrics']['on_topic_corpus_words']} on-topic words, "
+                            f"{report['metrics']['on_topic_sources']} sources.",
+                            pipeline_id=p_id, component="RAG_RETRIEVER",
+                            extra_data=report.get("metrics", {})
+                        )
+                        rag_pass = True
+                        break
+
+                    # RAG still insufficient after retries → switch topic.
+                    if topic_switch_count >= MAX_TOPIC_SWITCHES:
+                        raise RuntimeError(
+                            f"RAG corpus insufficient for all {MAX_TOPIC_SWITCHES + 1} candidate topics "
+                            f"after {MAX_RAG_BUILDS} RAG builds each. Last failure: {report['reason']} "
+                            f"({report['metrics']})."
+                        )
+                    excluded_headlines.append(state.selected_topic.headline)
+                    topic_switch_count += 1
+                    logger.warning(
+                        "PHASE_1B_RAG_QUALITY",
+                        f"RAG insufficient for '{state.selected_topic.headline}' after {MAX_RAG_BUILDS} builds. "
+                        f"Re-running Fact Retriever excluding {len(excluded_headlines)} failed topic(s)...",
+                        pipeline_id=p_id, component="RAG_RETRIEVER",
+                        fix_hint="RSS feed may lack deep sources for this topic; picking next-best TOPSIS candidate."
+                    )
+                    msg_topic = self.fact_retriever.process(
+                        state, use_live_rss=use_live_rss, region=region,
+                        channel_phase=phase, exclude_headlines=excluded_headlines
+                    )
+                    if not state.selected_topic:
+                        raise RuntimeError("No alternative topic selected by FactRetrieverAgent after RAG quality exclusion.")
+                    logger.info(
+                        "PHASE_1B_RAG_QUALITY",
+                        f"Selected alternate topic: '{state.selected_topic.headline}' "
+                        f"(TOPSIS Score: {state.selected_topic.topsis_score:.4f})",
+                        pipeline_id=p_id, component="FACT_RETRIEVER"
+                    )
+                    tracer.record_step(state, "TOPIC_SELECTED", message=msg_topic)
+
+                # Validate RAG corpus actually propagated to later stages.
+                if not state.crawled_content.strip():
+                    raise RuntimeError("RAG gate passed but state.crawled_content is empty; corpus was not fed to downstream stages.")
+                if not state.verified_facts:
+                    logger.warning("PHASE_1B_RAG_QUALITY", "verified_facts is empty despite RAG gate passing.", pipeline_id=p_id, component="RAG_RETRIEVER")
+                tracer.record_step(state, "RAG_QUALITY_PASSED")
 
             # 2. Story Script Generation
             if not state.script_data or state.execution_stage == "SCRIPT_REVISION_REQUIRED":

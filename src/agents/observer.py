@@ -50,6 +50,31 @@ class ObserverAgent:
             ground_truth_corpus += " " + crawled_content.lower()
         gt_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', ground_truth_corpus))
 
+        # Verbatim source-copy check: narration must not reproduce the RAG corpus
+        # word-for-word (reads as pasted slop rather than creative narrative).
+        # Only long, near-identical runs are flagged so short factual padding and
+        # common phrasing don't cause false positives.
+        if crawled_content:
+            corpus_norm = re.sub(r'\s+', ' ', crawled_content.lower())
+            corpus_sents = [
+                re.sub(r'[^a-z0-9 ]', '', s).strip()
+                for s in re.split(r'[.!?]', corpus_norm)
+                if len(s.strip().split()) >= 12
+            ]
+            if corpus_sents:
+                for shot in script.shots:
+                    for sent in re.split(r'[.!?]', shot.narration_text):
+                        sent_norm = re.sub(r'[^a-z0-9 ]', '', sent.strip().lower()).strip()
+                        if len(sent_norm.split()) < 12:
+                            continue
+                        for cs in corpus_sents:
+                            if sent_norm in cs or cs in sent_norm:
+                                violations.append(
+                                    f"Shot #{shot.shot_id} verbatim source copy: narration copies the "
+                                    f"RAG corpus nearly word-for-word: '{sent.strip()[:90]}'"
+                                )
+                                break
+
         # Prepare for semantic checks
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity

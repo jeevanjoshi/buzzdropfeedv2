@@ -121,13 +121,18 @@ class FactRetrieverAgent:
         return [c1, c2], [f1, f2]
 
     def process(self, state: GlobalState, use_live_rss: bool = True, region: str = "all",
-                channel_phase: str = "REVENUE") -> A2AMessage:
+                channel_phase: str = "REVENUE",
+                exclude_headlines: Optional[List[str]] = None) -> A2AMessage:
         """
         Executes Fact Retriever workflow:
         1. Ingests news candidates and facts.
         2. Evaluates candidates using phase-aware TOPSIS.
         3. Updates state.selected_topic, state.verified_facts, state.revenue_forecast.
         4. Emits TOPIC_SELECTED A2AMessage.
+
+        ``exclude_headlines`` filters out previously-tried topics (matched on
+        headline, case-insensitive) so a re-run picks a DIFFERENT candidate
+        instead of re-selecting the same topic that failed the RAG gate.
         """
         candidates, facts = self.fetch_candidates_and_facts(use_live_rss=use_live_rss, region=region)
 
@@ -136,6 +141,20 @@ class FactRetrieverAgent:
 
         # Rank candidates using phase-aware TOPSIS Decision Engine
         ranked_candidates = self.topsis_engine.rank_candidates(candidates, channel_phase=channel_phase)
+
+        # Drop previously-tried topics (e.g. topics whose RAG corpus was
+        # undersupplied) so a retry picks the next-best candidate.
+        if exclude_headlines:
+            excluded = {h.strip().lower() for h in exclude_headlines if h}
+            ranked_candidates = [
+                c for c in ranked_candidates
+                if c.headline.strip().lower() not in excluded
+            ]
+            if not ranked_candidates:
+                raise ValueError(
+                    "All topic candidates were excluded (previously failed RAG "
+                    "quality gate). No alternative topic available."
+                )
         
         # Apply pre-filtering using Audience and Revenue Gates
         # High-RPM enforcement: if any genuinely-classified (non-general, non-blocked)

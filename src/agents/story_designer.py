@@ -72,6 +72,8 @@ class StoryDesignerAgent:
         self.name = name
         self.llm_client = llm_client or LLMClient()
         self.last_llm_source = "UNKNOWN"
+        self._last_rag_snippets: List[str] = []
+        self._last_used_snips: set = set()
 
     def extract_ground_truth_context(self, verified_facts: List[VerifiedFact]) -> Dict[str, Any]:
         """
@@ -111,6 +113,20 @@ class StoryDesignerAgent:
                 seen_snips.add(key)
                 raw_snippets.append(s)
 
+        # Add sentence-chunks of the deep-crawled SELECTED source article (if the
+        # RAG pack successfully scraped the winning story's full body). This gives
+        # the story designer rich, directly-on-topic facts to draw on — the exact
+        # detail the RSS headline+summary alone could never provide.
+        article = rag_pack.get("selected_article", "") or ""
+        if article:
+            for sent in re.split(r'(?<=[.!?])\s+', article):
+                sent = _clean_snippet_text(sent.strip())
+                if len(sent) > 60:
+                    key = sent[:60]
+                    if key not in seen_snips:
+                        seen_snips.add(key)
+                        raw_snippets.append(sent)
+
         if len(raw_snippets) < 5:
             summary_sentences = [s.strip() for s in re.split(r'[.!?]', summary) if len(s.strip()) > 30]
             for sent in summary_sentences:
@@ -131,6 +147,37 @@ class StoryDesignerAgent:
             raw_snippets.append(f"According to {trusted_org} analysis, {headline} represents a pivotal development in {category} as of {current_month_year}.")
         return raw_snippets
 
+    def _footerize(self, narr: str) -> str:
+        """Ensures a running narration ends with sentence-ending punctuation so an
+        appended fact reads as a new, clean sentence instead of a run-on paste."""
+        base = (narr or "").rstrip()
+        if base and not re.search(r'[.!?]\s*$', base):
+            base += "."
+        return base
+
+    def _paraphrase_padding(self, snippet: str) -> str:
+        """
+        Light deterministic paraphrase so RAG-padding reads as narration rather
+        than a verbatim copy-paste from the source corpus.
+
+        Fact-preserving: it only strips leading connective/attribution noise and
+        normalises case/punctuation — it never changes names, numbers or dates.
+        """
+        s = _clean_snippet_text(snippet)
+        if not s:
+            return ""
+        # Drop leading connectors that give away a raw cut-and-paste.
+        s = re.sub(
+            r'^\s*(that\s+|which\s+|in which\s+|and\s+|but\s+|so\s+|'
+            r'meanwhile,?\s*|however,?\s*|additionally,?\s*|moreover,?\s*|'
+            r'furthermore,?\s*|according\s+to\s+[^,]+,?\s*)',
+            "", s, flags=re.I,
+        )
+        s = s[0].upper() + s[1:] if s else s
+        if not re.search(r'[.!?]\s*$', s):
+            s = s.rstrip(".!?") + "."
+        return s
+
     def expand_narration_with_semantic_facts(
         self, narr: str, title: str, category: str, raw_snippets: List[str],
         used_snippets: set, target_word_count: int = 115
@@ -148,30 +195,39 @@ class StoryDesignerAgent:
             return narr
             
         query_context = f"{title} {narr} {category}"
-        
+
+        def _append(narr: str, snippet: str) -> str:
+            addition = self._paraphrase_padding(snippet)
+            if not addition:
+                return narr
+            return f"{self._footerize(narr)} {addition}"
+
         try:
             vectorizer = TfidfVectorizer(stop_words='english')
             tfidf_matrix = vectorizer.fit_transform([query_context] + unused)
             sim_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])[0]
             sorted_indices = sim_scores.argsort()[::-1]
-            
+
             for idx in sorted_indices:
                 best_snippet = unused[idx]
                 best_snippet_clean = best_snippet.strip()
-                if best_snippet_clean not in narr:
-                    narr += " " + best_snippet_clean
-                    used_snippets.add(best_snippet[:60])
+                key = best_snippet[:60]
+                if key not in used_snippets and _clean_snippet_text(best_snippet_clean) not in narr:
+                    narr = _append(narr, best_snippet)
+                    used_snippets.add(key)
                 if len(narr.split()) >= target_word_count:
                     break
         except Exception as e:
             print(f"Warning: Semantic expansion error: {e}. Falling back to standard linear selection.")
             for best_snippet in unused:
-                if best_snippet not in narr:
-                    narr += " " + best_snippet
-                    used_snippets.add(best_snippet[:60])
+                key = best_snippet[:60]
+                if key not in used_snippets and _clean_snippet_text(best_snippet) not in narr:
+                    narr = _append(narr, best_snippet)
+                    used_snippets.add(key)
                     if len(narr.split()) >= target_word_count:
                         break
         return narr
+
 
     def generate_6act_script(
         self, topic: TopicCandidate, verified_facts: List[VerifiedFact], region: str = "all", target_shots: int = 15, revision_violations: Optional[List[str]] = None, state: Optional[GlobalState] = None
@@ -317,6 +373,11 @@ class StoryDesignerAgent:
                             shot_id = s.get("shot_id") or s.get("id") or s.get("shot") or idx
                             act_idx = s.get("act_index") or s.get("act") or s.get("act_num") or min(6, (idx - 1) // 2.5 + 1)
                             narr = s.get("narration_text") or s.get("narration") or s.get("script") or ""
+                            # Strip citation tags/scrape artifacts BEFORE counting, so
+                            # the validation gate and runtime are measured on the
+                            # CLEAN text (raw "[Tavily:...]" tags inflate word counts
+                            # and caused scripts to silently fall below 10 min).
+                            narr = _clean_narration(narr)
                             vis = s.get("visual_prompt") or s.get("visual") or s.get("prompt") or f"Cinematic 16:9 widescreen visual for {headline}, 8k photorealistic."
                         
                             v_type_raw = s.get("visual_type") or "standard_image"
@@ -341,10 +402,16 @@ class StoryDesignerAgent:
                             self.last_llm_source = "LIVE_LLM"
                             # Fixes 2 & 3: strip raw [Tool: ...] tags and [...] scrape
                             # artifacts from the finished narration so it reads as clean prose.
+                            # (Narration is already cleaned above; this is idempotent and
+                            # also guards snippets appended during semantic expansion.)
                             for s in shots:
                                 s.narration_text = _clean_narration(s.narration_text)
                             cw = sum(len(x.narration_text.split()) for x in shots)
                             runtime = cw / 150.0 * 60.0
+                            # Stash the RAG snippet pool so the post-polish word-count
+                            # enforcement can re-pad short shots deterministically.
+                            self._last_rag_snippets = raw_snippets
+                            self._last_used_snips = _used_snips
                             return ScriptData(
                                 title=llm_result.get("title", f"The Hidden Truth Behind {headline[:35]}... ({current_month_year})"),
                                 target_shots=len(shots),
@@ -441,7 +508,7 @@ class StoryDesignerAgent:
                         narr_by_id[sid] = narr
                 polished = []
                 for shot in script.shots:
-                    narr = narr_by_id.get(shot.shot_id, shot.narration_text)
+                    narr = narr_by_id.get(shot.shot_id, _clean_narration(shot.narration_text))
                     polished.append(ShotData(
                         shot_id=shot.shot_id,
                         act_index=shot.act_index,
@@ -469,6 +536,68 @@ class StoryDesignerAgent:
                 "truncate, omit, or wrap in markdown.\n"
             )
         return None
+
+    def _enforce_script_word_floor(self, script: ScriptData, state: GlobalState) -> ScriptData:
+        """
+        Deterministic safety net that guarantees the script stays above the
+        10-minute runtime floor (1,500 words @ 150 wpm) AFTER the LLM polish pass
+        — which historically trimmed narration below the gate even though the
+        raw LLM draft passed it. Expands any shot under the per-shot floor from
+        the stashed RAG snippet pool (semantic TF-IDF selection). If the pool is
+        exhausted the script is returned with its honest (recomputed) runtime.
+        """
+        MIN_TOTAL_WORDS = 1500    # ~10.0 mins @ 150 wpm
+        MIN_SHOT_WORDS = 110      # keeps shots within Observer's 155-word max
+        headline = state.selected_topic.headline if state.selected_topic else script.title
+        category = getattr(state.selected_topic, "niche_category", "") if state.selected_topic else ""
+
+        total_words = sum(len(s.narration_text.split()) for s in script.shots)
+        if total_words >= MIN_TOTAL_WORDS:
+            return script
+
+        logger.info(
+            "SCRIPT_DESIGN",
+            f"Post-polish word floor: {total_words} words < {MIN_TOTAL_WORDS}. "
+            f"Expanding short shots from the RAG snippet pool...",
+            component="STORY_DESIGNER"
+        )
+        snippets = getattr(self, "_last_rag_snippets", []) or []
+        used = getattr(self, "_last_used_snips", set()) or set()
+        expanded = False
+
+        # Two bounded passes: each pass tops up any shot still under the floor.
+        for _pass in range(2):
+            for shot in script.shots:
+                wc = len(shot.narration_text.split())
+                if wc < MIN_SHOT_WORDS:
+                    new_narr = self.expand_narration_with_semantic_facts(
+                        shot.narration_text, headline, category,
+                        snippets, used, target_word_count=MIN_SHOT_WORDS
+                    )
+                    if new_narr != shot.narration_text:
+                        shot.narration_text = new_narr
+                        shot.duration_estimate = max(42.0, round(len(new_narr.split()) / 2.2, 1))
+                        expanded = True
+            total_words = sum(len(s.narration_text.split()) for s in script.shots)
+            if total_words >= MIN_TOTAL_WORDS:
+                break
+
+        script.estimated_runtime_seconds = round(total_words / 150.0 * 60.0, 1)
+        if expanded:
+            logger.info(
+                "SCRIPT_DESIGN",
+                f"Post-polish expansion complete: {total_words} words "
+                f"(~{script.estimated_runtime_seconds / 60.0:.2f} mins).",
+                component="STORY_DESIGNER"
+            )
+        else:
+            logger.warning(
+                "SCRIPT_DESIGN",
+                f"Post-polish expansion could not reach {MIN_TOTAL_WORDS} words "
+                f"(RAG pool exhausted). Runtime stays ~{script.estimated_runtime_seconds / 60.0:.2f} mins.",
+                component="STORY_DESIGNER"
+            )
+        return script
 
     def _generate_ctr_title(self, headline: str, niche_category: str = "") -> Optional[str]:
         """
@@ -564,6 +693,10 @@ class StoryDesignerAgent:
         if polished:
             script = polished
             logger.info("SCRIPT_DESIGN", "Applied LLM editor polish pass (fact-preserving rewrite).", component="STORY_DESIGNER")
+
+        # Post-polish word-count floor: guarantee >=10-min runtime on CLEAN text
+        # even if the polish LLM trimmed narration below the gate.
+        script = self._enforce_script_word_floor(script, state)
 
         state.script_data = script
         state.seo_metadata = self.generate_seo_metadata(state.selected_topic, script)
