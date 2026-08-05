@@ -133,7 +133,7 @@ class StoryDesignerAgent:
         return narr
 
     def generate_6act_script(
-        self, topic: TopicCandidate, verified_facts: List[VerifiedFact], region: str = "all", target_shots: int = 15, revision_violations: Optional[List[str]] = None
+        self, topic: TopicCandidate, verified_facts: List[VerifiedFact], region: str = "all", target_shots: int = 15, revision_violations: Optional[List[str]] = None, state: Optional[GlobalState] = None
     ) -> ScriptData:
         """
         Expands the topic candidate into a 6-Act dramatic narrative script using RAG fact retrieval.
@@ -312,211 +312,90 @@ class StoryDesignerAgent:
                 f"StoryDesignerAgent: live LLM failed to produce a valid script after {LLM_MAX_ATTEMPTS} attempts. "
                 f"Check OPENROUTER_API_KEY/GEMINI_API_KEY and LLM output (truncation, quota, or malformed JSON)."
             )
-        # ── RAG-Grounded Universal Script Template ────────────────────────────
-        # Slice retrieved web snippets across acts so each shot gets a DIFFERENT
-        # real-world fact rather than generic boilerplate.
-        retrieved_context = rag_pack.get("rag_retrieved_context", "")
-        raw_snippets_raw = [
-            line.strip().lstrip("• ").strip()
-            for line in retrieved_context.split("\n")
-            if line.strip().startswith("•") and len(line.strip()) > 40
-            and "[DDG:" not in line and "DuckDuckGo" not in line  # skip raw scrape noise
-        ]
-        # Deduplicate — keep only unique snippets (when DuckDuckGo returns same snippet multiple times)
-        seen_snips: set = set()
-        raw_snippets: list = []
-        for s in raw_snippets_raw:
-            key = s[:60]  # First 60 chars as dedup key
-            if key not in seen_snips:
-                seen_snips.add(key)
-                raw_snippets.append(s)
-
-        # When web search returned few results, decompose summary into sentence-sized fragments
-        if len(raw_snippets) < 5:
-            summary_sentences = [s.strip() for s in re.split(r'[.!?]', summary) if len(s.strip()) > 30]
-            for sent in summary_sentences:
-                key = sent[:60]
-                if key not in seen_snips:
-                    seen_snips.add(key)
-                    raw_snippets.append(sent)
-
-        # Final fallback: pad with verified_facts headlines as diverse context
-        if len(raw_snippets) < 5:
-            for vf in verified_facts[:8]:
-                frag = f"{vf.headline}: {vf.summary[:80]}"
-                key = frag[:60]
-                if key not in seen_snips:
-                    seen_snips.add(key)
-                    raw_snippets.append(frag)
-
-        # Guarantee minimum pool size with topic-keyed fragments
-        while len(raw_snippets) < 8:
-            raw_snippets.append(f"According to {trusted_org} analysis, {headline} represents a pivotal development in {category} as of {current_month_year}.")
-
-        graph_triplets_str = rag_pack.get("graph_triplets", "").replace("•", "").strip()[:300]
-
-        # Track which snippets have been used to prevent any snippet appearing >1× in the script
-        _used_snips: set = set()
-
-        def _snip(i: int) -> str:
-            """Return a specific unique web snippet for this shot index."""
-            # Try the requested index first, then scan forward for an unused one
-            for offset in range(len(raw_snippets)):
-                candidate = raw_snippets[(i + offset) % len(raw_snippets)]
-                key = candidate[:60]
-                if key not in _used_snips:
-                    _used_snips.add(key)
-                    return candidate
-            # All snippets exhausted — return a generic fallback that doesn't repeat
-            return f"Sector intelligence published by {trusted_org} in {current_month_year} confirms sustained momentum in {category}."
-
-
-        acts_blueprint = [
-            (1, "The Inciting Incident",
-             f"In {current_month_year}, a significant development shook {category} as news broke: {headline}. "
-             f"According to initial reporting from {trusted_org}: {summary} "
-             f"Industry observers immediately recognised the magnitude of this shift. {_snip(0)}",
-             f"Cinematic 16:9 widescreen wide shot of {people_tag} in a sleek modern studio analysing glowing holographic data related to '{headline[:40]}', dramatic rim lighting, 8k photorealistic."),
-
-            (1, "The Immediate Stakes",
-             f"The ramifications of {headline} extend across multiple stakeholder groups in {current_month_year}. "
-             f"Verified analysis from {trusted_org} confirms: {_snip(1)} "
-             f"Decision-makers and industry practitioners are now re-evaluating core assumptions in light of this evidence. "
-             f"Organisations that fail to adapt risk losing relevance in an increasingly competitive {category} landscape.",
-             f"Cinematic 16:9 widescreen closeup of analytical dashboards and research reports under dark moody lighting, 8k resolution."),
-
-            (2, "Historical Precedents & Origins",
-             f"To understand {headline}, we must trace the origins of this development. Historical records document how {category} evolved from foundational frameworks to the inflection point we observe today in {current_month_year}. "
-             f"Key background context: {_snip(2)} "
-             f"Previous methodologies relied on legacy assumptions that the current breakthrough fundamentally challenges.",
-             f"Cinematic 16:9 widescreen wide-angle documentary view of corporate headquarters and research archives, warm golden-hour atmosphere, 8k."),
-
-            (2, "The Turning Point",
-             f"The pivotal shift arrived when new empirical evidence surrounding {headline} reached the public domain. "
-             f"Information released by {trusted_org} in {current_month_year} demonstrates: {_snip(3)} "
-             f"This created unprecedented momentum as legacy frameworks proved insufficient to explain the emerging reality.",
-             f"Cinematic 16:9 widescreen dolly push-in on a sleek data visualisation screen revealing a dramatic trend inflection, 8k photorealistic."),
-
-            (3, "Deep Technical Mechanics",
-             f"Behind the headline of {headline} lie complex mechanisms worth examining. "
-             f"Semantic knowledge graph analysis reveals the following entity relationships: {graph_triplets_str if graph_triplets_str else _snip(4)} "
-             f"Understanding these underlying structural dynamics allows researchers and strategists to build evidence-based models rather than relying on surface-level observations.",
-             f"Cinematic 16:9 widescreen macro shot of glowing neural data-node connections on a dark digital grid, cold blue data-center lighting, 8k photorealistic."),
-
-            (3, "The Data Evidence",
-             f"Detailed research compiled by {trusted_org} in {current_month_year} illustrates the exact correlations underpinning {headline}. "
-             f"Independent verification reveals: {_snip(5)} "
-             f"By tracking key variables across extended observation windows, analysts established an empirical baseline that eliminates speculation and grounds decision-making in verifiable fact.",
-             f"Cinematic 16:9 widescreen close-up of scientific data charts glowing on a sleek glass interface, warm executive lighting, 8k resolution."),
-
-            (4, "Actionable Real-World Impact",
-             f"What does {headline} mean for practitioners and decision-makers in {current_year}? "
-             f"First: re-evaluate core operational assumptions based on the fresh empirical data confirmed by {trusted_org}. "
-             f"Second: align strategic frameworks with the benchmarks this event establishes. "
-             f"Third: build institutional agility to respond as the {category} landscape continues evolving throughout {current_month_year}.",
-             f"Cinematic 16:9 widescreen shot of {people_tag} crafting a strategic blueprint on a sleek laptop workstation, warm dramatic 8k lighting."),
-
-            (4, "Evidence & Ecosystem Velocity",
-             f"According to research from {trusted_org}: {_snip(6)} "
-             f"When platforms and organisations align their architecture with the verified standards emerging from {headline}, they gain compounding authority. "
-             f"This flywheel effect attracts pre-qualified stakeholder interest and reinforces category dominance over time — a pattern well-documented across {category} cycles.",
-             f"Cinematic 16:9 widescreen macro shot of digital citation links connecting across a glowing 3D global network model, 8k resolution."),
-
-            (4, "Early Mover Advantage",
-             f"Early responders who act on the insights from {headline} in {current_month_year} are positioning themselves ahead of the competitive curve. "
-             f"Background analysis confirms: {_snip(7 % len(raw_snippets))} "
-             f"Pioneering teams in {category} are capturing exponential growth while legacy players struggle to recalibrate their strategic models to the new evidence.",
-             f"Cinematic 16:9 widescreen dynamic shot of an upward-trending performance graph glowing brightly on a glass screen, 8k resolution."),
-
-            (5, "Critical Risks & Pitfalls",
-             f"However, important risks must be navigated carefully in the context of {headline}. "
-             f"Misinterpreting preliminary data or rushing execution without rigorous verification backfires rapidly across {category}. "
-             f"Studies from {trusted_org} prove that sustainable success requires authentic expertise, verified primary data, and thorough quality assurance at every operational stage.",
-             f"Cinematic 16:9 widescreen macro shot of a red warning icon flashing on a high-tech digital audit interface, dark moody low-key lighting, 8k."),
-
-            (5, "Measuring Long-Term Reach",
-             f"Tracking the ongoing implications of {headline} requires updated measurement frameworks in {current_year}. "
-             f"Forward-thinking teams monitor multi-channel sentiment, citation frequency, and conversion velocity to measure true long-term impact across {category}. "
-             f"Attribution modelling confirms: {_snip(0)} — reinforcing the compounding ROI of sustained strategic presence.",
-             f"Cinematic 16:9 widescreen shot of a domain strategist analysing custom analytics funnel charts on a tablet, professional background, 8k."),
-
-            (5, "The Future Horizon",
-             f"As innovation accelerates around {headline}, the boundary between theoretical modelling and practical execution is dissolving. "
-             f"Data from {trusted_org} indicates that a dominant share of {category} developments in {current_month_year} will build directly upon the structural changes triggered by this event: {_snip(2)} "
-             f"Staying ahead of this trajectory demands continuous intelligence integration and evidence-based agility.",
-             f"Cinematic 16:9 widescreen wide shot of a futuristic research complex with holographic data overlays and tilt-shift depth, 8k photorealistic."),
-
-            (6, "The Final Verdict",
-             f"The transformation underway in {category} following {headline} is not a distant prediction — it is happening right now in {current_year}. "
-             f"Stakeholders who adapt their strategies to these new realities will thrive, while those relying on outdated playbooks risk complete obsolescence. "
-             f"The opportunity is immediate, actionable, and grounded in verified evidence from {trusted_org}.",
-             f"Cinematic 16:9 widescreen crane descent over a city skyline at twilight with glowing fibre-optic data networks spanning the horizon, dramatic 8k."),
-
-            (6, f"Key Takeaways for {current_year}",
-             f"To summarise the core takeaways from {headline} for {current_month_year}: Ground strategy in empirical facts validated by {trusted_org}. "
-             f"Align operational architecture with the structural shifts this event confirms. "
-             f"Maintain continuous intelligence integration and category agility. "
-             f"Sustainable success in {category} belongs exclusively to those who provide verifiable, defensible value.",
-             f"Cinematic 16:9 widescreen close-up of an executive summary document on a sleek modern desk, warm professional lighting, 8k resolution."),
-
-            (6, "Call to Action",
-             f"How is your organisation responding to {headline} in {current_year}? "
-             f"Drop your perspective in the comments below, subscribe for weekly {category} intelligence deep dives, and hit the notification bell to stay ahead of global trends. "
-             f"To continue your strategic deep dive, click the recommended video appearing on your screen right now for our next breakdown in {category}.",
-             f"Cinematic 16:9 widescreen clean outro graphic with two YouTube end-screen video card placeholders, sleek dark theme design, 8k high resolution.")
-        ]
-
-        shots = []
-        total_runtime = 0.0
-
-        # RAG-seeded rotating padding pool — vocabulary drawn from real retrieved snippets
-        _snip_words = " ".join(raw_snippets[:3])
-        _kw_fragment = " ".join(_snip_words.split()[:8]) if _snip_words else summary[:60]
-        _padding_pool = [
-            f"Cross-referencing {trusted_org} intelligence confirms that {_kw_fragment} represents a structural inflection point shaping {category} strategy through {current_year}.",
-            f"Sector observers tracking {headline[:45]} note that quantitative benchmarks published by {trusted_org} reinforce the magnitude of this reconfiguration.",
-            f"What makes this development uniquely consequential is the convergence of verified empirical evidence and accelerating adoption velocity documented in {current_month_year}.",
-            f"Longitudinal datasets compiled by leading {category} analysts corroborate that foundational assumptions underpinning legacy frameworks require urgent recalibration.",
-            f"Early cohort data cited by {trusted_org} reveals that organisations adopting evidence-based repositioning strategies are outperforming reactive counterparts by measurable margins.",
-            f"The compounding velocity of change within {category} demands that decision-makers move beyond periodic reviews toward continuous intelligence integration.",
-            f"Historical precedents drawn from comparable {category} disruption cycles suggest that the first-mover advantage window documented in {current_month_year} closes faster than conventional wisdom predicts.",
-        ]
-
-        pool_idx = 0  # Global sequential index — never revisits same sentence
-        for idx, (act_num, title_label, narration, v_prompt) in enumerate(acts_blueprint, start=1):
-            # Add at most 2 padding sentences per shot, each from a different pool slot
-            pads_added = 0
-            while len(narration.split()) < 115 and pads_added < 2:
-                pad_sentence = _padding_pool[pool_idx % len(_padding_pool)]
-                pool_idx += 1
-                pads_added += 1
-                narration += " " + pad_sentence
-            # If still short after 2 pool pads, inject the next raw RAG snippet
-            if len(narration.split()) < 115:
-                extra_snip = raw_snippets[(idx + 2) % len(raw_snippets)]
-                if extra_snip not in narration:
-                    narration += " " + extra_snip
-
-            dur = max(42.0, round(len(narration.split()) / 2.2, 1))
-            total_runtime += dur
-
-            shot = ShotData(
-                shot_id=idx,
-                act_index=act_num,
-                narration_text=narration,
-                visual_prompt=v_prompt,
-                duration_estimate=dur
+        else:
+            logger.error(
+                "SCRIPT_DESIGN",
+                "StoryDesigner requires a live LLM; boilerplate template fallback is disabled. Configure OPENROUTER/GEMINI/OPENAI key and ensure LLM reachability.",
+                component="STORY_DESIGNER"
             )
-            shots.append(shot)
+            raise RuntimeError(
+                "StoryDesignerAgent: no live LLM available (template fallback disabled). "
+                "Set OPENROUTER_API_KEY/GEMINI_API_KEY and ensure the LLM client is reachable."
+            )
 
-        script = ScriptData(
-            title=f"The Hidden Truth Behind {headline[:35]}... ({current_month_year})",
-            target_shots=len(shots),
-            shots=shots,
-            estimated_runtime_seconds=round(total_runtime, 1)
+
+    def _polish_script(self, script: ScriptData, headline: str, category: str) -> Optional[ScriptData]:
+        """
+        LLM "editor" polish pass: rewrites each shot's narration to be more
+        engaging, human, and creative — while STRICTLY preserving facts, numbers,
+        names, dates and meaning. Fact-preserving by construction:
+          * One structured LLM call returns rewritten narration per shot_id.
+          * Unchanged/oversized shots fall back to the original text.
+          * Never introduces new facts > verified corpus (rule-only; Observer
+            re-audits against the full fact corpus afterwards).
+        Cheap (~one small call), so it fits the LLM budget (separate from the
+        fal/replicate cap). Returns None (caller keeps original) on any failure.
+        """
+        if not self.llm_client.is_available():
+            return None
+        import json
+        shots_json = [
+            {"shot_id": s.shot_id, "act_index": s.act_index, "narration_text": s.narration_text}
+            for s in script.shots
+        ]
+        prompt = (
+            "You are a skilled documentary editor. For EACH shot, rewrite the narration to be "
+            "more engaging, human, fluent and creative, while STRICTLY preserving every fact, "
+            "number, name, date, source attribution and the original meaning.\n"
+            "Rules:\n"
+            "- Keep every shot's narration between 110 and 135 words (aim ~120).\n"
+            "- Vary sentence lengths dramatically; avoid repeating words/phrases across sentences and shots.\n"
+            "- Use precise, vivid English vocabulary; avoid cliches, robotic templates and monotony.\n"
+            "- Blend rhetorical questions, storytelling scenes, analogies and punchy declarations.\n"
+            f"- Topic headline: {headline}. Category: {category}.\n"
+            "- Do NOT add any new facts or numbers; do NOT change meaning.\n"
+            "Return ONLY a JSON object with key \"shots\": an array of {\"shot_id\": <int>, "
+            "\"narration_text\": \"<rewritten>\"} for ALL shots.\n"
+            f"SHOTS TO POLISH:\n{json.dumps(shots_json, ensure_ascii=False)}"
         )
-        return script
+        try:
+            res = self.llm_client.generate_json(
+                prompt, "You are a documentary editor. Return valid JSON only."
+            )
+        except Exception:
+            res = None
+        if not res or "shots" not in res:
+            return None
 
+        narr_by_id = {}
+        for s in res["shots"] or []:
+            try:
+                sid = int(s.get("shot_id"))
+            except (TypeError, ValueError):
+                continue
+            narr = (s.get("narration_text") or "").strip()
+            wc = len(narr.split())
+            if 100 <= wc <= 160:  # guard: only accept sane-length rewrites
+                narr_by_id[sid] = narr
+
+        polished = []
+        for shot in script.shots:
+            narr = narr_by_id.get(shot.shot_id, shot.narration_text)
+            polished.append(ShotData(
+                shot_id=shot.shot_id,
+                act_index=shot.act_index,
+                narration_text=narr,
+                visual_prompt=shot.visual_prompt,
+                visual_type=shot.visual_type,
+                duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1)),
+            ))
+        total_words = sum(len(s.narration_text.split()) for s in polished)
+        return ScriptData(
+            title=script.title,
+            target_shots=len(polished),
+            shots=polished,
+            estimated_runtime_seconds=round(total_words / 150.0 * 60.0, 1),
+        )
 
     def _generate_ctr_title(self, headline: str, niche_category: str = "") -> Optional[str]:
         """
@@ -593,7 +472,14 @@ class StoryDesignerAgent:
         if not state.selected_topic:
             raise ValueError("Cannot generate script: state.selected_topic is None")
 
-        script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region, revision_violations=revision_violations)
+        script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region, revision_violations=revision_violations, state=state)
+
+        # LLM editor polish pass: rewrite for engagement while preserving facts.
+        polished = self._polish_script(script, state.selected_topic.headline, state.selected_topic.niche_category)
+        if polished:
+            script = polished
+            logger.info("SCRIPT_DESIGN", "Applied LLM editor polish pass (fact-preserving rewrite).", component="STORY_DESIGNER")
+
         state.script_data = script
         state.seo_metadata = self.generate_seo_metadata(state.selected_topic, script)
         state.execution_stage = "SCRIPT_GENERATED"
