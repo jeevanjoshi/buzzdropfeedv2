@@ -7,6 +7,30 @@ from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.monetization_optimizer import monetization_optimizer
 from src.engine.channel_phase_manager import channel_phase_manager
 
+# Phrases/structure markers indicating a sentence is rhetorical, metaphorical,
+# transitional, or narrative color — i.e. NOT a hard factual assertion. The audit
+# skips these so creative English isn't false-flagged as ungrounded.
+_CREATIVE_MARKERS = [
+    "like ", "as if", "imagine ", "picture ", "think of ", "think about ",
+    "a bit like", "almost like", "in a sense", "you could say", "step into ",
+    "dive into ", "let's take", "so, what", "what if ", "picture this",
+    "is like a", "acts like", "sounds like", "feels like", "looks like",
+]
+
+
+def _looks_creative_or_transitional(sentence: str) -> bool:
+    """True if a sentence is rhetorical/metaphorical/transitional creative English
+    (not a hard factual claim), so it should NOT be flagged as ungrounded."""
+    s = sentence.lower()
+    if sentence.rstrip().endswith("?"):
+        return True
+    if any(m in s for m in _CREATIVE_MARKERS):
+        return True
+    # short subjective/engagement clauses
+    if re.match(r'^\s*(let\'?s|so|and|but|imagine|remember|picture)\b', s):
+        return True
+    return False
+
 
 class ObserverAgent:
     """
@@ -95,8 +119,9 @@ class ObserverAgent:
             if vectorizer:
                 shot_sentences = [s.strip() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]
                 for sentence in shot_sentences:
-                    # Skip rhetorical questions (they are not assertions)
-                    if sentence.endswith("?"):
+                    # Skip rhetorical questions and creative/transitional English
+                    # (not hard factual assertions) to avoid false positives.
+                    if _looks_creative_or_transitional(sentence):
                         continue
 
                     # Local NLTK POS Tagging check with Topic Keyword Subtraction
@@ -185,8 +210,11 @@ class ObserverAgent:
                 except Exception as critic_err:
                     print(f"Warning: Critic call failed: {critic_err}. Defaulting to local validation flags.")
 
-            # If LLM client is unavailable or failed, default back to local flags to be safe
+            # If LLM client is unavailable or failed, default back to local flags to be safe,
+            # but still skip creative/transitional English to protect narrative style.
             for sid, sentence, itype in flagged_sentences_info:
+                if _looks_creative_or_transitional(sentence):
+                    continue
                 violations.append(
                     f"Shot #{sid} {itype}: The claim '{sentence}' lacks verified grounding in source facts."
                 )
@@ -244,6 +272,9 @@ class ObserverAgent:
             violations.append(f"Insufficient shot count: {len(script.shots)} shots (Target: 12 - 18 shots)")
 
         # Shot-by-Shot Validation
+        # (A) Sentence repetition tracking — verbatim + semantic similarity (>0.82)
+        all_narr_sentences: List[str] = []
+
         for shot in script.shots:
             word_count = len(shot.narration_text.split())
             if word_count > 155:
@@ -255,6 +286,57 @@ class ObserverAgent:
 
             if "cinematic" not in v_prompt and "8k" not in v_prompt and "photorealistic" not in v_prompt:
                 violations.append(f"Shot #{shot.shot_id} visual prompt lacks aesthetic lighting/AQA keywords.")
+
+            # Sentence duplication (verbatim + TF-IDF semantic similarity >= 0.82)
+            shot_sentences = [s.strip().lower() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]
+            for sentence in shot_sentences:
+                if sentence in all_narr_sentences:
+                    violations.append(f"Shot #{shot.shot_id} repetition: duplicate sentence '{sentence}'.")
+                elif all_narr_sentences:
+                    try:
+                        from sklearn.feature_extraction.text import TfidfVectorizer
+                        from sklearn.metrics.pairwise import cosine_similarity
+                        import numpy as np
+                        vec = TfidfVectorizer().fit(all_narr_sentences + [sentence])
+                        v1 = vec.transform([sentence])
+                        v2 = vec.transform(all_narr_sentences)
+                        sims = cosine_similarity(v1, v2)[0]
+                        max_sim = float(np.max(sims))
+                        if max_sim > 0.82:
+                            violations.append(
+                                f"Shot #{shot.shot_id} repetition: sentence semantically too similar "
+                                f"(sim {max_sim:.2f}): '{sentence}'"
+                            )
+                    except Exception:
+                        pass
+                all_narr_sentences.append(sentence)
+
+        # (B) Source-attribution diversity: scripts should cite multiple distinct
+        # authentic sources and not over-attribute to a single one.
+        if verified_facts:
+            source_names = {f.source_name for f in verified_facts if f.source_name}
+            source_names = {
+                s for s in source_names
+                if s and "Viet" not in s and "Verified Market Reports" not in s
+            }
+            if len(source_names) >= 2:
+                narration_full = " ".join(s.narration_text for s in script.shots).lower()
+                cited = {sn: narration_full.count(sn.lower()) for sn in source_names if sn.lower() in narration_full}
+                if cited:
+                    total_cites = sum(cited.values())
+                    max_cites = max(cited.values())
+                    top_source = max(cited, key=cited.get)
+                    if total_cites > 0:
+                        if len(cited) == 1:
+                            violations.append(
+                                f"Source Diversity: narration cites only '{top_source}'. "
+                                f"Attribute to multiple distinct sources (available: {sorted(source_names)})."
+                            )
+                        elif max_cites / total_cites > 0.45:
+                            violations.append(
+                                f"Source Diversity: '{top_source}' over-cited ({max_cites}/{total_cites} = "
+                                f"{max_cites/total_cites:.0%}). Balance citations across authentic sources."
+                            )
 
         # Anti-Hallucination Audit — against verified facts + full RAG fact corpus
         if verified_facts:
