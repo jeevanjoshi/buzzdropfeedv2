@@ -397,17 +397,18 @@ class LiveRSSIngestionEngine:
         """
         return min(1.0, competing_video_count / 10.0)
 
-    def _compute_vph(self, headline: str, keywords: List[str]) -> Tuple[Optional[float], float]:
+    def _compute_vph(self, headline: str, keywords: List[str], audience_type: str = "") -> Tuple[Optional[float], float]:
         """
         Computes REAL YouTube Competitor Views-per-Hour velocity from public
-        YouTube Data API search/video stats for the topic's keywords.
-        Returns (vph, competitor_30d_avg_views). If the API is unavailable or
-        fails, returns (None, 0.0) so the caller can fall back to the proxy.
+        YouTube Data API (niche video-ID pool + cheap batch stats). Returns
+        (vph, competitor_30d_avg_views); falls back to (None, 0.0) so the caller
+        can use the proxy.
         """
         query = (" ".join(keywords[:3]) if keywords else headline[:40]).strip()
         if not query:
             return None, 0.0
-        demand = youtube_topic_demand.fetch_topic_demand(query)
+        niche = AUDIENCE_NICHE_MAP.get(audience_type, ("", 0.0))[0]
+        demand = youtube_topic_demand.fetch_topic_demand(query, niche_category=niche)
         if not demand:
             return None, 0.0
         vph = max(0.5, min(3.0, demand["views_per_hour"] / 250.0))
@@ -500,7 +501,7 @@ class LiveRSSIngestionEngine:
             competing = self._estimate_competing_video_count(keywords, coverage.get(idx - 1, 1))
 
             # Real YouTube competitor view velocity (falls back to RPM-boosted proxy)
-            measured_vph, comp_30d = self._compute_vph(headline, keywords)
+            measured_vph, comp_30d = self._compute_vph(headline, keywords, audience_type)
             if measured_vph is not None:
                 vph = measured_vph
             else:

@@ -2,35 +2,55 @@ import os
 import json
 import datetime
 import threading
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from src.engine.logger import logger
+
+# Niche -> broad seed keyword used ONCE per niche per refresh to discover a pool
+# of competitor video IDs. This keeps search.list usage low (the scarce quota),
+# while per-topic demand is served mostly via cheap, high-limit videos.list batch
+# stats (VideoBatchGetStats metric).
+_NICHE_SEED = {
+    "Personal Finance & Investing": "personal finance investing",
+    "Global Economics & Finance": "economics news",
+    "Technology & Artificial Intelligence": "technology news",
+    "Business & Entrepreneurship": "business news",
+    "Health & Science": "health news",
+    "Health & Wellness": "health wellness",
+    "Legal & Law": "legal news",
+    "Real Estate": "real estate news",
+    "Space & Scientific Innovation": "space science news",
+    "Geopolitics & World Affairs": "geopolitics news",
+    "Global Trends & Infotainment": "trending news",
+    "Global Trends & Cultural Infotainment": "trending news",
+}
+_DEFAULT_NICHE_KEY = "Trending"
+POOLS_FILE = "yt_demand_pools.json"
+QUOTA_FILE = "yt_demand_quota.json"
+REFRESH_DAYS = 2          # re-seed a niche pool after this many days
+MAX_POOL_IDS = 50         # videos.list batch limit per call
 
 
 class YouTubeTopicDemand:
     """
-    Fetches REAL, forward-looking topic demand from public YouTube Data API v3
-    (search.list + videos.list statistics). Used to replace the fake vph_score
-    proxy in RSS ingestion with genuine competitor view volume.
+    Fetches REAL, forward-looking competitor view demand from public YouTube Data
+    API v3 using minimal search.list (scarce quota) + cheap, high-limit videos.list
+    batch statistics (VideoBatchGetStats).
 
-    Only public metadata is used (no OAuth required) via a developer API key
-    (YOUTUBE_API_KEY / GOOGLE_API_KEY). All calls are cached per query.
+    Strategy:
+      - Each niche is seeded (a handful of search.list calls/day) into a persistent
+        pool of competitor video IDs.
+      - Per-topic demand is served by a single videos.list(id=<pool ids up to 50>)
+        call (~1 unit, high daily limit) — nothing is re-searched per topic.
 
-    A persistent DAILY search-call budget (YT_SEARCH_DAILY_BUDGET, default 30)
-    prevents a single run/session from exhausting the whole 10k-unit/day free
-    quota (each search.list = 100 units). When the budget is used up, calls are
-    skipped and the pipeline falls back to the proxy — silently and non-fatally.
-    All messages go through the structured logger, not raw stdout.
+    Falls back to the proxy (returns None) non-fatally on any failure/quota cap,
+    and rotates across multiple API keys on 429/403.
     """
-
-    QUOTA_FILE = "yt_demand_quota.json"
 
     def __init__(self):
         self._cache: Dict[str, Optional[Dict[str, Any]]] = {}
         self._lock = threading.Lock()
-        self._client = None
+        self._pools: Dict[str, dict] = self._load_pools()
         self._quota = self._load_quota()
-        # API keys in priority order: primary, then fallback(s). Used to rotate
-        # when the primary hits a daily quota (429) error.
         self._keys = [
             k for k in (
                 os.getenv("YOUTUBE_API_KEY"),
@@ -41,11 +61,27 @@ class YouTubeTopicDemand:
         ]
         self._key_idx = 0
 
-    # ── quota budget ─────────────────────────────────────────────────────────
+    # ── persistence ───────────────────────────────────────────────────────────
+    def _load_pools(self) -> dict:
+        try:
+            if os.path.exists(POOLS_FILE):
+                with open(POOLS_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, IOError, OSError):
+            pass
+        return {}
+
+    def _save_pools(self) -> None:
+        try:
+            with open(POOLS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._pools, f, indent=2)
+        except (IOError, OSError):
+            pass
+
     def _load_quota(self) -> dict:
         try:
-            if os.path.exists(self.QUOTA_FILE):
-                with open(self.QUOTA_FILE, "r", encoding="utf-8") as f:
+            if os.path.exists(QUOTA_FILE):
+                with open(QUOTA_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
         except (json.JSONDecodeError, IOError, OSError):
             pass
@@ -53,7 +89,7 @@ class YouTubeTopicDemand:
 
     def _save_quota(self) -> None:
         try:
-            with open(self.QUOTA_FILE, "w", encoding="utf-8") as f:
+            with open(QUOTA_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._quota, f, indent=2)
         except (IOError, OSError):
             pass
@@ -65,7 +101,7 @@ class YouTubeTopicDemand:
         if used >= budget:
             logger.warning(
                 "YT_DEMAND",
-                f"YouTube search daily budget reached ({used}/{budget}); competitor feed paused for today (proxy fallback).",
+                f"YouTube search daily budget reached ({used}/{budget}); using niche-pool batch stats only.",
                 component="YOUTUBE_DEMAND",
             )
             return False
@@ -89,84 +125,105 @@ class YouTubeTopicDemand:
             logger.warning("YT_DEMAND", f"Failed to build YouTube client: {e}", component="YOUTUBE_DEMAND")
             return None
 
-    def fetch_topic_demand(self, query: str, max_videos: int = 5) -> Optional[Dict[str, Any]]:
-        """Cached fetch of competitor view volume for a topic query (budget-gated)."""
-        cache_key = query.strip().lower()
-        with self._lock:
-            if cache_key in self._cache:
-                return self._cache[cache_key]
-        if not self._can_search():
-            with self._lock:
-                self._cache[cache_key] = None
-            return None
-        result = self._fetch(query, max_videos)
-        with self._lock:
-            self._cache[cache_key] = result
-        return result
+    # ── niche mapping ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _niche_key(niche_category: str, query: str) -> str:
+        if niche_category and niche_category in _NICHE_SEED:
+            return niche_category
+        if niche_category:
+            return niche_category
+        # fall back to first word of the query as a coarse niche tag
+        words = [w for w in (query or "").split() if len(w) > 3][:2]
+        return " ".join(words) if words else _DEFAULT_NICHE_KEY
 
-    def _fetch(self, query: str, max_videos: int) -> Optional[Dict[str, Any]]:
-        if not self._keys:
-            return None
+    # ── pool lifecycle ────────────────────────────────────────────────────────
+    def _ensure_pool(self, niche_key: str) -> List[str]:
+        """Returns a fresh-enough pool of video IDs for a niche; seeds it (1 search.list)
+        if missing/stale. Returns [] if it can't seed right now (budget/api)."""
+        pool = self._pools.get(niche_key) or {}
+        seeded = pool.get("seeded_date", "")
+        try:
+            fresh = seeded >= (datetime.date.today() - datetime.timedelta(days=REFRESH_DAYS)).isoformat()
+        except Exception:
+            fresh = False
+        if pool.get("ids") and fresh:
+            return pool["ids"]
+
+        if not self._can_search():
+            return (pool or {}).get("ids", []) or []
+
+        seed_q = _NICHE_SEED.get(niche_key, niche_key.replace("_", " "))
+        ids = self._search_ids(seed_q, 10)
+        if not ids:
+            return (pool or {}).get("ids", []) or []
+        self._pools[niche_key] = {
+            "seeded_date": datetime.date.today().isoformat(),
+            "seed_query": seed_q,
+            "ids": ids,
+        }
+        self._save_pools()
+        return ids
+
+    def _search_ids(self, query, max_results: int = 10) -> List[str]:
         n = len(self._keys)
-        last_err = None
-        for _ in range(n):
+        for _ in range(max(1, n)) if n else range(0):
             key_idx = self._key_idx
-            client = self._get_client(self._keys[key_idx])
+            client = self._get_client(self._keys[key_idx]) if n else None
             if client is None:
-                self._key_idx = (key_idx + 1) % n
+                if n: self._key_idx = (key_idx + 1) % n
                 continue
             try:
-                return self._fetch_with_client(client, query, max_videos)
+                resp = client.search().list(
+                    part="id", type="video", q=query,
+                    maxResults=max_results, order="viewCount",
+                    relevanceLanguage="en", safeSearch="none",
+                ).execute()
+                return [
+                    it["id"]["videoId"]
+                    for it in resp.get("items", [])
+                    if it.get("id", {}).get("kind") == "youtube#video"
+                ]
             except Exception as e:
-                last_err = e
                 msg = str(e).lower()
-                # Only rotate keys on quota/rate-limit (429/403); other errors are fatal per-query
-                if "quota" in msg or "429" in msg or "rateLimitExceeded" in msg or "403" in msg:
-                    logger.warning(
-                        "YT_DEMAND",
-                        f"Key {key_idx + 1}/{n} quota/403 on '{query}'; trying next key.",
-                        component="YOUTUBE_DEMAND",
-                    )
-                    self._key_idx = (key_idx + 1) % n  # exhaust this key for the process
+                if "quota" in msg or "429" in msg or "403" in msg or "rateLimitExceeded" in msg:
+                    self._key_idx = (key_idx + 1) % n
                     continue
-                logger.warning("YT_DEMAND", f"Fetch failed for '{query}': {e}", component="YOUTUBE_DEMAND")
-                return None
-        logger.warning(
-            "YT_DEMAND",
-            f"All {n} YouTube key(s) failed/quota-exceeded for '{query}': {last_err}",
-            component="YOUTUBE_DEMAND",
-        )
-        return None
+                logger.warning("YT_DEMAND", f"search.list failed for '{query}': {e}", component="YOUTUBE_DEMAND")
+                return []
+        return []
 
-    def _fetch_with_client(self, client, query: str, max_videos: int) -> Optional[Dict[str, Any]]:
-        search_resp = client.search().list(
-            part="id",
-            type="video",
-            q=query,
-            maxResults=max_videos,
-            order="viewCount",
-            relevanceLanguage="en",
-            safeSearch="none",
-        ).execute()
-
-        ids = [
-            it["id"]["videoId"]
-            for it in search_resp.get("items", [])
-            if it.get("id", {}).get("kind") == "youtube#video"
-        ]
+    # ── demand compute (cheap videos.list batch) ─────────────────────────────
+    def _stats_for_ids(self, ids: List[str], max_videos: int = 5) -> Optional[Dict[str, Any]]:
         if not ids:
             return None
+        n = len(self._keys)
+        for _ in range(max(1, n)) if n else range(0):
+            key_idx = self._key_idx
+            client = self._get_client(self._keys[key_idx]) if n else None
+            if client is None:
+                if n: self._key_idx = (key_idx + 1) % n
+                continue
+            try:
+                vids = client.videos().list(
+                    part="statistics,snippet", id=",".join(ids[:MAX_POOL_IDS])
+                ).execute()
+                return self._demand_from_items(vids.get("items", []), max_videos)
+            except Exception as e:
+                msg = str(e).lower()
+                if "quota" in msg or "429" in msg or "403" in msg or "rateLimitExceeded" in msg:
+                    self._key_idx = (key_idx + 1) % n
+                    continue
+                logger.warning("YT_DEMAND", f"videos.list failed: {e}", component="YOUTUBE_DEMAND")
+                return None
+        return None
 
-        vids = client.videos().list(
-            part="statistics,snippet", id=",".join(ids)
-        ).execute()
-
+    @staticmethod
+    def _demand_from_items(items, max_videos: int = 5) -> Optional[Dict[str, Any]]:
         now = datetime.datetime.now(datetime.timezone.utc)
         total_views = 0
         total_age_days = 0.0
         counted = 0
-
-        for item in vids.get("items", []):
+        for item in items[:max_videos]:
             vc = int(item.get("statistics", {}).get("viewCount", 0) or 0)
             total_views += vc
             pub = item.get("snippet", {}).get("publishedAt")
@@ -179,19 +236,34 @@ class YouTubeTopicDemand:
                     age_days = 30.0
             total_age_days += age_days
             counted += 1
-
         if counted == 0 or total_age_days <= 0:
             return None
-
         hourly = (total_views / total_age_days) / 24.0
         return {
-            "query": query,
             "video_count": counted,
             "total_views": total_views,
             "avg_views_per_video": round(total_views / counted, 2),
             "views_per_hour": round(hourly, 2),
             "competitor_30d_avg_views": round((total_views / total_age_days) * 30.0, 2),
         }
+
+    # ── public entry ──────────────────────────────────────────────────────────
+    def fetch_topic_demand(self, query: str, niche_category: str = "", max_videos: int = 5) -> Optional[Dict[str, Any]]:
+        """Returns competitor demand for a topic using the niche's video-ID pool
+        (cheap batch videos.list), seeding the pool with minimal search.list."""
+        cache_key = (query or "").strip().lower()
+        with self._lock:
+            if cache_key and cache_key in self._cache:
+                return self._cache[cache_key]
+
+        niche_key = self._niche_key(niche_category, query)
+        pool_ids = self._ensure_pool(niche_key)
+        result = self._stats_for_ids(pool_ids, max_videos)
+
+        with self._lock:
+            if cache_key:
+                self._cache[cache_key] = result
+        return result
 
 
 youtube_topic_demand = YouTubeTopicDemand()
