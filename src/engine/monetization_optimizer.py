@@ -13,15 +13,32 @@ class MonetizationYieldOptimizer:
     - Competitor 30-day view volume scraping & rejection gate
     """
 
-    # Niche RPM Matrix: Category -> (min_rpm_usd, max_rpm_usd, mid_rpm_usd)
+    # Niche RPM Matrix: Category -> (min_net_rpm_usd, max_net_rpm_usd, mid_net_rpm_usd)
+    # Recalibrated to realistic CREATOR-NET RPM benchmarks (CPM x ~0.55 after
+    # YouTube's 45% cut), drawn from published industry data (Creator-Hero,
+    # SocialBlade/InfluencerMarketingHub aggregate). Finance/Investing highest,
+    # enterprise-AI/Tech and Health mid, consumer entertainment lowest.
     NICHE_RPM_MATRIX = {
-        "Technology & Artificial Intelligence": (10.0, 22.0, 16.0),
-        "Global Economics & Finance":           (8.0,  20.0, 14.0),
-        "Space & Scientific Innovation":        (6.0,  14.0, 10.0),
-        "Geopolitics & World Affairs":          (4.0,  10.0, 7.0),
-        "Global Trends & Cultural Infotainment":(3.0,   8.0, 5.5),
-        "Health & Wellness":                    (7.0,  18.0, 12.0),
+        "Technology & Artificial Intelligence": (8.0, 22.0, 14.0),
+        "Global Economics & Finance":           (10.0, 30.0, 18.0),
+        "Space & Scientific Innovation":        (5.0, 14.0, 9.0),
+        "Geopolitics & World Affairs":          (3.0, 10.0, 6.0),
+        "Global Trends & Cultural Infotainment":(1.0, 6.0, 3.0),
+        "Health & Wellness":                    (6.0, 18.0, 11.0),
     }
+
+    def _net_rpm_usd(self, candidate: TopicCandidate) -> float:
+        """
+        Returns a realistic creator-NET RPM in USD for a candidate, derived from
+        the niche benchmark midpoint scaled by how strongly the topic matches the
+        high-RPM taxonomy (rpm_score in [0.3, 1.0]).
+        """
+        rpm_min, rpm_max, rpm_mid = self.NICHE_RPM_MATRIX.get(
+            getattr(candidate, "niche_category", ""), (3.0, 10.0, 6.0)
+        )
+        match = getattr(candidate, "rpm_score", 0.5)
+        scaled = rpm_mid * (0.8 + 0.4 * match)
+        return round(max(rpm_min, min(rpm_max, scaled)), 2)
 
     def calculate_required_views(self, target_revenue_usd: float, category: str) -> Dict[str, float]:
         """
@@ -99,7 +116,7 @@ class MonetizationYieldOptimizer:
         """
         Calculates total expected ad revenue yield in USD R(i) for a topic candidate.
         """
-        rpm = candidate.rpm_score * 35.0  # Scale RPM score [0,1] to real-world USD range [$5, $35]
+        rpm = self._net_rpm_usd(candidate)  # realistic creator-net RPM for the niche
         ctr_est = 0.08 + (candidate.idi_score * 0.04)  # Estimated CTR between 8% and 12%
         
         predicted_views = self.estimate_predicted_views(

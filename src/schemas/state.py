@@ -68,6 +68,8 @@ class TopicCandidate(BaseModel):
     # Phase-aware audience classification added by RSS ingestion layer
     audience_type: str = Field(default="general", description="investor|tech|health|business|blocked")
     niche_category: str = Field(default="Technology & Artificial Intelligence", description="High-RPM niche label")
+    # Real competitor view-demand data (YouTube Data API) when measured, else 0 (unknown)
+    competitor_30d_avg_views: float = Field(default=0.0, description="Avg competitor 30-day views for this topic (0 = not measured)")
 
 
 from enum import Enum

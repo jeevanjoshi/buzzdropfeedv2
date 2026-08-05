@@ -150,7 +150,16 @@ class FactRetrieverAgent:
                 from src.engine.channel_phase_manager import channel_phase_manager
                 if rev["total_expected_revenue_usd"] < channel_phase_manager.REVENUE_GATE_MIN_USD:
                     continue
-            
+
+            # 3. Competitor View-Volume Gate (REVENUE / SCALE only, only when measured)
+            if channel_phase in ("REVENUE", "SCALE"):
+                comp_views = getattr(cand, "competitor_30d_avg_views", 0.0)
+                if comp_views > 0:
+                    gate = monetization_optimizer.filter_by_competitor_volume(
+                        cand.niche_category, comp_views
+                    )
+                    if not gate["passes_revenue_gate"]:
+                        continue
             winner = cand
             break
 

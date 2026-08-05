@@ -3,8 +3,9 @@ import re
 import math
 import datetime
 import uuid
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from src.schemas.state import TopicCandidate, VerifiedFact
+from src.engine.youtube_topic_demand import youtube_topic_demand
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HIGH-RPM GLOBAL ENGLISH FEEDS ONLY
@@ -355,9 +356,21 @@ class LiveRSSIngestionEngine:
         Computes Information Density & Novelty Index (IDI):
         IDI = 1 - max(CosineSim(candidate, past_published_headlines))
         High IDI = fresh topic. Low IDI = already covered.
+
+        Unifies novelty: measured against BOTH the persisted published-topics
+        history (published_topics.json — the SAME store used by the dedup gate)
+        and this run's in-memory candidates, so it is consistent across runs.
         """
+        past = list(self._published_headlines)
+        try:
+            from src.engine.topic_deduplicator import topic_deduplicator
+            for hist in topic_deduplicator.load_published_history():
+                if hist.get("headline"):
+                    past.append(hist["headline"])
+        except Exception:
+            pass
         from src.engine.text_embeddings import calculate_semantic_novelty_index
-        return calculate_semantic_novelty_index(headline, self._published_headlines)
+        return calculate_semantic_novelty_index(headline, past)
 
     def _compute_sat(self, competing_video_count: int) -> float:
         """
@@ -366,6 +379,22 @@ class LiveRSSIngestionEngine:
         Lower SAT = less saturated = better (cost criterion in TOPSIS).
         """
         return min(1.0, competing_video_count / 10.0)
+
+    def _compute_vph(self, headline: str, keywords: List[str]) -> Tuple[Optional[float], float]:
+        """
+        Computes REAL YouTube Competitor Views-per-Hour velocity from public
+        YouTube Data API search/video stats for the topic's keywords.
+        Returns (vph, competitor_30d_avg_views). If the API is unavailable or
+        fails, returns (None, 0.0) so the caller can fall back to the proxy.
+        """
+        query = (" ".join(keywords[:3]) if keywords else headline[:40]).strip()
+        if not query:
+            return None, 0.0
+        demand = youtube_topic_demand.fetch_topic_demand(query)
+        if not demand:
+            return None, 0.0
+        vph = max(0.5, min(3.0, demand["views_per_hour"] / 250.0))
+        return round(vph, 4), float(demand["competitor_30d_avg_views"])
 
     def _estimate_competing_video_count(self, keywords: List[str], coverage_count: int = 1) -> int:
         """
@@ -452,7 +481,13 @@ class LiveRSSIngestionEngine:
             sdi = self._compute_sdi(headline, summary)
             shm = self._compute_shm(headline, ctr_result)
             competing = self._estimate_competing_video_count(keywords, coverage.get(idx - 1, 1))
-            vph = min(3.0, 0.5 + (rpm * 2.0) + (sdi * 0.2))  # RPM-boosted VPH proxy
+
+            # Real YouTube competitor view velocity (falls back to RPM-boosted proxy)
+            measured_vph, comp_30d = self._compute_vph(headline, keywords)
+            if measured_vph is not None:
+                vph = measured_vph
+            else:
+                vph = min(3.0, 0.5 + (rpm * 2.0) + (sdi * 0.2))  # RPM-boosted VPH proxy
             sat = self._compute_sat(competing)
 
             # ── High-RPM Audience Boost — investor/tech topics get +15% TVS ──
@@ -478,6 +513,7 @@ class LiveRSSIngestionEngine:
                 sat_score=sat,
                 audience_type=audience_type,
                 niche_category=niche_category,
+                competitor_30d_avg_views=comp_30d,
             )
             candidates.append(cand)
 
@@ -507,13 +543,18 @@ class LiveRSSIngestionEngine:
                 ctr_result = ctr_predictor.predict_ctr(headline, summary)
                 shm = self._compute_shm(headline, ctr_result)
                 sat = self._compute_sat(self._estimate_competing_video_count(keywords, coverage.get(idx - 1, 1)))
-                vph = min(3.0, 0.5 + rpm * 2.0)
+                measured_vph, comp_30d = self._compute_vph(headline, keywords)
+                if measured_vph is not None:
+                    vph = measured_vph
+                else:
+                    vph = min(3.0, 0.5 + rpm * 2.0)
                 candidates.append(TopicCandidate(
                     candidate_id=f"fallback-{idx:03d}",
                     headline=headline, summary=summary,
                     source_url=item["url"], keywords=keywords,
                     tvs_score=tvs, rpm_score=rpm, idi_score=idi,
-                    sdi_score=sdi, shm_score=shm, vph_score=vph, sat_score=sat
+                    sdi_score=sdi, shm_score=shm, vph_score=vph, sat_score=sat,
+                    competitor_30d_avg_views=comp_30d
                 ))
                 facts.append(VerifiedFact(
                     source_id=f"fallback-fact-{idx:03d}",
