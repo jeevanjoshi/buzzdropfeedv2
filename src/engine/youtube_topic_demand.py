@@ -36,6 +36,7 @@ class YouTubeTopicDemand:
                 os.getenv("YOUTUBE_API_KEY"),
                 os.getenv("GOOGLE_API_KEY"),
                 os.getenv("YOUTUBE_API_KEY_FALLBACK"),
+                os.getenv("YOUTUBE_API_KEY_FALLBACK2"),
             ) if k
         ]
         self._key_idx = 0
