@@ -29,6 +29,16 @@ class YouTubeTopicDemand:
         self._lock = threading.Lock()
         self._client = None
         self._quota = self._load_quota()
+        # API keys in priority order: primary, then fallback(s). Used to rotate
+        # when the primary hits a daily quota (429) error.
+        self._keys = [
+            k for k in (
+                os.getenv("YOUTUBE_API_KEY"),
+                os.getenv("GOOGLE_API_KEY"),
+                os.getenv("YOUTUBE_API_KEY_FALLBACK"),
+            ) if k
+        ]
+        self._key_idx = 0
 
     # ── quota budget ─────────────────────────────────────────────────────────
     def _load_quota(self) -> dict:
@@ -63,20 +73,17 @@ class YouTubeTopicDemand:
         return True
 
     # ── client ───────────────────────────────────────────────────────────────
-    def _get_client(self):
-        if self._client is not None:
-            return self._client
-        api_key = os.getenv("YOUTUBE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
+    def _get_client(self, key: Optional[str] = None):
+        key = key or (self._keys[self._key_idx] if self._keys else None)
+        if not key:
             return None
         try:
             import googleapiclient.discovery
             import httplib2
             http = httplib2.Http(timeout=8)
-            self._client = googleapiclient.discovery.build(
-                "youtube", "v3", developerKey=api_key, http=http
+            return googleapiclient.discovery.build(
+                "youtube", "v3", developerKey=key, http=http
             )
-            return self._client
         except Exception as e:
             logger.warning("YT_DEMAND", f"Failed to build YouTube client: {e}", component="YOUTUBE_DEMAND")
             return None
@@ -97,70 +104,93 @@ class YouTubeTopicDemand:
         return result
 
     def _fetch(self, query: str, max_videos: int) -> Optional[Dict[str, Any]]:
-        client = self._get_client()
-        if client is None:
+        if not self._keys:
             return None
-        try:
-            search_resp = client.search().list(
-                part="id",
-                type="video",
-                q=query,
-                maxResults=max_videos,
-                order="viewCount",
-                relevanceLanguage="en",
-                safeSearch="none",
-            ).execute()
-
-            ids = [
-                it["id"]["videoId"]
-                for it in search_resp.get("items", [])
-                if it.get("id", {}).get("kind") == "youtube#video"
-            ]
-            if not ids:
+        n = len(self._keys)
+        last_err = None
+        for _ in range(n):
+            key_idx = self._key_idx
+            client = self._get_client(self._keys[key_idx])
+            if client is None:
+                self._key_idx = (key_idx + 1) % n
+                continue
+            try:
+                return self._fetch_with_client(client, query, max_videos)
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                # Only rotate keys on quota/rate-limit (429/403); other errors are fatal per-query
+                if "quota" in msg or "429" in msg or "rateLimitExceeded" in msg or "403" in msg:
+                    logger.warning(
+                        "YT_DEMAND",
+                        f"Key {key_idx + 1}/{n} quota/403 on '{query}'; trying next key.",
+                        component="YOUTUBE_DEMAND",
+                    )
+                    self._key_idx = (key_idx + 1) % n  # exhaust this key for the process
+                    continue
+                logger.warning("YT_DEMAND", f"Fetch failed for '{query}': {e}", component="YOUTUBE_DEMAND")
                 return None
+        logger.warning(
+            "YT_DEMAND",
+            f"All {n} YouTube key(s) failed/quota-exceeded for '{query}': {last_err}",
+            component="YOUTUBE_DEMAND",
+        )
+        return None
 
-            vids = client.videos().list(
-                part="statistics,snippet", id=",".join(ids)
-            ).execute()
+    def _fetch_with_client(self, client, query: str, max_videos: int) -> Optional[Dict[str, Any]]:
+        search_resp = client.search().list(
+            part="id",
+            type="video",
+            q=query,
+            maxResults=max_videos,
+            order="viewCount",
+            relevanceLanguage="en",
+            safeSearch="none",
+        ).execute()
 
-            now = datetime.datetime.now(datetime.timezone.utc)
-            total_views = 0
-            total_age_days = 0.0
-            counted = 0
-
-            for item in vids.get("items", []):
-                vc = int(item.get("statistics", {}).get("viewCount", 0) or 0)
-                total_views += vc
-                pub = item.get("snippet", {}).get("publishedAt")
-                age_days = 30.0
-                if pub:
-                    try:
-                        dt = datetime.datetime.fromisoformat(pub.replace("Z", "+00:00"))
-                        age_days = max(0.5, (now - dt).total_seconds() / 86400.0)
-                    except Exception:
-                        age_days = 30.0
-                total_age_days += age_days
-                counted += 1
-
-            if counted == 0 or total_age_days <= 0:
-                return None
-
-            hourly = (total_views / total_age_days) / 24.0
-            return {
-                "query": query,
-                "video_count": counted,
-                "total_views": total_views,
-                "avg_views_per_video": round(total_views / counted, 2),
-                "views_per_hour": round(hourly, 2),
-                "competitor_30d_avg_views": round((total_views / total_age_days) * 30.0, 2),
-            }
-        except Exception as e:
-            logger.warning(
-                "YT_DEMAND",
-                f"Fetch failed for '{query}': {e}",
-                component="YOUTUBE_DEMAND",
-            )
+        ids = [
+            it["id"]["videoId"]
+            for it in search_resp.get("items", [])
+            if it.get("id", {}).get("kind") == "youtube#video"
+        ]
+        if not ids:
             return None
+
+        vids = client.videos().list(
+            part="statistics,snippet", id=",".join(ids)
+        ).execute()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        total_views = 0
+        total_age_days = 0.0
+        counted = 0
+
+        for item in vids.get("items", []):
+            vc = int(item.get("statistics", {}).get("viewCount", 0) or 0)
+            total_views += vc
+            pub = item.get("snippet", {}).get("publishedAt")
+            age_days = 30.0
+            if pub:
+                try:
+                    dt = datetime.datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                    age_days = max(0.5, (now - dt).total_seconds() / 86400.0)
+                except Exception:
+                    age_days = 30.0
+            total_age_days += age_days
+            counted += 1
+
+        if counted == 0 or total_age_days <= 0:
+            return None
+
+        hourly = (total_views / total_age_days) / 24.0
+        return {
+            "query": query,
+            "video_count": counted,
+            "total_views": total_views,
+            "avg_views_per_video": round(total_views / counted, 2),
+            "views_per_hour": round(hourly, 2),
+            "competitor_30d_avg_views": round((total_views / total_age_days) * 30.0, 2),
+        }
 
 
 youtube_topic_demand = YouTubeTopicDemand()
