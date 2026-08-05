@@ -131,6 +131,7 @@ class GlobalState(BaseModel):
     execution_stage: str = "INITIALIZATION"
     selected_topic: Optional[TopicCandidate] = None
     verified_facts: List[VerifiedFact] = Field(default_factory=list)
+    crawled_content: str = ""
     script_data: Optional[ScriptData] = None
     asset_paths: AssetPaths = Field(default_factory=AssetPaths)
     upload_metadata: UploadMetadata = Field(default_factory=UploadMetadata)
