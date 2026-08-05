@@ -312,6 +312,28 @@ class ObserverAgent:
                         pass
                 all_narr_sentences.append(sentence)
 
+        # (C) Single distinctive keyword over-repetition across shots — catches
+        # slop like a topic keyword hammered in almost every shot (Gate 6's global
+        # entropy misses a single repeated token).
+        _STOP = {
+            "about", "their", "which", "would", "could", "these", "those", "being",
+            "been", "there", "still", "while", "after", "before", "other", "under",
+            "again", "through", "every", "where", "because", "between", "during",
+            "without", "around", "however", "people", "thing", "things",
+        }
+        _tok_freq: Dict[str, int] = {}
+        for s in script.shots:
+            for t in set(re.findall(r'\b[a-zA-Z][a-zA-Z0-9-]{4,}\b', s.narration_text.lower())):
+                if t not in _STOP and not t.isdigit():
+                    _tok_freq[t] = _tok_freq.get(t, 0) + 1
+        _n_shots = len(script.shots)
+        if _tok_freq and _n_shots >= 6:
+            _worst = max(_tok_freq, key=_tok_freq.get)
+            if _tok_freq[_worst] >= int(_n_shots * 0.7):
+                violations.append(
+                    f"Keyword over-repetition: '{_worst}' appears in {_tok_freq[_worst]}/{_n_shots} shots. Vary the vocabulary."
+                )
+
         # (B) Source-attribution diversity: scripts should cite multiple distinct
         # authentic sources and not over-attribute to a single one.
         if verified_facts:

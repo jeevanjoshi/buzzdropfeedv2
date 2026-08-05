@@ -43,6 +43,28 @@ def _recency_tag(line: str) -> str:
     return ""
 
 
+# Promotional / advertorial / web-chatter content filter. Applied to EVERY
+# retrieval source (NewsAPI, Wikipedia, Tavily, Firecrawl, Exa) so marketing and
+# ad-style pages cannot pollute the RAG corpus (e.g. AI-tool promo pages leaking
+# into an unrelated story).
+_PROMO_RE = re.compile(
+    r'\b(sign\s?up|subscribe|register|join\s?now|click\s?here|get\s?started|'
+    r'free\s?trial|pricing\s?plan|coupon|discount|promo|checkout|buy\s?now|'
+    r'add\s?to\s?cart|shop\s?(now|today)|order\s?now|affiliate|sponsor|sponsored|'
+    r'advertisement|advertising|marketing|advertised|shopping|sale|discounted|deal|'
+    r'best\sprice|cheap|log\s?in|sign\s?in|start\s?free|download\s?now|'
+    r'grab\s?(your|this)|limited\s?(time|offer)|act\s?now|offer\s?ends|'
+    r'newsletter|join\s?(today|now))\b',
+    re.IGNORECASE,
+)
+
+
+def _is_promotional(text: str) -> bool:
+    """True if a snippet/title contains promotional, ad, or web-chatter language."""
+    return bool(_PROMO_RE.search(text or ""))
+
+
+
 
 class GraphNode:
     def __init__(self, entity_id: str, entity_type: str = "concept"):
@@ -425,6 +447,10 @@ class RAGTopicRetriever:
                 print(f"[RAGRetriever] Firecrawl query failed: {e}")
 
             # NOTE: DuckDuckGo HTML scraping removed — ad-heavy markup corrupts RAG.
+
+        # Promotional/advertorial content filter across ALL sources: drop any
+        # snippet that reads like marketing/web-chatter so it can't pollute the pack.
+        retrieved_facts = [l for l in retrieved_facts if not _is_promotional(l)]
 
         # 1. GraphRAG Triplet Extraction & In-Memory Graph Indexing
         triplets = self.extract_graph_triplets(all_text_corpus)

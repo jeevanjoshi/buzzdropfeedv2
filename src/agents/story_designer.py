@@ -27,15 +27,27 @@ _TOOL_TAG_RE = re.compile(
 )
 _ELLIPSIS_RE = re.compile(r'\s*\[\.\.\.\]\s*')
 
+# Web-community / advertorial chatter that should never appear in narration
+# (e.g. raw pasted quotes like "Hi all! 24M here...", "ICYMI,", "Log in").
+_WEB_CHATTER_RE = re.compile(
+    r'\b(ICYMI|Log\s?in|Sign\s?up|Sign\s?in|Subscribe|Hi\s?all!|Hi\s?everyone|'
+    r'At such short notice|So imagine|Don\'?t miss|Newsletter|Comment\s?below|'
+    r'Follow\s?for|Grab\s?(yours|your)\s?now|Reply\s?to)',
+    re.IGNORECASE,
+)
+
 
 def _clean_narration(narr: str) -> str:
     """
     Fixes 2 & 3: strips raw search-tool citation tags (so narration never cites
-    'Tavily'/'Exa') and '[...]' scrape artifacts from script narration. Applied to
-    the finished script so even the raw LLM output reads as clean prose.
+    'Tavily'/'Exa'), '[...]' scrape artifacts, and pasted web-community/advertorial
+    sentences from script narration. Applied to the finished script so even the raw
+    LLM output reads as clean prose.
     """
     s = _TOOL_TAG_RE.sub("", narr or "")
     s = _ELLIPSIS_RE.sub(" ", s)
+    sents = re.split(r'(?<=[.!?])\s+', s)
+    s = " ".join(x for x in sents if not _WEB_CHATTER_RE.search(x))
     return re.sub(r"\s{2,}", " ", s).strip()
 
 

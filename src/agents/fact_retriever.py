@@ -138,10 +138,20 @@ class FactRetrieverAgent:
         ranked_candidates = self.topsis_engine.rank_candidates(candidates, channel_phase=channel_phase)
         
         # Apply pre-filtering using Audience and Revenue Gates
+        # High-RPM enforcement: if any genuinely-classified (non-general, non-blocked)
+        # niche candidate exists, do not let a low-value 'general' lifestyle topic win,
+        # even in GROWTH phase (protects the revenue orientation of the channel).
+        has_specialized = any(
+            getattr(c, "audience_type", "") not in ("general", "blocked") for c in ranked_candidates
+        )
         winner = None
         for cand in ranked_candidates:
             # 1. Audience Gate (block 'blocked' categories like gossip/entertainment)
             if getattr(cand, "audience_type", "") == "blocked":
+                continue
+
+            # 1b. Prefer high-RPM niches over generic 'general' content when available
+            if has_specialized and getattr(cand, "audience_type", "") == "general":
                 continue
             
             # 2. Revenue Gate (in REVENUE / SCALE phases, expected revenue must be >= MIN)
