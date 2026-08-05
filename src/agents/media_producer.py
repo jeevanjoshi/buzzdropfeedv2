@@ -13,6 +13,12 @@ from mcp_servers.media_cloud.server import (
     ImageGenRequest, KenBurnsRequest, TimelineAssemblyRequest,
     PlaywrightSVGRequest, ChartRequest, GIFRequest
 )
+from src.engine.media_budget import media_budget
+
+# Paid (fal/Replicate Flux) is reserved for these "hero" shots + the thumbnail.
+# All other standard-image shots use FREE assets (Pixabay/synthetic) to stay
+# within the monthly AI image budget (media_budget, ~INR 2000 / month).
+PREMIUM_SHOT_IDS = {1, 8, 12, 15}
 
 
 def merge_ass_subtitle_files(ass_paths: List[str], shot_durations: List[float], output_master_ass: str):
@@ -135,6 +141,65 @@ def enrich_visual_prompt(visual_prompt: str, act_index: int, shot_id: int) -> st
         enriched += ", " + ", ".join(base_anchors)
     enriched += f", {fvd_keywords}."
     return enriched
+
+
+def _generate_free_visual(shot, raw_visual_prompt: str, img_path: str, mp4_path: str) -> bool:
+    """
+    Generates a shot visual using FREE assets only (Pixabay stock, then local
+    synthetic) — for non-premium shots and when the AI image budget is exhausted.
+    Returns True if a ready-to-use video file was produced (specialized).
+    """
+    specialized = False
+    try:
+        from src.engine.pixabay_retriever import pixabay_retriever
+        import requests
+
+        words = re.findall(r'\b\w{3,}\b', raw_visual_prompt)
+        clean_query = " ".join(words[:4]) if words else "abstract"
+        query_lower = raw_visual_prompt.lower()
+        is_vector = any(kw in query_lower for kw in ["vector", "svg", "icon", "logo"])
+        is_illustration = any(kw in query_lower for kw in ["illustration", "graphic", "clipart"])
+        is_video = any(kw in query_lower for kw in ["video", "footage", "b-roll", "timelapse", "motion"])
+
+        if is_video:
+            print(f"[FreeVisual] Searching stock video for: '{clean_query}'")
+            video_results = pixabay_retriever.search_videos(clean_query, limit=1)
+            if video_results:
+                video_url = video_results[0]["video_url"]
+                res_vid = requests.get(video_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+                if res_vid.status_code == 200:
+                    with open(mp4_path, 'wb') as out_file:
+                        out_file.write(res_vid.content)
+                    print(f"[FreeVisual] Downloaded Pixabay stock video to {mp4_path}")
+                    specialized = True
+                else:
+                    raise RuntimeError(f"HTTP {res_vid.status_code}")
+            else:
+                raise RuntimeError("No stock videos on Pixabay.")
+        else:
+            img_type = "photo"
+            if is_vector:
+                img_type = "vector"
+            elif is_illustration:
+                img_type = "illustration"
+            print(f"[FreeVisual] Searching stock images ({img_type}) for: '{clean_query}'")
+            img_results = pixabay_retriever.search_images(clean_query, image_type=img_type, limit=1)
+            if img_results:
+                img_url = img_results[0]["largeImageURL"]
+                res_img = requests.get(img_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+                if res_img.status_code == 200:
+                    with open(img_path, 'wb') as out_file:
+                        out_file.write(res_img.content)
+                    print(f"[FreeVisual] Downloaded Pixabay stock image to {img_path}")
+                else:
+                    raise RuntimeError(f"HTTP {res_img.status_code}")
+            else:
+                raise RuntimeError(f"No {img_type}s on Pixabay.")
+    except Exception as e:
+        print(f"[FreeVisual] Pixabay fallback failed: {e}; using local synthetic.")
+        from mcp_servers.media_cloud.server import generate_synthetic_png
+        generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+    return specialized
 
 
 class MediaProducerAgent:
@@ -345,86 +410,30 @@ class MediaProducerAgent:
                 except Exception as svg_err:
                     print(f"Warning: SVG animation failed: {svg_err}. Falling back to normal image rendering.")
 
-            # Default: Widescreen FLUX image generation + Ken Burns camera pan
+            # Default: Widescreen visual + Ken Burns camera pan.
+            # Paid (fal/Replicate Flux) is used ONLY for premium "hero" shots when
+            # the monthly AI budget allows; every other standard-image shot uses
+            # free assets (Pixabay/synthetic). This protects the ~INR 2000 budget.
             if not is_specialized:
                 if dummy_frames:
                     from mcp_servers.media_cloud.server import generate_synthetic_png
                     generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
                 else:
-                    try:
-                        await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
-                    except Exception as e:
-                        err_msg = str(e).lower()
-                        print(f"Warning: Visual Generation Error on shot {shot.shot_id}: {e}")
-                        
-                        # 1. Content Moderation / Safety Flag
-                        if any(term in err_msg for term in ["moderation", "nsfw", "safety", "policy", "blocked"]):
-                            sanitized_prompt = f"A professional widescreen cinematic documentary representation of clean technology workspace, flat vector style, 16:9 widescreen presentation"
-                            print(f"Re-submitting sanitized safe prompt to Fal.ai/Replicate: '{sanitized_prompt}'")
-                            try:
-                                await generate_flux_image(ImageGenRequest(prompt=sanitized_prompt, output_image_path=img_path))
-                            except Exception as retry_err:
-                                print(f"Warning: Safety prompt retry failed. Falling back to local synthetic generation: {retry_err}")
-                                from mcp_servers.media_cloud.server import generate_synthetic_png
-                                generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
-                        else:
-                            # 2. Rate Limits, Quota Errors, or Network/API issues
-                            print(f"API Error (Rate Limit/Quota). Gracefully falling back to Pixabay stock assets for shot {shot.shot_id} to keep pipeline alive.")
-                            try:
-                                from src.engine.pixabay_retriever import pixabay_retriever
-                                import requests
-                                
-                                # Clean up search query for Pixabay
-                                words = re.findall(r'\b\w{3,}\b', raw_visual_prompt)
-                                clean_query = " ".join(words[:4]) if words else "abstract"
-                                
-                                # Determine best asset type from prompt keywords
-                                query_lower = raw_visual_prompt.lower()
-                                is_vector = any(kw in query_lower for kw in ["vector", "svg", "icon", "logo"])
-                                is_illustration = any(kw in query_lower for kw in ["illustration", "graphic", "clipart"])
-                                is_video = any(kw in query_lower for kw in ["video", "footage", "b-roll", "timelapse", "motion"])
-
-                                if is_video:
-                                    print(f"[Pixabay Fallback] Searching stock videos for: '{clean_query}'")
-                                    video_results = pixabay_retriever.search_videos(clean_query, limit=1)
-                                    if video_results:
-                                        video_url = video_results[0]["video_url"]
-                                        print(f"[Pixabay Fallback] Downloading stock video from {video_url}")
-                                        res_vid = requests.get(video_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-                                        if res_vid.status_code == 200:
-                                            with open(mp4_path, 'wb') as out_file:
-                                                out_file.write(res_vid.content)
-                                            print(f"Successfully downloaded Pixabay stock video to {mp4_path}")
-                                            is_specialized = True
-                                        else:
-                                            raise RuntimeError(f"HTTP status {res_vid.status_code} when downloading video.")
-                                    else:
-                                        raise RuntimeError("No stock videos found on Pixabay.")
-                                else:
-                                    img_type = "photo"
-                                    if is_vector:
-                                        img_type = "vector"
-                                    elif is_illustration:
-                                        img_type = "illustration"
-                                        
-                                    print(f"[Pixabay Fallback] Searching stock images ({img_type}) for: '{clean_query}'")
-                                    img_results = pixabay_retriever.search_images(clean_query, image_type=img_type, limit=1)
-                                    if img_results:
-                                        img_url = img_results[0]["largeImageURL"]
-                                        print(f"[Pixabay Fallback] Downloading stock image from {img_url}")
-                                        res_img = requests.get(img_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-                                        if res_img.status_code == 200:
-                                            with open(img_path, 'wb') as out_file:
-                                                out_file.write(res_img.content)
-                                            print(f"Successfully downloaded Pixabay stock image to {img_path}")
-                                        else:
-                                            raise RuntimeError(f"HTTP status {res_img.status_code} when downloading image.")
-                                    else:
-                                        raise RuntimeError(f"No stock {img_type}s found on Pixabay.")
-                            except Exception as pixabay_err:
-                                print(f"Warning: Pixabay stock media fallback failed: {pixabay_err}. Using local synthetic generation.")
-                                from mcp_servers.media_cloud.server import generate_synthetic_png
-                                generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+                    is_premium = shot.shot_id in PREMIUM_SHOT_IDS
+                    use_paid = is_premium and media_budget.charge_paid_image()
+                    if use_paid:
+                        try:
+                            await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
+                        except Exception as e:
+                            print(f"Warning: Visual Generation Error on shot {shot.shot_id}: {e}. Falling back to free assets.")
+                            _ = _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path)
+                    else:
+                        if not is_premium:
+                            print(f"[MediaProducer] Free asset for shot {shot.shot_id} (non-premium).")
+                        elif media_budget.economy_mode():
+                            print(f"[MediaProducer] Free asset for shot {shot.shot_id} (AI budget saved/exhausted).")
+                        if _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path):
+                            is_specialized = True
 
                 # Outro static text overlay if this is the final shot in the script
                 is_last_shot = (shot.shot_id == len(script.shots))
