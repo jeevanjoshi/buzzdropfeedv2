@@ -4,7 +4,7 @@ import requests
 from src.engine.llm_client import LLMClient
 from src.schemas.state import TopicCandidate, VerifiedFact
 
-client = LLMClient(model="mistralai/mistral-small-24b-instruct-2501")
+client = LLMClient()
 topic = TopicCandidate(
     candidate_id="c1",
     headline="Test Nvidia Microchip Valuation",
