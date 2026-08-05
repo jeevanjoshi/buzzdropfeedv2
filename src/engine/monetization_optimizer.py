@@ -14,17 +14,32 @@ class MonetizationYieldOptimizer:
     """
 
     # Niche RPM Matrix: Category -> (min_net_rpm_usd, max_net_rpm_usd, mid_net_rpm_usd)
-    # Recalibrated to realistic CREATOR-NET RPM benchmarks (CPM x ~0.55 after
-    # YouTube's 45% cut), drawn from published industry data (Creator-Hero,
-    # SocialBlade/InfluencerMarketingHub aggregate). Finance/Investing highest,
-    # enterprise-AI/Tech and Health mid, consumer entertainment lowest.
+    # CREATOR-NET RPM per 1,000 views (what lands in the creator's account, after
+    # YouTube's revenue share/Premium/etc.). Keys are aligned to the category
+    # strings produced by RSS ingestion (AUDIENCE_NICHE_MAP) so revenue forecasts
+    # resolve correctly instead of falling back to defaults.
+    #
+    # Values recalibrated to recent (Q2 2026), US/UK/CA/AU monetized long-form
+    # planning ranges (TubeAnalytics/CreatorsMetrics/OutlierKit). NOTE: RPM is NOT
+    # a fixed percentage of CPM (it includes Premium/memberships), so these are
+    # benchmarked net-RPM bands, not a CPM x multiplier.
+    #
+    # Finance/Investing highest; Legal and Real Estate also top-tier; enterprise-
+    # AI/Tech and Health mid; consumer entertainment lowest.
     NICHE_RPM_MATRIX = {
-        "Technology & Artificial Intelligence": (8.0, 22.0, 14.0),
-        "Global Economics & Finance":           (10.0, 30.0, 18.0),
-        "Space & Scientific Innovation":        (5.0, 14.0, 9.0),
-        "Geopolitics & World Affairs":          (3.0, 10.0, 6.0),
-        "Global Trends & Cultural Infotainment":(1.0, 6.0, 3.0),
-        "Health & Wellness":                    (6.0, 18.0, 11.0),
+        "Personal Finance & Investing":           (8.0, 18.0, 13.0),
+        "Technology & Artificial Intelligence":   (6.0, 14.0, 9.5),
+        "Business & Entrepreneurship":            (7.0, 16.0, 11.0),
+        "Health & Science":                       (5.0, 12.0, 8.0),
+        "Global Trends & Infotainment":           (1.5, 5.0, 3.0),
+        "Legal & Law":                            (9.0, 20.0, 14.0),
+        "Real Estate":                            (7.0, 18.0, 12.0),
+        # Legacy aliases (RAG-derived category names) for safety
+        "Global Economics & Finance":             (8.0, 18.0, 13.0),
+        "Global Trends & Cultural Infotainment":  (1.5, 5.0, 3.0),
+        "Health & Wellness":                      (5.0, 12.0, 8.0),
+        "Space & Scientific Innovation":          (5.0, 12.0, 8.0),
+        "Geopolitics & World Affairs":            (3.0, 9.0, 5.5),
     }
 
     def _net_rpm_usd(self, candidate: TopicCandidate) -> float:
