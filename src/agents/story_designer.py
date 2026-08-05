@@ -8,6 +8,15 @@ from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.llm_client import LLMClient
 from src.engine.rag_retriever import rag_retriever
 from src.engine.bertopic_engine import bertopic_engine
+from src.engine.logger import logger
+
+# Max total LLM generation attempts for the script (1 initial + 2 repair retries).
+# If the live LLM fails to produce a valid script after all attempts (fails the
+# validation gate >=12 shots / >=1500 words, or JSON parse), an exception is
+# raised and the pipeline aborts (no silent template fallback when a live LLM is
+# configured and reachable). The grounded template remains the fallback ONLY for
+# offline mode where no LLM client is available.
+LLM_MAX_ATTEMPTS = 3
 
 
 class StoryDesignerAgent:
@@ -21,6 +30,7 @@ class StoryDesignerAgent:
     def __init__(self, name: str = "StoryDesigner", llm_client: Optional[LLMClient] = None):
         self.name = name
         self.llm_client = llm_client or LLMClient()
+        self.last_llm_source = "UNKNOWN"
 
     def extract_ground_truth_context(self, verified_facts: List[VerifiedFact]) -> Dict[str, Any]:
         """
@@ -164,107 +174,137 @@ class StoryDesignerAgent:
             exchange_tag = "modern corporate media center"
 
         # Attempt Live RAG-Infused Cloud LLM Generation
+        # Attempt Live LLM generation with content-level repair retries (capped).
+        self.last_llm_source = "FALLBACK_GROUNDED_TEMPLATE"
         if self.llm_client.is_available():
-            prompt = f"""
-            You are an investigative documentary director crafting a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
-            CATEGORY: '{category}'
-            DYNAMIC TEMPORAL ANCHOR: Current Date is {current_date_str} ({current_month_year}). Year: {current_year}.
-            TRUSTED SOURCE ATTRIBUTION: Cite diverse actual publications matching the facts from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank).
+            for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+                prompt = f"""
+                You are an investigative documentary director crafting a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
+                CATEGORY: '{category}'
+                DYNAMIC TEMPORAL ANCHOR: Current Date is {current_date_str} ({current_month_year}). Year: {current_year}.
+                TRUSTED SOURCE ATTRIBUTION: Cite diverse actual publications matching the facts from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank).
             
-            FULL RAG KNOWLEDGE PACK (RETRIEVED DEEP FACTS & CONTEXT):
-            {rag_context_text}
-            """
+                FULL RAG KNOWLEDGE PACK (RETRIEVED DEEP FACTS & CONTEXT):
+                {rag_context_text}
+                """
 
-            if revision_violations:
-                violations_str = "\n".join(f"- {v}" for v in revision_violations)
-                prompt += f"""
+                if revision_violations:
+                    violations_str = "\n".join(f"- {v}" for v in revision_violations)
+                    prompt += f"""
 
-            ⚠️ CRITICAL REVISION INSTRUCTION:
-            The previous draft of the script failed quality/factual/anti-slop validation. 
-            You MUST correct the following violations in this new script draft:
-            {violations_str}
-            """
+                ⚠️ CRITICAL REVISION INSTRUCTION:
+                The previous draft of the script failed quality/factual/anti-slop validation. 
+                You MUST correct the following violations in this new script draft:
+                {violations_str}
+                """
 
-            prompt += """
+                prompt += """
 
-            Requirements:
-            1. Exactly 15 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict).
-            2. Return a JSON object with key "shots" containing an array of 15 shot objects.
-            3. Each shot object MUST contain:
-               - "shot_id": integer 1 to 15
-               - "act_index": integer 1 to 6
-               - "narration_text": string of 115-130 words deeply explaining facts from the RAG pack
-               - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
-               - "visual_type": string classification of the visual format. Choose EXACTLY one of:
-                 * "standard_image" (default photorealistic cinematic scenes)
-                 * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
-                 * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
-                 * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
-            4. Spoken Attribution: Dynamically cite the specific actual publisher or source from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank) for each fact in a natural, conversational way. Avoid over-attributing everything to a single source.
-            5. Strict Temporal Grounding: Frame developments within {current_month_year}.
-            6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
-            7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
-            8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
-            9. STORYTELLING INTEGRATION: Seamlessly blend real-world facts from the RAG pack into a single, cohesive narrative arc. Do not output raw scrapped snippets verbatim; rephrase them using rich, evocative English prose.
-            10. CREATIVE CTA INTEGRATION: The final shot (Shot 15) must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
-            """
-            system_prompt = (
-                f"You are a master documentary director and creative storyteller specializing in {category} in {current_year}. "
-                "CRITICAL RULES: "
-                "1. STYLISTIC EXCELLENCE (Vox/Netflix Documentary Style): Write in a gripping, cinematic, and narrative-first tone. "
-                "Never write dry summaries or list scraped facts line-by-line. Instead, weave facts into a suspenseful, unfolding human story. "
-                "2. DIVERSE CITATIONS: Dynamically attribute facts to the actual distinct publishers in the RAG pack (e.g. 'As reported by The New York Times', 'Wired analysis shows', 'Wikipedia records indicate'). Do not attribute everything to a single publisher. "
-                "3. CREATIVE ANALOGIES: Translate complex data, metrics, or technical mechanisms into vivid metaphors and simple physical analogies. "
-                "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
-                "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
-                "6. NEVER start two consecutive shots with the same subject or phrase. Ensure seamless transitions between shots. "
-                "7. Visual prompts must describe unique, high-end cinematic locations, camera moves, and lighting. Return valid JSON only."
-            )
-            llm_result = self.llm_client.generate_json(prompt, system_prompt)
+                Requirements:
+                1. Exactly 15 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict).
+                2. Return a JSON object with key "shots" containing an array of 15 shot objects.
+                3. Each shot object MUST contain:
+                   - "shot_id": integer 1 to 15
+                   - "act_index": integer 1 to 6
+                   - "narration_text": string of 115-130 words deeply explaining facts from the RAG pack
+                   - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
+                   - "visual_type": string classification of the visual format. Choose EXACTLY one of:
+                     * "standard_image" (default photorealistic cinematic scenes)
+                     * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
+                     * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
+                     * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
+                4. Spoken Attribution: Dynamically cite the specific actual publisher or source from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank) for each fact in a natural, conversational way. Avoid over-attributing everything to a single source.
+                5. Strict Temporal Grounding: Frame developments within {current_month_year}.
+                6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
+                7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
+                8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
+                9. STORYTELLING INTEGRATION: Seamlessly blend real-world facts from the RAG pack into a single, cohesive narrative arc. Do not output raw scrapped snippets verbatim; rephrase them using rich, evocative English prose.
+                10. CREATIVE CTA INTEGRATION: The final shot (Shot 15) must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
+                """
+                system_prompt = (
+                    f"You are a master documentary director and creative storyteller specializing in {category} in {current_year}. "
+                    "CRITICAL RULES: "
+                    "1. STYLISTIC EXCELLENCE (Vox/Netflix Documentary Style): Write in a gripping, cinematic, and narrative-first tone. "
+                    "Never write dry summaries or list scraped facts line-by-line. Instead, weave facts into a suspenseful, unfolding human story. "
+                    "2. DIVERSE CITATIONS: Dynamically attribute facts to the actual distinct publishers in the RAG pack (e.g. 'As reported by The New York Times', 'Wired analysis shows', 'Wikipedia records indicate'). Do not attribute everything to a single publisher. "
+                    "3. CREATIVE ANALOGIES: Translate complex data, metrics, or technical mechanisms into vivid metaphors and simple physical analogies. "
+                    "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
+                    "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
+                    "6. NEVER start two consecutive shots with the same subject or phrase. Ensure seamless transitions between shots. "
+                    "7. Visual prompts must describe unique, high-end cinematic locations, camera moves, and lighting. Return valid JSON only."
+                )
+                repair_hint = ""
+                if attempt > 1:
+                    repair_hint = (
+                        "\n\n\u26a0\ufe0f CRITICAL REPAIR INSTRUCTION (PREVIOUS DRAFT FAILED VALIDATION):\n"
+                        "Your previous draft did NOT meet the HARD requirements: it either contained fewer than 12 shots, "
+                        "had narration_text under 115 words, the total fell below 1,500 words, or the JSON was "
+                        "truncated/incomplete. Produce EXACTLY 15 shot objects, each narration_text between 115 and 130 "
+                        "words, so the script total exceeds 1,500 words. Return ONLY one complete, valid JSON object with "
+                        "a single 'shots' key. Do NOT truncate or omit any shot.\n"
+                    )
+                    prompt += repair_hint
+                llm_result = self.llm_client.generate_json(prompt, system_prompt)
 
-            # Parse raw snippets and setup dynamic RAG pool
-            raw_snippets = self.parse_raw_snippets(rag_pack, summary, verified_facts, trusted_org, category, headline, current_month_year)
-            _used_snips = set()
+                # Parse raw snippets and setup dynamic RAG pool
+                raw_snippets = self.parse_raw_snippets(rag_pack, summary, verified_facts, trusted_org, category, headline, current_month_year)
+                _used_snips = set()
 
-            if llm_result and "shots" in llm_result:
-                try:
-                    raw_shots = llm_result["shots"]
-                    shots = []
-                    for idx, s in enumerate(raw_shots, start=1):
-                        shot_id = s.get("shot_id") or s.get("id") or s.get("shot") or idx
-                        act_idx = s.get("act_index") or s.get("act") or s.get("act_num") or min(6, (idx - 1) // 2.5 + 1)
-                        narr = s.get("narration_text") or s.get("narration") or s.get("script") or ""
-                        vis = s.get("visual_prompt") or s.get("visual") or s.get("prompt") or f"Cinematic 16:9 widescreen visual for {headline}, 8k photorealistic."
+                if llm_result and "shots" in llm_result:
+                    try:
+                        raw_shots = llm_result["shots"]
+                        shots = []
+                        for idx, s in enumerate(raw_shots, start=1):
+                            shot_id = s.get("shot_id") or s.get("id") or s.get("shot") or idx
+                            act_idx = s.get("act_index") or s.get("act") or s.get("act_num") or min(6, (idx - 1) // 2.5 + 1)
+                            narr = s.get("narration_text") or s.get("narration") or s.get("script") or ""
+                            vis = s.get("visual_prompt") or s.get("visual") or s.get("prompt") or f"Cinematic 16:9 widescreen visual for {headline}, 8k photorealistic."
                         
-                        v_type_raw = s.get("visual_type") or "standard_image"
-                        if v_type_raw not in ["standard_image", "gif_meme", "matplotlib_chart", "svg_ticker"]:
-                            v_type_raw = "standard_image"
+                            v_type_raw = s.get("visual_type") or "standard_image"
+                            if v_type_raw not in ["standard_image", "gif_meme", "matplotlib_chart", "svg_ticker"]:
+                                v_type_raw = "standard_image"
                         
-                        # Enrich short narration with dynamic RAG facts using semantic search/TF-IDF similarity
-                        if len(narr.split()) < 115:
-                            narr = self.expand_narration_with_semantic_facts(narr, headline, category, raw_snippets, _used_snips, target_word_count=115)
+                            # Enrich short narration with dynamic RAG facts using semantic search/TF-IDF similarity
+                            if len(narr.split()) < 115:
+                                narr = self.expand_narration_with_semantic_facts(narr, headline, category, raw_snippets, _used_snips, target_word_count=115)
 
-                        shots.append(ShotData(
-                            shot_id=int(shot_id),
-                            act_index=int(act_idx),
-                            narration_text=narr,
-                            visual_prompt=vis,
-                            visual_type=VisualType(v_type_raw),
-                            duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1))
-                        ))
+                            shots.append(ShotData(
+                                shot_id=int(shot_id),
+                                act_index=int(act_idx),
+                                narration_text=narr,
+                                visual_prompt=vis,
+                                visual_type=VisualType(v_type_raw),
+                                duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1))
+                            ))
 
-                    total_words = sum(len(s.narration_text.split()) for s in shots)
-                    if total_words >= 1500 and len(shots) >= 12:
-                        runtime = total_words / 150.0 * 60.0
-                        return ScriptData(
-                            title=llm_result.get("title", f"The Hidden Truth Behind {headline[:35]}... ({current_month_year})"),
-                            target_shots=len(shots),
-                            shots=shots,
-                            estimated_runtime_seconds=round(runtime, 1)
+                        total_words = sum(len(s.narration_text.split()) for s in shots)
+                        if total_words >= 1500 and len(shots) >= 12:
+                            self.last_llm_source = "LIVE_LLM"
+                            runtime = total_words / 150.0 * 60.0
+                            return ScriptData(
+                                title=llm_result.get("title", f"The Hidden Truth Behind {headline[:35]}... ({current_month_year})"),
+                                target_shots=len(shots),
+                                shots=shots,
+                                estimated_runtime_seconds=round(runtime, 1)
+                            )
+                        logger.warning(
+                            "SCRIPT_DESIGN",
+                            f"LLM draft attempt {attempt}/{LLM_MAX_ATTEMPTS} failed gate: {len(shots)} shots, {total_words} words (<12 shots or <1500 words).",
+                            component="STORY_DESIGNER"
                         )
-                except Exception as e:
-                    print(f"LLM Script Parse Exception: {e}")
 
+                    except Exception as e:
+                        logger.warning("SCRIPT_DESIGN", f"LLM Script Parse Exception on attempt {attempt}/{LLM_MAX_ATTEMPTS}: {e}", component="STORY_DESIGNER")
+
+            logger.error(
+                "SCRIPT_DESIGN",
+                f"Live LLM script generation failed after {LLM_MAX_ATTEMPTS} attempts; aborting pipeline (no template fallback).",
+                component="STORY_DESIGNER"
+            )
+            raise RuntimeError(
+                f"StoryDesignerAgent: live LLM failed to produce a valid script after {LLM_MAX_ATTEMPTS} attempts. "
+                f"Check OPENROUTER_API_KEY/GEMINI_API_KEY and LLM output (truncation, quota, or malformed JSON)."
+            )
         # ── RAG-Grounded Universal Script Template ────────────────────────────
         # Slice retrieved web snippets across acts so each shot gets a DIFFERENT
         # real-world fact rather than generic boilerplate.
@@ -533,7 +573,7 @@ class StoryDesignerAgent:
                 "fact_grounding": "ENFORCED",
                 "temporal_context": state.current_month_year,
                 "region": region,
-                "llm_mode": "LIVE_LLM" if self.llm_client.is_available() else "FALLBACK_GROUNDED_TEMPLATE"
+                "llm_mode": getattr(self, "last_llm_source", "FALLBACK_GROUNDED_TEMPLATE"),
             },
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )

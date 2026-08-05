@@ -1,5 +1,7 @@
 import feedparser
 import re
+import math
+import datetime
 import uuid
 from typing import List, Dict, Any, Tuple
 from src.schemas.state import TopicCandidate, VerifiedFact
@@ -211,16 +213,20 @@ def fetch_live_rss_feeds(
 
                 if headline and len(headline) > 10:
                     keywords = extract_keywords(f"{headline} {clean_summary}")
-                    
-                    # Position-weighted freshness: article 1 in feed = freshest (ends at 100)
-                    # Article 5 (last fetched per feed) has lower trailing velocity (ends at ~70)
-                    item_pos = len(parsed_items) + 1  # 1-indexed position across all feeds
-                    freshness_end = max(40.0, 100.0 - (item_pos - 1) * 2.5)
-                    search_history = [
-                        max(10.0, freshness_end * (0.3 + 0.1 * i))
-                        for i in range(6)
-                    ]
-                    search_history.append(min(100.0, freshness_end))
+
+                    # Extract real feed publication timestamp for freshness-based TVS.
+                    # feedparser exposes a naive-UTC struct_time via published_parsed etc.
+                    published_ts = None
+                    for parsed_key in ("published_parsed", "updated_parsed", "created_parsed"):
+                        raw_ts = entry.get(parsed_key)
+                        if raw_ts is not None:
+                            try:
+                                published_ts = datetime.datetime(
+                                    *raw_ts[:6], tzinfo=datetime.timezone.utc
+                                )
+                                break
+                            except Exception:
+                                continue
 
                     parsed_items.append({
                         "headline": headline,
@@ -228,9 +234,7 @@ def fetch_live_rss_feeds(
                         "url": link,
                         "source_name": org_name,
                         "keywords": keywords,
-                        "search_history": search_history,
-                        "sentiment_variance": 0.85,
-                        "competing_video_count": 2
+                        "published_ts": published_ts
                     })
         except Exception:
             continue
@@ -270,42 +274,70 @@ class LiveRSSIngestionEngine:
         from src.engine.text_embeddings import embedding_engine, calculate_rpm_cosine_similarity
         return calculate_rpm_cosine_similarity(f"{headline} {' '.join(keywords)}")
 
-    def _compute_tvs(self, keywords: List[str]) -> float:
+    def _time_freshness_score(self, published_ts) -> float:
         """
-        Computes EMA Trend Velocity Score (TVS) using a 7-day simulated search
-        volume proxy derived from keyword frequency in combined live feed corpus.
-        The 7-day window is seeded from the current day's article rank position
-        (earlier articles = fresher = higher trailing velocity).
+        Converts a feed publish timestamp into a [0,100] freshness score using
+        exponential decay: recent articles are near 100, older articles decay
+        toward 0. Half-life is ~48h: recent high-RPM Finance/Tech stories remain
+        revenue-viable for a day or two (matches the 13-min documentary format),
+        while genuinely stale topics decay toward the floor. Falls back to a
+        neutral 60.0 when no timestamp is available (guard R2).
         """
-        from src.engine.trend_velocity import calculate_ema_trend_velocity
-        import hashlib
-        # Deterministic seed from first keyword for consistent pseudo-velocity
-        seed_kw = keywords[0] if keywords else "general"
-        seed = int(hashlib.md5(seed_kw.encode()).hexdigest(), 16) % 100
-        history = [
-            max(10.0, seed * 0.5 + i * 5.0 + (seed % 10))
-            for i in range(6)
-        ]
-        history.append(min(100.0, history[-1] + seed % 20))  # today's spike
-        return calculate_ema_trend_velocity(history)
+        if published_ts is None:
+            return 60.0
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            ts = published_ts
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=datetime.timezone.utc)
+            minutes = max(0.0, (now - ts).total_seconds() / 60.0)
+            half_life_min = 48 * 60  # ~48h freshness half-life
+            return round(100.0 * math.exp(-minutes / half_life_min), 2)
+        except Exception:
+            return 60.0
 
-    def _compute_sdi(self, keywords: List[str]) -> float:
+    def _compute_tvs(self, keywords: List[str], published_ts=None, coverage_count: int = 1) -> float:
         """
-        Computes Sentiment Disruption Index (SDI) via Z-score anomaly detection
-        on the same simulated 7-day search proxy as TVS.
-        SDI > 1.75 = significant spike (anomalous trending event).
+        Computes Trend Velocity Score (TVS) from REAL feed recency (freshness
+        decay over the publish timestamp) blended with cross-feed coverage: how
+        many distinct sources in the corpus surfaced a related keyword. Topics
+        covered by more feeds are treated as higher trending velocity.
         """
-        from src.engine.trend_velocity import calculate_zscore_anomaly
-        import hashlib
-        seed_kw = keywords[0] if keywords else "general"
-        seed = int(hashlib.md5(seed_kw.encode()).hexdigest(), 16) % 100
-        history = [
-            max(10.0, seed * 0.5 + i * 5.0 + (seed % 10))
-            for i in range(6)
-        ]
-        history.append(min(100.0, history[-1] + seed % 20))
-        z_score, _ = calculate_zscore_anomaly(history)
-        return max(0.5, z_score)  # Bound minimum SDI at 0.5
+        freshness = self._time_freshness_score(published_ts)
+        coverage_factor = 1.0 + min(1.0, (max(coverage_count, 1) - 1) * 0.25)
+        return round(min(100.0, freshness * coverage_factor), 2)
+
+    def _compute_sdi(self, headline: str = "", summary: str = "") -> float:
+        """
+        Computes Sentiment Disruption Index (SDI) using REAL sentiment polarity
+        (NLTK VADER) of the headline+summary. Disruption = magnitude of deviation
+        from neutral, so strongly polarising/controversial news scores higher.
+        Bounded to [0.5, 3.0]. Falls back to a neutral 0.5 if VADER is unavailable
+        (guard R1: missing lexicon / no network / download failure).
+        """
+        combined = f"{headline} {summary}"
+        try:
+            import socket
+            import nltk
+            from nltk.sentiment.vader import SentimentIntensityAnalyzer
+            try:
+                nltk.data.find("sentiment/vader_lexicon.zip")
+            except LookupError:
+                # Guard R1: bound the download so a slow/blocked network cannot hang
+                # the pipeline. Falls back to neutral SDI if the download fails.
+                _old_tmo = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(15)
+                try:
+                    nltk.download("vader_lexicon", quiet=True)
+                finally:
+                    socket.setdefaulttimeout(_old_tmo)
+            sia = SentimentIntensityAnalyzer()
+            compound = sia.polarity_scores(combined).get("compound", 0.0)
+            disruption = 0.5 + abs(compound) * 2.0
+            return round(max(0.5, min(3.0, disruption)), 4)
+        except Exception as e:
+            print(f"[RSS] VADER sentiment unavailable for SDI ({e}); using neutral SDI=0.5.")
+            return 0.5
 
     def _compute_shm(self, headline: str, ctr_result: dict) -> float:
         """
@@ -335,20 +367,22 @@ class LiveRSSIngestionEngine:
         """
         return min(1.0, competing_video_count / 10.0)
 
-    def _estimate_competing_video_count(self, keywords: List[str]) -> int:
+    def _estimate_competing_video_count(self, keywords: List[str], coverage_count: int = 1) -> int:
         """
-        Estimates competing YouTube video count as a surrogate from keyword specificity.
-        Niche, specific multi-word keywords = fewer competitors (lower SAT).
-        Generic single-word keywords = many competitors (higher SAT).
+        Estimates competing YouTube video count from REAL cross-feed coverage plus
+        keyword specificity. Topics surfaced by many distinct sources are treated
+        as more saturated (more competitors). Specific long keywords reduce the
+        estimate. Output bounded to [2, 10].
         """
+        base = 2 + (max(coverage_count, 1) - 1) * 2
         avg_kw_len = sum(len(k) for k in keywords) / max(1, len(keywords))
-        # Longer keywords = more specific = fewer competitors
         if avg_kw_len > 8:
-            return 2
+            competitor_estimate = base
         elif avg_kw_len > 5:
-            return 4
+            competitor_estimate = base + 2
         else:
-            return 7
+            competitor_estimate = base + 5
+        return max(2, min(10, competitor_estimate))
 
     def fetch_all_feeds(self, region: str = "all") -> Tuple[List[TopicCandidate], List[VerifiedFact]]:
         """
@@ -363,6 +397,19 @@ class LiveRSSIngestionEngine:
         facts = []
         skipped_ctr = 0
         skipped_irm = 0
+
+        # Cross-feed coverage: for each item, count distinct items sharing >=1 keyword.
+        # Real signal used by TVS (trend velocity) and SAT (saturation proxy).
+        _kw_to_items: Dict[str, set] = {}
+        for _i, _it in enumerate(raw_items):
+            for _k in _it.get("keywords", []):
+                _kw_to_items.setdefault(_k, set()).add(_i)
+        coverage = {}
+        for _i, _it in enumerate(raw_items):
+            _covered = set()
+            for _k in _it.get("keywords", []):
+                _covered |= _kw_to_items.get(_k, set())
+            coverage[_i] = len(_covered)
 
         for idx, item in enumerate(raw_items, start=1):
             headline = item["headline"]
@@ -394,7 +441,7 @@ class LiveRSSIngestionEngine:
                 continue
 
             # ── Compute Real TOPSIS Feature Vector ──────────────────────────
-            tvs = self._compute_tvs(keywords)
+            tvs = self._compute_tvs(keywords, item.get("published_ts"), coverage.get(idx - 1, 1))
             rpm = self._classify_niche_rpm(headline, keywords)
 
             # ── Hard RPM Floor — skip low-monetisation niches ────────────────
@@ -402,9 +449,9 @@ class LiveRSSIngestionEngine:
                 continue
 
             idi = self._compute_idi(headline)
-            sdi = self._compute_sdi(keywords)
+            sdi = self._compute_sdi(headline, summary)
             shm = self._compute_shm(headline, ctr_result)
-            competing = self._estimate_competing_video_count(keywords)
+            competing = self._estimate_competing_video_count(keywords, coverage.get(idx - 1, 1))
             vph = min(3.0, 0.5 + (rpm * 2.0) + (sdi * 0.2))  # RPM-boosted VPH proxy
             sat = self._compute_sat(competing)
 
@@ -453,13 +500,13 @@ class LiveRSSIngestionEngine:
                 headline = item["headline"]
                 summary = item["summary"]
                 keywords = item.get("keywords", [])
-                tvs = self._compute_tvs(keywords)
+                tvs = self._compute_tvs(keywords, item.get("published_ts"), coverage.get(idx - 1, 1))
                 rpm = self._classify_niche_rpm(headline, keywords)
                 idi = self._compute_idi(headline)
-                sdi = self._compute_sdi(keywords)
+                sdi = self._compute_sdi(headline, summary)
                 ctr_result = ctr_predictor.predict_ctr(headline, summary)
                 shm = self._compute_shm(headline, ctr_result)
-                sat = self._compute_sat(self._estimate_competing_video_count(keywords))
+                sat = self._compute_sat(self._estimate_competing_video_count(keywords, coverage.get(idx - 1, 1)))
                 vph = min(3.0, 0.5 + rpm * 2.0)
                 candidates.append(TopicCandidate(
                     candidate_id=f"fallback-{idx:03d}",

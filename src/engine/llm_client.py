@@ -157,7 +157,8 @@ class LLMClient:
                     {"role": "user", "content": prompt}
                 ],
                 "response_format": {"type": "json_object"},
-                "temperature": 0.7
+                "temperature": 0.7,
+                "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "8192"))
             }
             try:
                 print(f"[LLMClient] Invoking Cloud OpenRouter ({self.model})...")
