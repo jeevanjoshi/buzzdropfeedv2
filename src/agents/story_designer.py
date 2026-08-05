@@ -449,11 +449,23 @@ class StoryDesignerAgent:
             f"#Infotainment #{topic.niche_category.replace(' ', '')} #Documentary"
         )
         
+        # Punchy, high-CTR on-image brief (short hook, <= ~5 words) for the thumbnail.
+        if ctr_title:
+            words_ = ctr_title.split()
+            brief = " ".join(words_[:4])
+            if len(brief) > 24:
+                brief = " ".join(words_[:3])
+        else:
+            brief = headline.split()[:4]
+            brief = " ".join(brief) if brief else headline
+        if not brief.strip():
+            brief = headline[:24]
+
         return SEOMetadata(
             title=clean_title,
             description=description,
             tags=list(set(tags)),
-            thumbnail_brief=f"{headline[:25]} Exposed",
+            thumbnail_brief=brief,
             chapter_timestamps=[
                 "0:00 Intro", "2:15 Historical Background", "4:30 Technical Analysis", 
                 "6:45 Real Impact", "9:00 Risk Analysis", "11:15 Conclusion"

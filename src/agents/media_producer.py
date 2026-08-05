@@ -542,12 +542,15 @@ class MediaProducerAgent:
             output_video_path=final_video_path
         ))
 
-        # Generate dynamic widescreen high-CTR Thumbnail
+        # Generate dynamic widescreen high-CTR Thumbnail (uses the CTR-optimized brief)
         thumbnail_path = os.path.join(self.storage_dir, "thumbnail.png")
         try:
             from mcp_servers.media_cloud.server import ThumbnailRequest, generate_thumbnail
-            headline = state.selected_topic.headline if state.selected_topic else "Market Shift"
-            brief = getattr(state.selected_topic, "thumbnail_brief", "") or headline
+            brief = (
+                state.seo_metadata.thumbnail_brief
+                if state.seo_metadata and state.seo_metadata.thumbnail_brief
+                else (state.selected_topic.headline if state.selected_topic else "Market Shift")
+            )
             await generate_thumbnail(ThumbnailRequest(
                 headline_text=brief,
                 output_thumbnail_path=thumbnail_path
@@ -558,9 +561,63 @@ class MediaProducerAgent:
             print(f"Warning: Thumbnail generation failed: {thumb_err}")
 
         asset_paths.final_video = final_video_path
+
+        # Generate vertical Shorts clips (free ffmpeg) to drive growth toward YPP
+        try:
+            asset_paths.shorts = self._generate_shorts(final_video_path, n=3)
+            print(f"[MediaProducer] Generated {len(asset_paths.shorts)} Shorts clip(s).")
+        except Exception as e:
+            print(f"Warning: Shorts generation failed: {e}")
+
         state.asset_paths = asset_paths
         state.execution_stage = "MEDIA_PRODUCED"
         return asset_paths
+
+    def _generate_shorts(self, final_video: str, n: int = 3, seg_len: float = 45.0) -> List[str]:
+        """
+        Cuts 'n' vertical 1080x1920 Shorts clips from the final 16:9 master using
+        ffmpeg (free). Picks ~3 evenly spaced ~45s segments with the master's audio.
+        Returns list of output paths; empty on any error (never breaks the pipeline).
+        """
+        import subprocess
+        if not final_video or not os.path.exists(final_video):
+            return []
+        try:
+            dur = None
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", final_video],
+                capture_output=True, text=True, timeout=30
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                dur = float(r.stdout.strip())
+        except Exception:
+            dur = None
+        if not dur or dur < 60:
+            return []
+        max_seg = max(15.0, min(seg_len, dur / 2.0))
+        starts = [dur * f for f in (0.18, 0.42, 0.66)][:n]
+        out_dir = os.path.join(self.storage_dir, "shorts")
+        os.makedirs(out_dir, exist_ok=True)
+        paths = []
+        for i, st in enumerate(starts, start=1):
+            out = os.path.join(out_dir, f"short_{i}.mp4")
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{st:.1f}", "-t", f"{max_seg:.1f}",
+                "-i", final_video,
+                "-vf", "crop=ih*9/16:ih,scale=1080:1920,setsar=1",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart", out
+            ]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            except Exception:
+                continue
+            if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 1000:
+                paths.append(out)
+        return paths
 
     async def process(self, state: GlobalState, dummy_frames: bool = False) -> A2AMessage:
         """
