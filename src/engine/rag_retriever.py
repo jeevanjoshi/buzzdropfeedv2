@@ -148,6 +148,65 @@ class RAGTopicRetriever:
             print(f"[RAGRetriever] Wikipedia Warning: {e}")
         return results
 
+    def search_tavily_facts(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
+        """
+        Executes a Tavily search (purpose-built for AI/RAG). Returns clean,
+        ad-free snippets — no HTML scraping or ad filtering needed.
+        """
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            return []
+        try:
+            import requests
+            resp = requests.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "search_depth": "basic",
+                    "max_results": max_results,
+                    "include_answer": False,
+                },
+                timeout=12,
+            )
+            data = resp.json()
+            return [
+                {"title": r.get("title", ""), "snippet": r.get("content", "")}
+                for r in data.get("results", [])
+                if r.get("content") and len(r.get("content", "")) > 30
+            ]
+        except Exception as e:
+            print(f"[RAGRetriever] Tavily Warning: {e}")
+            return []
+
+    def search_firecrawl_facts(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
+        """
+        Executes a Firecrawl search (clean crawl API returning page-level snippets).
+        """
+        api_key = os.getenv("FIRECRAWL_API_KEY")
+        if not api_key:
+            return []
+        try:
+            import requests
+            resp = requests.post(
+                "https://api.firecrawl.dev/v1/search",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"query": query, "limit": max_results},
+                timeout=15,
+            )
+            data = resp.json()
+            items = data.get("data", []) if isinstance(data, dict) else []
+            out = []
+            for it in items:
+                desc = it.get("description") or (it.get("metadata", {}) or {}).get("description", "")
+                title = it.get("title", "")
+                if desc and len(str(desc)) > 30:
+                    out.append({"title": title, "snippet": str(desc)})
+            return out
+        except Exception as e:
+            print(f"[RAGRetriever] Firecrawl Warning: {e}")
+            return []
+
     def extract_graph_triplets(self, text: str) -> List[Tuple[str, str, str]]:
         """
         Extracts semantic (Subject, Predicate, Object) triplets from retrieved research text.
@@ -308,16 +367,29 @@ class RAGTopicRetriever:
             except Exception as e:
                 print(f"[RAGRetriever] Wikipedia query failed: {e}")
 
-            # 4. Fallback to DuckDuckGo if no API data was retrieved at all
-            if not has_api_data:
-                try:
-                    items = self.search_duckduckgo_facts(q, max_results=3)
+            # 4. Fetch from Tavily (clean AI/RAG search, ad-free)
+            try:
+                items = self.search_tavily_facts(q, max_results=3)
+                if items:
                     for item in items:
-                        snippet_text = item['snippet']
-                        retrieved_facts.append(f"• [DDG: {item['title']}]: {snippet_text}")
-                        all_text_corpus += " " + snippet_text
-                except Exception as e:
-                    print(f"[RAGRetriever] DuckDuckGo query failed: {e}")
+                        retrieved_facts.append(f"• [Tavily: {item['title']}]: {item['snippet']}")
+                        all_text_corpus += " " + item['snippet']
+                    has_api_data = True
+            except Exception as e:
+                print(f"[RAGRetriever] Tavily query failed: {e}")
+
+            # 5. Fetch from Firecrawl (clean crawl API, page-level snippets)
+            try:
+                items = self.search_firecrawl_facts(q, max_results=3)
+                if items:
+                    for item in items:
+                        retrieved_facts.append(f"• [Firecrawl: {item['title']}]: {item['snippet']}")
+                        all_text_corpus += " " + item['snippet']
+                    has_api_data = True
+            except Exception as e:
+                print(f"[RAGRetriever] Firecrawl query failed: {e}")
+
+            # NOTE: DuckDuckGo HTML scraping removed — ad-heavy markup corrupts RAG.
 
         # 1. GraphRAG Triplet Extraction & In-Memory Graph Indexing
         triplets = self.extract_graph_triplets(all_text_corpus)
@@ -381,6 +453,10 @@ class RAGTopicRetriever:
                 "confidence": confidence,
                 "message": fact_msg
             },
+            "fact_corpus": (
+                f"{ground_truth_block}\n"
+                f"{rag_retrieved_block}"
+            ),
             "full_rag_context_text": (
                 f"TOPIC CATEGORY: {category}\n"
                 f"RAG EXECUTION MODE: {rag_mode.upper()}\n"

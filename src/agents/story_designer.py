@@ -153,6 +153,12 @@ class StoryDesignerAgent:
         rag_pack = rag_retriever.build_rag_knowledge_pack(topic, verified_facts)
         category = rag_pack["category"]
 
+        # Expose the complete RAG fact corpus (verified facts + retrieved sources)
+        # so the Observer audits script claims against the full fact source, not
+        # just the base verified_facts.
+        if state is not None:
+            state.crawled_content = rag_pack.get("fact_corpus", rag_pack.get("full_rag_context_text", ""))
+
         rag_context_text = rag_pack["full_rag_context_text"]
 
         # Stage 3: BERTopic Neural Outline Extraction

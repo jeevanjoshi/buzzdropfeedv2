@@ -19,12 +19,16 @@ class ObserverAgent:
         self.name = name
 
     def audit_fact_grounding(
-        self, script: ScriptData, verified_facts: List[VerifiedFact], topic=None
+        self, script: ScriptData, verified_facts: List[VerifiedFact], topic=None, crawled_content: str = ""
     ) -> List[str]:
         """
         Audits narration text using local NLTK POS tagging and TF-IDF Cosine Similarity.
         As a final resort, runs a single-pass LLM critic check on the flagged sentences
         to filter out natural transitions and avoid false positives.
+
+        crawled_content = the complete RAG fact corpus (verified facts + retrieved
+        sources) exposed by StoryDesigner, so claims grounded in RAG-retrieved data
+        are still verified against the full fact source.
         """
         violations = []
         if not verified_facts:
@@ -40,8 +44,10 @@ class ObserverAgent:
         current_year = str(current_year_int)
         past_years = [str(y) for y in range(current_year_int - 5, current_year_int)]
 
-        # Ground truth corpus built from verified sources
+        # Ground truth corpus built from verified sources + the full RAG fact corpus
         ground_truth_corpus = " ".join([f"{f.headline} {f.summary}" for f in verified_facts]).lower()
+        if crawled_content:
+            ground_truth_corpus += " " + crawled_content.lower()
         gt_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', ground_truth_corpus))
 
         # Prepare for semantic checks
@@ -189,7 +195,7 @@ class ObserverAgent:
 
     def evaluate_script(
         self, script: ScriptData, verified_facts: List[VerifiedFact] = None,
-        topic=None, channel_phase: str = "REVENUE"
+        topic=None, channel_phase: str = "REVENUE", crawled_content: str = ""
     ) -> Tuple[bool, List[str]]:
         """
         Evaluates script constraints:
@@ -250,9 +256,9 @@ class ObserverAgent:
             if "cinematic" not in v_prompt and "8k" not in v_prompt and "photorealistic" not in v_prompt:
                 violations.append(f"Shot #{shot.shot_id} visual prompt lacks aesthetic lighting/AQA keywords.")
 
-        # Anti-Hallucination Audit
+        # Anti-Hallucination Audit — against verified facts + full RAG fact corpus
         if verified_facts:
-            fact_violations = self.audit_fact_grounding(script, verified_facts, topic=topic)
+            fact_violations = self.audit_fact_grounding(script, verified_facts, topic=topic, crawled_content=crawled_content)
             violations.extend(fact_violations)
 
         is_approved = len(violations) == 0
@@ -273,6 +279,7 @@ class ObserverAgent:
             state.verified_facts,
             topic=state.selected_topic,
             channel_phase=state.channel_phase,
+            crawled_content=state.crawled_content,
         )
 
         if is_approved:
