@@ -8,7 +8,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 HIGH_RPM_TAXONOMY = {
     "finance_global": ["fed", "interest", "rate", "inflation", "bonds", "stocks", "sec", "treasury", "market", "portfolio", "wall street", "banking", "economy", "recession", "wealth"],
     "tech_global": ["semiconductor", "ai", "nvidia", "chips", "cloud", "data center", "apple", "microsoft", "google", "meta", "crypto", "tsmc", "quantum", "software", "saas"],
-    "finance_tech_india": ["rbi", "nifty", "sensex", "sebi", "startup", "unicorn", "tata", "reliance", "adani", "infosys", "tcs", "gdp", "upi", "fii", "dii", "ipo", "paytm", "zerodha"]
+    "finance_tech_india": ["rbi", "nifty", "sensex", "sebi", "startup", "unicorn", "tata", "reliance", "adani", "infosys", "tcs", "gdp", "upi", "fii", "dii", "ipo", "paytm", "zerodha"],
+    "legal_law": ["lawsuit", "court", "supreme court", "judge", "verdict", "prosecution", "indictment", "settlement", "regulatory", "compliance", "fine", "penalty", "attorney", "lawyer", "sued"],
+    "real_estate": ["real estate", "mortgage", "housing", "home prices", "property", "rental", "homeowners", "construction", "foreclosure", "realtor"],
 }
 
 

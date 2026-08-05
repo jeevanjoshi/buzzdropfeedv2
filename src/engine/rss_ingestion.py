@@ -90,15 +90,28 @@ HEALTH_SIGNALS = [
     "cancer", "vaccine", "biotech", "wellness", "mental health",
     "nutrition", "fitness", "longevity", "fda", "clinical trial",
 ]
+LEGAL_SIGNALS = [
+    "lawsuit", "lawsuit filed", "court", "supreme court", "judge", "verdict",
+    "prosecution", "indictment", "legal", "attorney", "lawyer", "law firm",
+    "deal", "regulatory", "compliance", "fine", "penalty", "settlement",
+    "ban", "sanction", "lawsuit over", "sued", "sues",
+]
+REAL_ESTATE_SIGNALS = [
+    "real estate", "mortgage", "housing", "housing market", "home prices",
+    "property", "rent", "rental", "homeowners", "construction",
+    "realtor", "foreclosure", "interest rate mortgage",
+]
 
 # Niche RPM mid-points (USD) used to enrich TopicCandidate
 AUDIENCE_NICHE_MAP = {
-    "investor": ("Personal Finance & Investing",        17.5),
-    "tech":     ("Technology & Artificial Intelligence", 16.0),
-    "business": ("Business & Entrepreneurship",          14.0),
-    "health":   ("Health & Science",                    13.0),
-    "general":  ("Global Trends & Infotainment",          5.5),
-    "blocked":  ("Entertainment",                         1.0),
+    "investor":     ("Personal Finance & Investing",        17.5),
+    "tech":         ("Technology & Artificial Intelligence", 16.0),
+    "business":     ("Business & Entrepreneurship",          14.0),
+    "health":       ("Health & Science",                    13.0),
+    "legal":        ("Legal & Law",                         16.0),
+    "real_estate":  ("Real Estate",                         14.0),
+    "general":      ("Global Trends & Infotainment",          5.5),
+    "blocked":      ("Entertainment",                         1.0),
 }
 
 
@@ -153,6 +166,10 @@ def classify_audience_type(headline: str, summary: str) -> str:
     # Signal-based classification (order = RPM priority)
     if any(sig in text for sig in INVESTOR_SIGNALS):
         return "investor"
+    if any(sig in text for sig in LEGAL_SIGNALS):
+        return "legal"
+    if any(sig in text for sig in REAL_ESTATE_SIGNALS):
+        return "real_estate"
     if any(sig in text for sig in TECH_SIGNALS):
         return "tech"
     if any(sig in text for sig in BUSINESS_SIGNALS):
