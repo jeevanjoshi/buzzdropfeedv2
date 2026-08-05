@@ -60,6 +60,7 @@ class StoryDesignerAgent:
             line.strip().lstrip("• ").strip()
             for line in retrieved_context.split("\n")
             if line.strip().startswith("•") and len(line.strip()) > 40
+            and "[DDG:" not in line and "DuckDuckGo" not in line  # skip raw scrape noise
         ]
         seen_snips = set()
         raw_snippets = []
@@ -313,6 +314,7 @@ class StoryDesignerAgent:
             line.strip().lstrip("• ").strip()
             for line in retrieved_context.split("\n")
             if line.strip().startswith("•") and len(line.strip()) > 40
+            and "[DDG:" not in line and "DuckDuckGo" not in line  # skip raw scrape noise
         ]
         # Deduplicate — keep only unique snippets (when DuckDuckGo returns same snippet multiple times)
         seen_snips: set = set()
@@ -510,12 +512,41 @@ class StoryDesignerAgent:
         return script
 
 
+    def _generate_ctr_title(self, headline: str, niche_category: str = "") -> Optional[str]:
+        """
+        Best-effort LLM generation of a high-CTR YouTube title (<=65 chars) using
+        numbers, curiosity/urgency, or a question. Falls back to None (caller uses
+        the headline truncation) when the LLM is unavailable or the output is
+        unusable, so SEO generation never breaks on a single small call.
+        """
+        if not self.llm_client.is_available():
+            return None
+        prompt = (
+            f"Write ONE high-CTR YouTube title, max 65 characters, for an 11-14 minute "
+            f"infotainment documentary. Topic headline: '{headline}'. Niche: '{niche_category}'. "
+            f"Use a number, a curiosity/urgency angle, or a question. Avoid clickbait that "
+            f"contradicts the facts. Return ONLY a JSON object with the key 'title'."
+        )
+        try:
+            result = self.llm_client.generate_json(
+                prompt,
+                "You craft concise, honest high-CTR YouTube titles. Return valid JSON only.",
+            )
+        except Exception:
+            result = None
+        if result and result.get("title"):
+            title = str(result["title"]).strip()
+            if 10 <= len(title) <= 70:
+                return title
+        return None
+
     def generate_seo_metadata(self, topic: TopicCandidate, script: ScriptData) -> SEOMetadata:
         """
         Generates high-CTR SEO metadata (Title, Description, Tags, Thumbnail Brief) alongside the script.
         """
         headline = topic.headline
-        clean_title = headline[:65] if len(headline) > 65 else headline
+        ctr_title = self._generate_ctr_title(headline, getattr(topic, "niche_category", ""))
+        clean_title = ctr_title if ctr_title else (headline[:65] if len(headline) > 65 else headline)
         tags = [t.strip().lower() for t in topic.keywords if len(t.strip()) > 2][:10]
         tags.extend(["infotainment", "documentary", "2026", "analysis", "explained"])
         
