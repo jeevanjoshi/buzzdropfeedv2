@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
@@ -150,39 +151,71 @@ class LLMClient:
                 "HTTP-Referer": "https://github.com/buzzdropfeedv2",
                 "X-Title": "CSVG Autonomous Pipeline"
             }
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt + "\nReturn ONLY valid JSON matching requested schema."},
-                    {"role": "user", "content": prompt}
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.7,
-                "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "8192"))
-            }
-            try:
-                print(f"[LLMClient] Invoking Cloud OpenRouter ({self.model})...")
-                response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
-                response.raise_for_status()
-                data = response.json()
-                
-                if "choices" not in data or not data["choices"]:
-                    print(f"[LLMClient] Cloud API returned no choices. Full response: {data}")
-                    return None
-                
-                choice = data["choices"][0]
-                finish_reason = choice.get("finish_reason")
-                content = choice.get("message", {}).get("content", "")
-                
-                print(f"[LLMClient] Cloud API Response status: {response.status_code}, content length: {len(content)}, finish_reason: {finish_reason}")
-                
-                parsed = self._clean_and_parse_json(content)
-                if parsed is not None:
-                    return parsed
-                else:
-                    print(f"[LLMClient] Failed to parse JSON from Cloud API. Raw content starts with: {content[:200]} ... ends with: {content[-200:] if len(content) > 200 else ''}")
-            except Exception as e:
-                print(f"[LLMClient] Cloud LLM Exception: {e}")
+            # Model fallback chain: primary -> LLM_FALLBACK_MODEL -> LLM_FALLBACK_MODEL2.
+            # Default fallback is a cheap DeepSeek v4 flash (different provider from Google).
+            models = []
+            for m in [
+                self.model,
+                os.getenv("LLM_FALLBACK_MODEL") or "deepseek/deepseek-v4-flash-0731",
+                os.getenv("LLM_FALLBACK_MODEL2"),
+            ]:
+                if m and m not in models:
+                    models.append(m)
+
+            transient_status = {408, 429, 500, 502, 503, 504}
+            for model in models:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt + "\nReturn ONLY valid JSON matching requested schema."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.7,
+                    "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "8192"))
+                }
+                for retry_idx in range(3):  # client-level transient retry
+                    backoff = 2 * (retry_idx + 1)
+                    try:
+                        print(f"[LLMClient] Invoking Cloud OpenRouter ({model}) [try {retry_idx + 1}/3]...")
+                        response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
+
+                        if response.status_code in transient_status:
+                            print(f"[LLMClient] Transient HTTP {response.status_code} from '{model}'; backoff {backoff}s.")
+                            time.sleep(backoff)
+                            continue
+                        if response.status_code >= 400:
+                            print(f"[LLMClient] Permanent HTTP {response.status_code} from '{model}': {response.text[:200]}")
+                            break  # permanent -> move to next model
+
+                        data = response.json()
+                        if "choices" not in data or not data["choices"]:
+                            print(f"[LLMClient] No choices from '{model}': {data}")
+                            time.sleep(backoff)
+                            continue
+
+                        choice = data["choices"][0]
+                        finish_reason = choice.get("finish_reason")
+                        content = choice.get("message", {}).get("content", "")
+                        print(f"[LLMClient] {model} status {response.status_code}, len {len(content)}, finish_reason: {finish_reason}")
+
+                        if choice.get("error") or finish_reason == "error":
+                            print(f"[LLMClient] Model error from '{model}' (finish_reason=error); backoff {backoff}s.")
+                            time.sleep(backoff)
+                            continue  # transient model error -> retry, then next model
+
+                        parsed = self._clean_and_parse_json(content)
+                        if parsed is not None:
+                            return parsed
+                        print(f"[LLMClient] JSON parse failed from '{model}' (finish_reason={finish_reason}); backoff {backoff}s.")
+                        time.sleep(backoff)  # malformed/truncated -> retry, then next model
+                    except requests.exceptions.Timeout:
+                        print(f"[LLMClient] Timeout from '{model}'; backoff {backoff}s.")
+                        time.sleep(backoff)
+                    except Exception as e:
+                        print(f"[LLMClient] Cloud LLM Exception ({model}): {e}")
+                        time.sleep(backoff)
+                # this model exhausted its tries -> move to next fallback model
             return None
 
         # Execute according to user preference
