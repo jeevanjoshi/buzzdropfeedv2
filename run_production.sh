@@ -13,6 +13,34 @@ cd "${SCRIPT_DIR}"
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
+# Help: show usage and exit BEFORE any sync/detach/run side effects.
+if [[ " $* " == *" --help "* ]] || [[ " $* " == *" -h "* ]]; then
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Run the CSVG pipeline in the background, sync code + logs to the Raspberry
+Pi edge node, and email the result when it finishes.
+
+Options:
+  --no-detach            Run in the foreground; keep all flags; skip Pi sync
+  --rag <MODE>           Research mode: grounded|scraper (Default: 'scraper')
+  --renderer <ENGINE>    Renderer: ffmpeg|moviepy (Default: 'ffmpeg')
+  --crossfade <SEC>      Crossfade duration in seconds (float)
+  --resume               Auto-resume the latest unfinished checkpoint
+  -h, --help             Display this help menu and exit
+
+Notes:
+  Only --no-detach, --resume, --renderer, --crossfade, and --rag survive
+  the detach. Use --no-detach to keep flags like --till-upload or --offline.
+
+Examples:
+  $(basename "$0")
+  $(basename "$0") --rag grounded
+  $(basename "$0") --no-detach --rag scraper --till-upload
+EOF
+    exit 0
+fi
+
 # Configuration
 # Each run gets its own timestamped log file. LOG_FILE is inherited (exported) from
 # the detaching parent so the background child writes to the exact same file.
@@ -35,8 +63,16 @@ if [ "${1:-}" != "--no-detach" ] && command -v rsync >/dev/null 2>&1; then
 fi
 
 # Extract switches that must survive the background detach and reach the pipeline.
+RAG_ARG=""
 RENDERER_ARG=""
 CROSSFADE_ARG=""
+if [[ "$*" == *"--rag"* ]]; then
+    for ((i=1; i<=$#; i++)); do
+        if [[ "${!i}" == "--rag" ]]; then
+            j=$((i+1)); RAG_ARG="--rag ${!j}"; break
+        fi
+    done
+fi
 if [[ "$*" == *"--renderer"* ]]; then
     for ((i=1; i<=$#; i++)); do
         if [[ "${!i}" == "--renderer" ]]; then
@@ -73,8 +109,8 @@ if [ "${1:-}" != "--no-detach" ]; then
     fi
 
     echo "[LAUNCH] Launching CSVG Production Pipeline in the background..."
-    # Launch itself with --no-detach in the background, forwarding resume + renderer + crossfade
-    nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} > /dev/null 2>&1 &
+    # Launch itself with --no-detach in the background, forwarding resume + renderer + crossfade + rag
+    nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${RAG_ARG} > /dev/null 2>&1 &
     PID=$!
     echo "[SUCCESS] Pipeline successfully spawned in background (PID: ${PID})."
     echo "[LOGS] Real-time logs: tail -f ${LOG_FILE}"

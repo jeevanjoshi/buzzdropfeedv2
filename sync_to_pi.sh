@@ -31,6 +31,9 @@ rsync -avz --delete \
     --exclude '*.bin' \
     --exclude '*.png' \
     --exclude 'auth_url.txt' \
+    --exclude '.hf_cache/' \
+    --exclude '.huggingface/' \
+    --exclude 'sentence_transformers/' \
     -e ssh \
     ./ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/"
 

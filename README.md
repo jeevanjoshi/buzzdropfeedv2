@@ -253,9 +253,59 @@ python3 main.py --global
 # Offline Dry-Run Mode (Uses local synthetic media generators for zero-cost testing)
 python3 main.py --offline
 
-# Run full automated test suite
+# Run full automated test suite (single hermetic smoke test)
 python3 run_tests.py
+#   -> tests/test_smoke.py: POSITIVE/NEGATIVE/EDGE end-to-end pipeline cases.
+#      No live/network calls, no Raspberry Pi interaction, no media generation.
+#      Safe to run without .env or any services.
 ```
+
+> **Note on `--help`:** there is no `--help` flag. `main.py` parses arguments by
+> scanning `sys.argv` for known substrings (no `argparse`), so an unrecognized
+> flag like `--help` is **silently ignored** and the pipeline simply runs with
+> defaults. `run_production.sh` does not define `--help` either.
+
+#### `main.py` flags
+
+| Flag | Meaning | Example |
+|---|---|---|
+| `--global` | Select target region = global (vs `--india`) | `python3 main.py --global` |
+| `--india` | Select target region = India | `python3 main.py --india` |
+| `--offline` | Use canned topic candidates instead of live RSS (NOT a full dry-run — RAG/LLM/visuals/TTS/publish still run) | `python3 main.py --offline` |
+| `--till-upload` / `--no-upload` | Stop before publishing (no YouTube upload) | `python3 main.py --global --till-upload` |
+| `--dummy-frames` / `--dummy-frame` | Synthetic visuals, skips fal/Replicate | `python3 main.py --global --dummy-frames` |
+| `--renderer` | `ffmpeg` (default) or `moviepy` | `python3 main.py --global --renderer moviepy` |
+| `--crossfade` | Crossfade seconds (float) | `python3 main.py --global --crossfade 1.0` |
+| `--resume` | Resume from a checkpoint `logs/state_<id>.json` | `python3 main.py --resume csvg-exec-20260805-185905` |
+| `--rag` | **A/B switch:** `grounded` uses the Google Search grounding research pass; anything else uses the 5-scraper RAG path | `python3 main.py --global --rag grounded` |
+
+#### `run_production.sh` flags
+
+| Flag | Meaning | Example |
+|---|---|---|
+| *(none)* | Detaches to the background: syncs code to the Pi, offers a checkpoint resume, spawns child, exits | `./run_production.sh` |
+| `--no-detach` | Block/run in the foreground (keeps ALL flags; skips Pi code sync) | `./run_production.sh --no-detach --rag grounded` |
+| `--rag` | Same A/B switch as `main.py` (survives the detach) | `./run_production.sh --rag grounded` |
+| `--renderer` | Survives the detach | `./run_production.sh --renderer moviepy` |
+| `--crossfade` | Survives the detach | `./run_production.sh --crossfade 1.0` |
+| `--resume` | **Not user-passed** — auto from latest `logs/state_*.json` when it did not reach `PUBLISHED_SUCCESS` (y/N, 30s default N) | *(auto via prompt)* |
+
+> ⚠️ In detaching mode `run_production.sh` only forwards
+> `--no-detach --resume --renderer --crossfade --rag` to the pipeline. Flags such
+> as `--till-upload`, `--offline`, `--india`, or `--dummy-frames` are **dropped**
+> unless you use `--no-detach`. Example:
+> `./run_production.sh --no-detach --rag grounded --till-upload`.
+
+#### Environment flags (in `.env`, read at startup)
+
+| Variable | Meaning |
+|---|---|
+| `USE_SEMANTIC_GATES=1` | Enables the MiniLM semantic Observer backend (truthy). This is the **semantic gate flag** — it is env-only, there is **no** `--semantic` CLI flag. Falls back to TF-IDF/NLTK when off/deps absent. |
+| `ALLOW_SOFT_APPROVAL=1` (default) / `0` | `1` = style-class violations are non-blocking after the 3-revision loop; `0` = all-or-nothing. |
+| `RAG_GROUNDED=1` | Default for the `--rag` switch when no flag is passed (likely ON when set). |
+| `GROUNDING_MODEL` | Grounded-research model (default `gemini-2.5-flash`). |
+| `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` / `GOOGLE_GENAI_USE_ENTERPRISE` | Vertex/ADC config required for `--rag grounded`. |
+| `HF_HOME` / `TRANSFORMERS_CACHE` | Model cache dir (repo-local `.hf_cache/`) for the semantic encoder. |
 
 ### 3. YouTube Video Quality & Sync Auditor
 You can audit already uploaded videos or generated videos for subtitle sync, speech drift, coherence, and relevance using the verifier script:

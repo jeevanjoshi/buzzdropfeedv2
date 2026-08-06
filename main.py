@@ -1,21 +1,73 @@
 import sys
 import asyncio
-from src.agents.orchestrator import OrchestratorAgent
-
 
 from dotenv import load_dotenv
 
-# Load configuration variables from .env file
+# Load configuration variables from .env file BEFORE importing agents so modules
+# that read env flags at import/init time (e.g. USE_SEMANTIC_GATES) see them.
 load_dotenv()
+
+from src.agents.orchestrator import OrchestratorAgent
+
+
+def print_help() -> None:
+    """Print usage for the CSVG pipeline and exit. main.py has no argparse, so
+    help is handled as an explicit early-exit (never runs the pipeline)."""
+    print("""CSVG Autonomous YouTube Pipeline — usage
+========================================
+
+Run the end-to-end pipeline (RSS -> topic -> script -> visuals -> render -> publish).
+Unknown flags are silently ignored; there is no positional-arg help beyond this page.
+
+BASIC
+  python3 main.py                                 # default region + publish
+  python3 main.py --global                         # target global region (default-ish)
+  python3 main.py --india                          # target India region
+  python3 main.py --offline                        # canned topic candidates (NOT a full dry-run:
+                                                   #   RAG, LLM, visuals, TTS, publish still run)
+
+DISTRIBUTION / FEED
+  --till-upload | --no-upload    stop before YouTube publish
+  --dummy-frames | --dummy-frame synthetic visuals, skip fal/Replicate
+
+RENDERING
+  --renderer ffmpeg|moviepy      renderer to use (default ffmpeg)
+  --crossfade <seconds>          crossfade duration (float, default 0.5)
+
+RAG / RESEARCH  (A/B: Google Search grounding vs 5-scraper path)
+  --rag grounded                 use the Google Search grounding research pass
+  --rag scraper                  use the 5-scraper RAG path (default)
+
+RESUME
+  --resume <pipeline_id>         resume from logs/state_<pipeline_id>.json
+
+EXAMPLES
+  python3 main.py --global --till-upload                 # real run, no publish
+  python3 main.py --global --rag grounded --till-upload  # grounded research arm, no publish
+  python3 main.py --global --rag scraper                 # scraper RAG arm (default), publish
+  python3 main.py --resume csvg-exec-20260805-185905     # resume a specific run
+  python3 main.py --offline --dummy-frames --till-upload # offline-ish smoke test
+
+NOTES
+  - Not a real --help parser: shown only when --help / -h appears in argv.
+  - Semantic gates (USE_SEMANTIC_GATES) and soft-approval (ALLOW_SOFT_APPROVAL)
+    are env-only (.env), not CLI flags.
+  - See README.md and debugging_060820260057.md for run_production.sh flags.
+""")
 
 
 def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print_help()
+        return
+
     use_live_rss = True
     region = "all"
     publish = True
     dummy_frames = False
     renderer = "ffmpeg"
     crossfade = 0.5
+    rag_mode = "scraper"
 
     state = None
     if len(sys.argv) > 1:
@@ -25,6 +77,13 @@ def main():
             region = "india"
         elif "--global" in sys.argv:
             region = "global"
+        if "--rag" in sys.argv:
+            for i, arg in enumerate(sys.argv):
+                if arg == "--rag" and i + 1 < len(sys.argv):
+                    if sys.argv[i + 1] in ("grounded", "g"):
+                        rag_mode = "grounded"
+                    else:
+                        rag_mode = "scraper"
         if "--till-upload" in sys.argv or "--no-upload" in sys.argv:
             publish = False
         if "--dummy-frames" in sys.argv or "--dummy-frame" in sys.argv:
@@ -64,7 +123,8 @@ def main():
         dummy_frames=dummy_frames,
         state=state,
         renderer=renderer,
-        crossfade=crossfade
+        crossfade=crossfade,
+        rag_mode=rag_mode
     ))
 
     print(f"Summary of Pipeline Execution:")

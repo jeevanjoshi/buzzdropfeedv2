@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import copy
 import datetime
 import asyncio
 from typing import Dict, Any, Optional, Tuple, List
@@ -8,7 +9,7 @@ from src.schemas.state import GlobalState
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.agents.fact_retriever import FactRetrieverAgent
 from src.agents.story_designer import StoryDesignerAgent
-from src.agents.observer import ObserverAgent
+from src.agents.observer import ObserverAgent, is_soft_violation, observer_quality_score
 from src.agents.media_producer import MediaProducerAgent
 from src.agents.publisher import PublisherAgent
 from src.engine.quality_verifier import quality_verifier
@@ -52,11 +53,21 @@ class OrchestratorAgent:
         dummy_frames: bool = False,
         state: Optional[GlobalState] = None,
         renderer: str = "ffmpeg",
-        crossfade: float = 0.5
+        crossfade: float = 0.5,
+        rag_mode: str = "scraper"
     ) -> GlobalState:
         """
         Executes complete autonomous pipeline run with structured logging & trajectory tracing.
         """
+        # A/B switch: "grounded" uses the Google Search research pass (see
+        # src/engine/grounded_search.py); anything else uses the scraper RAG path.
+        rag_retriever.set_grounded(rag_mode == "grounded")
+        logger.info(
+            "INITIALIZATION",
+            f"RAG mode: {rag_mode} ({'Google Search grounding' if rag_mode == 'grounded' else '5-scraper path'})",
+            pipeline_id=pipeline_id or (state.pipeline_id if state else None),
+            component="RAG_RETRIEVER",
+        )
         # Renderer switch: "ffmpeg" (default, probe-driven concat) or "moviepy" (timeline composer).
         if renderer in ("moviepy", "ffmpeg"):
             self.media_producer.renderer = renderer
@@ -259,6 +270,8 @@ class OrchestratorAgent:
                     revision_ok = False
                     last_violations: List[str] = []
                     last_quality_error: Optional[str] = None
+                    best_script = None
+                    best_script_score = -1.0
                     for attempt in range(1, MAX_REVISIONS + 1):
                         violations = []
                         if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
@@ -272,6 +285,12 @@ class OrchestratorAgent:
                             pipeline_id=p_id, component="OBSERVER"
                         )
                         msg_script = self.story_designer.process(state, revision_violations=violations)
+                        # Keep the highest-scoring draft across revisions (revisions can
+                        # fix one nit but regress elsewhere; score = paraphrase diversity).
+                        _draft_score = observer_quality_score(state.script_data)
+                        if _draft_score > best_script_score:
+                            best_script_score = _draft_score
+                            best_script = copy.deepcopy(state.script_data)
                         msg_obs = self.observer.process(state)
                         quality_pass, quality_error = run_script_quality_checks()
 
@@ -283,15 +302,38 @@ class OrchestratorAgent:
                             break
 
                     if not revision_ok:
-                        # Report the ACTUAL failure: prefer Observer violations when the
-                        # observer rejected; otherwise surface the failing quality gate.
+                        # Soft approval: if the only remaining Observer violations are
+                        # style-class (verbatim-copy/repetition/source-diversity/visual)
+                        # AND the mandatory quality gates still pass, accept the BEST
+                        # scored draft with a warning instead of hard-aborting. Any
+                        # fact/temporal/revenue/audience/structural violation or a failing
+                        # quality gate still aborts (those are hard invariants).
+                        remaining = last_violations
                         if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
-                            detail = msg_obs.payload.get("violations")
+                            remaining = msg_obs.payload.get("violations", last_violations)
+                        hard = [v for v in remaining if not is_soft_violation(v)]
+                        allow_soft = os.getenv("ALLOW_SOFT_APPROVAL", "1").strip().lower() in ("1", "true", "yes")
+                        if allow_soft and quality_pass and not hard and best_script is not None:
+                            state.script_data = best_script
+                            logger.warning(
+                                "PHASE_2_OBSERVER_AUDIT",
+                                f"Soft approval: {len(remaining)} style-only violation(s) after {MAX_REVISIONS} "
+                                f"revisions; accepting best-scored draft (score {best_script_score:.3f}). "
+                                f"Remaining: {remaining}",
+                                pipeline_id=p_id, component="OBSERVER"
+                            )
+                            msg_obs = self.observer.process(state)
+                            state.execution_stage = "SCRIPT_APPROVED"
                         else:
-                            detail = last_quality_error or last_violations
-                        raise RuntimeError(
-                            f"Script failed validation after {MAX_REVISIONS} revisions: {detail}"
-                        )
+                            # Report the ACTUAL failure: prefer Observer violations when the
+                            # observer rejected; otherwise surface the failing quality gate.
+                            if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
+                                detail = msg_obs.payload.get("violations")
+                            else:
+                                detail = last_quality_error or last_violations
+                            raise RuntimeError(
+                                f"Script failed validation after {MAX_REVISIONS} revisions: {detail}"
+                            )
 
                 logger.info("PHASE_2_OBSERVER_AUDIT", "Observer Audit & Quality Gates Passed 100%! Script approved.", pipeline_id=p_id, component="OBSERVER")
                 tracer.record_step(state, "SCRIPT_APPROVED", message=msg_obs)

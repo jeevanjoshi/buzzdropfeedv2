@@ -1,8 +1,123 @@
 import re
+import os
+import gc
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer, HashingVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+
+# The backend is lazily loaded only when USE_SEMANTIC_GATES=1 AND torch/
+# transformers are present (master-only; the Pi and hermetic tests keep the
+# TF-IDF fallback). The model stays RESIDENT for the process lifetime: the
+# ~0.8 GB cost is far cheaper than a 10-20s reload per pipeline run (4-6/day),
+# and release() only frees the model weights (~50 MB) anyway since torch stays
+# imported in-process. Call release() manually only if you need that headroom
+# back mid-run.
+#
+# NOTE: the flag is read LAZILY (at each check), not at import time, because
+# entrypoints call load_dotenv() AFTER importing this module.
+def _semantic_flag() -> bool:
+    return os.getenv("USE_SEMANTIC_GATES", "").strip().lower() in ("1", "true", "yes")
+
+
+class SemanticEmbeddingBackend:
+    MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+    def __init__(self, enabled: Optional[bool] = None):
+        self._enabled_override = enabled
+        self._model = None
+
+    def _enabled(self) -> bool:
+        return self._enabled_override if self._enabled_override is not None else _semantic_flag()
+
+    @property
+    def available(self) -> bool:
+        """True if the backend is enabled and its deps are importable."""
+        if not self._enabled():
+            return False
+        if self._model is not None:
+            return True
+        try:
+            import torch  # noqa: F401
+            import sentence_transformers  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def load(self) -> None:
+        """Loads the MiniLM model (first call ~10-20s on 2 vCPU). No-op if already
+        loaded, disabled, or deps are missing."""
+        if not self._enabled() or self._model is not None:
+            return
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(self.MODEL_NAME)
+        except Exception:
+            self._model = None
+
+    def release(self) -> None:
+        """Frees the model weights + torch overhead. The model re-loads lazily on
+        next use; not called automatically (resident by design)."""
+        if self._model is None:
+            return
+        self._model = None
+        gc.collect()
+
+    def encode_batch(self, texts: List[str]) -> Optional[np.ndarray]:
+        """Normalised sentence vectors (n, 384) or None when unavailable."""
+        if not self._enabled():
+            return None
+        self.load()
+        if self._model is None:
+            return None
+        try:
+            vecs = self._model.encode(list(texts), normalize_embeddings=True, show_progress_bar=False)
+            return np.asarray(vecs, dtype=np.float32)
+        except Exception:
+            return None
+
+
+semantic_embedder = SemanticEmbeddingBackend()
+
+
+def semantic_pairwise_similarity(texts: List[str]) -> Optional[np.ndarray]:
+    """Pairwise cosine-similarity matrix (n x n) from MiniLM embeddings, or None
+    when the semantic backend is unavailable (callers fall back to TF-IDF)."""
+    if not texts or not semantic_embedder.available:
+        return None
+    vecs = semantic_embedder.encode_batch(texts)
+    if vecs is None:
+        return None
+    return vecs @ vecs.T
+
+
+def semantic_max_similarity(query_text: str, candidates: List[str]) -> Optional[float]:
+    """Highest MiniLM cosine similarity between one text and a list of candidates
+    (e.g. a narration sentence vs the clean RAG corpus). None when unavailable."""
+    if not candidates or not semantic_embedder.available:
+        return None
+    vecs = semantic_embedder.encode_batch([query_text] + candidates)
+    if vecs is None:
+        return None
+    sims = vecs[0] @ vecs[1:].T
+    return float(sims.max()) if len(sims) else None
+
+
+def semantic_topic_membership(token: str, anchor_words: List[str]) -> Optional[float]:
+    """
+    Max MiniML cosine similarity between one narration token and a set of topic
+    anchor words (topic keywords + headline/summary tokens). Single-word
+    embeddings are noisy, so matching against the TOPIC'S OWN words (rather than
+    a whole-sentence anchor) gives a clean signal: 'chinese'~'china' lands ~0.68,
+    while off-topic filler like 'gadget' stays ~0.3. None when unavailable.
+    """
+    if not anchor_words or not semantic_embedder.available:
+        return None
+    vecs = semantic_embedder.encode_batch([token] + anchor_words)
+    if vecs is None:
+        return None
+    return float((vecs[0] @ vecs[1:].T).max())
 
 
 HIGH_RPM_TAXONOMY = {

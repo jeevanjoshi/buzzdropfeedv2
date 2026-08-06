@@ -1,0 +1,13 @@
+# Master-only heavy ML dependencies (OCI cloud host ONLY — never the Pi).
+#
+# These power the Observer's semantic gates (paraphrase-copy detection, topic
+# membership, paraphrase-diversity scoring). Install on the master:
+#   source venv/bin/activate && pip install -r requirements-master.txt
+# and enable with USE_SEMANTIC_GATES=1 in .env. The pipeline degrades to the
+# TF-IDF/NLTK fallback automatically when these are absent, so they are safe
+# to skip on offline/hermetic test runners.
+torch>=2.2
+transformers>=4.40
+sentence-transformers>=3.0
+# Google Search Grounding POC (Vertex/ADC on the master host; RAG_GROUNDED=1).
+google-genai>=1.0.0

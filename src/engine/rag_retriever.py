@@ -22,6 +22,34 @@ MIN_DEEP_SOURCE_WORDS = 250     # a rich on-topic article grounds a full script 
 # cap so the rich keyword-driven retrieval actually reaches the LLM prompt.
 MAX_RETRIEVED_LINES = 15
 
+# ── Boilerplate / article-junk stripping ────────────────────────────────────
+# Web pages (esp. news rags like NYT) leak ad/credit/nav boilerplate into the
+# deep-crawled source article. If it reaches the RAG corpus it (a) pollutes the
+# ground truth the Observer audits against, and (b) gets copied verbatim into
+# narration (e.g. "SKIP ADVERTISEMENT / Listen · / Video by ..."). This regex
+# strips those lines/sentences BEFORE they enter the corpus or the snippet pool.
+_BOILERPLATE_RE = re.compile(
+    r'\b(SKIP ADVERTISEMENTS?\b|Read\s?More|Share\s?(this)?\s?(article|story)?|'
+    r'Subscribe\s?(now)?|Sign\s?up|Sign\s?in|Log\s?in|Log\s?out|Listen(?:\s|·)|'
+    r'Play\s?(a|the)?\s?(video)?|Video\s?by\b|Written\s?by\b|Reporting\s?by\b|'
+    r'By\s+[A-Z][A-Za-z. -]+\s+(For|via)?\s*The\s+[A-Z]|Guest\s+Author|'
+    r'Supported\s?by\b|Advertisement\b|Advertorial\b|Sponsored(?: Content)?\b|'
+    r'Newsletter\b|Comments?(?:\s+closed)?\b|Recommended(?: Stories| Videos)?\b|'
+    r'Most\s?Read\b|Trending\b|Menu\b|Close\b|Skip\s?to\s?content\b|'
+    r'Privacy\s?Policy\b|Terms\s?of\s?Service\b|Cookie\s?Preferences?\b)',
+    re.IGNORECASE,
+)
+
+
+def _strip_boilerplate(text: str) -> str:
+    """Removes ad/credit/nav boilerplate lines or sentences from crawled text and
+    collapses whitespace. Facts, numbers and names are preserved."""
+    if not text:
+        return ""
+    parts = re.split(r'(?<=[.!?])\s+', text)
+    kept = [p for p in parts if not _BOILERPLATE_RE.search(p)]
+    return re.sub(r'\s+', ' ', " ".join(kept)).strip()
+
 _TOPIC_STOPWORDS = {
     "with", "from", "that", "this", "have", "their", "there", "would",
     "about", "which", "across", "more", "than", "into", "what", "they",
@@ -140,6 +168,14 @@ class RAGTopicRetriever:
         # paid/network searches on repeated runs for the same topic (cost + speed).
         self._rag_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._rag_cache_ttl_s = 6 * 3600
+        # A/B switch for the Google Search grounding research pass. Set programmatically
+        # from the orchestrator --rag grounded|scraper flag, or from env RAG_GROUNDED=1.
+        # Defaults to the scraper path so pipeline behavior is unchanged unless opted in.
+        self.use_grounded = os.getenv("RAG_GROUNDED", "").strip().lower() in ("1", "true")
+
+    def set_grounded(self, enabled: bool) -> None:
+        self.use_grounded = bool(enabled)
+        print(f"[RAGRetriever] Google Search grounding mode: {'ON' if self.use_grounded else 'OFF'}")
 
     def search_duckduckgo_facts(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
         """
@@ -324,7 +360,7 @@ class RAGTopicRetriever:
         s = re.sub(r"(?is)<[^>]+>", " ", s)
         s = html.unescape(s)
         s = re.sub(r"\s+", " ", s)
-        return s.strip()
+        return _strip_boilerplate(s)
 
     def _clean_article_markdown(self, md: str) -> str:
         """Lightly cleans a markdown article body (Firecrawl returns markdown)."""
@@ -332,7 +368,7 @@ class RAGTopicRetriever:
         s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)
         s = re.sub(r"^\s*(#|>|[-*]\s*)", "", s, flags=re.M)
         s = re.sub(r"\s+", " ", s)
-        return s.strip()
+        return _strip_boilerplate(s)
 
     def _scrape_selected_article(self, url: str, max_chars: int = 4000) -> str:
         """
@@ -563,12 +599,30 @@ class RAGTopicRetriever:
         headline = topic.headline
         summary = topic.summary
         keywords = [k for k in topic.keywords if len(k) > 3][:6]
+        cache_key = f"{headline}|{len(verified_facts)}"
+
+        # OPT-IN Google Search grounding research pass (POC, env-gated). When
+        # RAG_GROUNDED=1 AND Vertex/ADC credentials are present, replace the
+        # 5-scraper crawl + 403-fragile deep-crawl with ONE cited Google-Search
+        # research call. The resulting pack reuses the SAME corpus schema so
+        # assess_corpus_sufficiency / story_designer / Observer are unchanged.
+        if self.use_grounded:
+            try:
+                from src.engine.grounded_search import build_grounded_knowledge_pack
+                grounded = build_grounded_knowledge_pack(
+                    headline=headline, summary=summary, keywords=keywords
+                )
+            except Exception as e:
+                print(f"[RAGRetriever] Grounded research failed, falling back to scraper path: {e}")
+                grounded = None
+            if grounded is not None:
+                self._rag_cache[cache_key] = (time.time(), grounded)
+                return grounded
 
         # Cache: return recent RAG pack for the same headline/fact-count to avoid
         # redundant paid/network searches.  Passing ``refresh=True`` bypasses the
         # cache (forces a fresh retrieval) and stores the result so subsequent
         # non-refresh calls reuse the refreshed pack.
-        cache_key = f"{headline}|{len(verified_facts)}"
         _now = time.time()
         _hit = self._rag_cache.get(cache_key)
         if not refresh and _hit and (_now - _hit[0]) < self._rag_cache_ttl_s:
@@ -759,6 +813,7 @@ class RAGTopicRetriever:
                 print(f"[RAGRetriever] Selected article scrape exception: {e}")
                 article_text = ""
             if article_text:
+                article_text = _strip_boilerplate(article_text)
                 score = _on_topic_hits(article_text, topic_tokens)
                 if len(article_text) >= 200 and score >= 2:
                     selected_article = article_text

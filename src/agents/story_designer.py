@@ -60,6 +60,62 @@ def _clean_snippet_text(snippet: str) -> str:
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
+# Observer's per-shot narration cap (see observer.py:331/393). The story designer
+# only enforced a FLOOR, so the LLM could emit 187-267-word shots that tripped the
+# "narration too long (>155)" gate AND blew the runtime to 16+ mins (hard abort).
+# We keep the floor for runtime but also enforce this ceiling deterministically so
+# both hard failures are impossible regardless of what the LLM returns.
+MAX_SHOT_WORDS = 155
+
+
+def _enforce_narration_ceiling(narr: str, max_words: int = MAX_SHOT_WORDS) -> str:
+    """Deterministically truncate narration to a word ceiling, cutting at the last
+    sentence boundary that fits so the text stays grammatical. Falls back to a
+    hard word cut if no sentence boundary occurs before the cap."""
+    narr = narr.strip()
+    if not narr:
+        return narr
+    words = narr.split()
+    if len(words) <= max_words:
+        return narr
+    # Cut at the last sentence terminator at/under the ceiling, preserving it.
+    sentences = re.split(r"(?<=[.!?])\s+", narr)
+    out = []
+    count = 0
+    for sent in sentences:
+        sw = len(sent.split())
+        if count + sw > max_words:
+            if not out:
+                out.append(sent)
+            break
+        out.append(sent)
+        count += sw
+    # Trim the final kept sentence's tail to the exact word budget if it overshoots.
+    result = " ".join(out)
+    if len(result.split()) > max_words:
+        result = " ".join(result.split()[:max_words])
+    return result.strip()
+
+
+# Boilerplate/credit/advert lines must never become narration padding — they
+# read as pasted slop (e.g. "SKIP ADVERTISEMENT", "Video by ...") and trip the
+# Observer's verbatim-source-copy gate. Mirrors the corpus-side cleaner.
+_SNIPPET_JUNK_RE = re.compile(
+    r'\b(SKIP ADVERTISEMENTS?\b|Read\s?More|Subscribe\s?(now)?|Sign\s?up|Sign\s?in|'
+    r'Log\s?in|Log\s?out|Listen(?:\s|·)|Video\s?by\b|Written\s?by\b|Reporting\s?by\b|'
+    r'By\s+[A-Z][A-Za-z. -]+\s+(For|via)?\s*The\s+[A-Z]|Supported\s?by\b|Advertisement\b|'
+    r'Advertorial\b|Sponsored(?: Content)?\b|Newsletter\b|Comments?(?:\s+closed)?\b|'
+    r'Recommended(?: Stories| Videos)?\b|Most\s?Read\b|Trending\b|Menu\b|Close\b|'
+    r'Privacy\s?Policy\b|Terms\s?of\s?Service\b|Cookie\s?Preferences?\b)',
+    re.IGNORECASE,
+)
+
+
+def _snippet_is_junk(snippet: str) -> bool:
+    """True if a snippet is dominated by boilerplate/ad/credit junk."""
+    return bool(_SNIPPET_JUNK_RE.search(snippet or ""))
+
+
 class StoryDesignerAgent:
     """
     Story Designer Agent responsible for expanding a selected topic into a 10-15 minute,
@@ -104,6 +160,7 @@ class StoryDesignerAgent:
             for line in retrieved_context.split("\n")
             if line.strip().startswith("•") and len(line.strip()) > 40
             and "[DDG:" not in line and "DuckDuckGo" not in line  # skip raw scrape noise
+            and not _snippet_is_junk(line)
         ]
         seen_snips = set()
         raw_snippets = []
@@ -121,7 +178,7 @@ class StoryDesignerAgent:
         if article:
             for sent in re.split(r'(?<=[.!?])\s+', article):
                 sent = _clean_snippet_text(sent.strip())
-                if len(sent) > 60:
+                if len(sent) > 60 and not _snippet_is_junk(sent):
                     key = sent[:60]
                     if key not in seen_snips:
                         seen_snips.add(key)
@@ -387,6 +444,9 @@ class StoryDesignerAgent:
                             # Enrich short narration with dynamic RAG facts using semantic search/TF-IDF similarity
                             if len(narr.split()) < 115:
                                 narr = self.expand_narration_with_semantic_facts(narr, headline, category, raw_snippets, _used_snips, target_word_count=115)
+                            # Ceiling: never hand the Observer a shot over its 155-word cap
+                            # (prevents "narration too long" + runtime-bounds hard aborts).
+                            narr = _enforce_narration_ceiling(narr)
 
                             shots.append(ShotData(
                                 shot_id=int(shot_id),
@@ -504,7 +564,10 @@ class StoryDesignerAgent:
                         continue
                     narr = _clean_narration(s.get("narration_text") or "")
                     wc = len(narr.split())
-                    if 100 <= wc <= 160:  # guard: only accept sane-length rewrites
+                    if 100 <= wc <= 200:  # guard: only accept sane-length rewrites
+                        # Deterministic ceiling so polished shots stay under the
+                        # Observer 155-word cap even if the editor over-produces.
+                        narr = _enforce_narration_ceiling(narr)
                         narr_by_id[sid] = narr
                 polished = []
                 for shot in script.shots:
@@ -597,6 +660,18 @@ class StoryDesignerAgent:
                 f"(RAG pool exhausted). Runtime stays ~{script.estimated_runtime_seconds / 60.0:.2f} mins.",
                 component="STORY_DESIGNER"
             )
+        # A1 ceiling: cap every shot to MAX_SHOT_WORDS so the Observer narration-length
+        # + runtime-bounds hard aborts cannot fire, and keep the runtime honest.
+        capped = False
+        for shot in script.shots:
+            if len(shot.narration_text.split()) > MAX_SHOT_WORDS:
+                shot.narration_text = _enforce_narration_ceiling(shot.narration_text)
+                shot.duration_estimate = max(42.0, round(len(shot.narration_text.split()) / 2.2, 1))
+                capped = True
+        if capped:
+            total_words = sum(len(s.narration_text.split()) for s in script.shots)
+            script.estimated_runtime_seconds = round(total_words / 150.0 * 60.0, 1)
+            logger.info("SCRIPT_DESIGN", f"Post-polish ceiling: {total_words} words total after capping shots to <= {MAX_SHOT_WORDS}.", component="STORY_DESIGNER")
         return script
 
     def _generate_ctr_title(self, headline: str, niche_category: str = "") -> Optional[str]:

@@ -6,6 +6,107 @@ from src.schemas.state import GlobalState, ScriptData, VerifiedFact
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.monetization_optimizer import monetization_optimizer
 from src.engine.channel_phase_manager import channel_phase_manager
+from src.engine.text_embeddings import semantic_embedder, semantic_max_similarity, semantic_pairwise_similarity, semantic_topic_membership
+
+# Semantic-gate thresholds (MiniLM cosine sim). When the semantic backend is
+# unavailable these gates fall back to the deterministic TF-IDF/substring logic,
+# so hermetic/offline runs behave exactly as before.
+COPY_SEMANTIC_THRESHOLD = 0.82          # narration sentence ~== a clean corpus sentence
+TOPIC_MEMBER_SEMANTIC_THRESHOLD = 0.50  # token ~== a topic anchor word (keyword/headline/summary)
+
+# Style-class violations (revisable, non-factual). When a script fails the bounded
+# revision loop with ONLY these remaining, it can be approved-with-warnings via
+# the orchestrator's soft-approval path. Everything else (fact/temporal/revenue/
+# audience/runtime/shot-count and any raw critic text) stays a hard abort.
+_SOFT_VIOLATION_MARKERS = (
+    "Keyword over-repetition",
+    "verbatim source copy",
+    "repetition:",
+    "Source Diversity",
+    "visual prompt",
+    "narration too long",
+)
+
+
+def is_soft_violation(violation: str) -> bool:
+    """True for revisable style-class violations; False (=> hard) for fact,
+    temporal, revenue, audience, structural or any unmarked/critic text."""
+    return any(m in (violation or "") for m in _SOFT_VIOLATION_MARKERS)
+
+
+def _is_grounding_truncation(narr_num: str, gt_numbers: set) -> bool:
+    """
+    True when a narration number is a precision-losing truncation/rounding of a
+    corpus (ground-truth) number — NOT a fabrication. e.g. "19" ~ "19.29%",
+    "41" ~ "41.11", "US$55" ~ "US$55.11 billion". One-directional and anchored to
+    the corpus: a number with NO supporting base in gt_numbers stays flagged, so
+    genuinely invented figures are still caught. Numeric suffix scaling (k/m/b) is
+    honored so "1.5m" ~ "1,500,000" style variance passes too.
+    """
+    try:
+        narr_val = float(re.sub(r'[^\d.]', '', narr_num or ""))
+    except ValueError:
+        return False
+    if narr_val == 0:
+        return False
+    for gt in gt_numbers:
+        scale = 1.0
+        g = (gt or "").lower()
+        if g.endswith("k"):
+            scale = 1e3
+        elif g.endswith("m"):
+            scale = 1e6
+        elif g.endswith("b"):
+            scale = 1e9
+        try:
+            gt_val = float(re.sub(r'[^\d.]', '', g)) * scale
+        except ValueError:
+            continue
+        if gt_val <= 0:
+            continue
+        # Narr is an integer truncation of gt (e.g. 19 -> 19.29).
+        if narr_val == int(gt_val):
+            return True
+        # Narr is gt rounded to 1, 2, or 3 decimals (e.g. 19.3 -> 19.29).
+        for nd in (1, 2, 3):
+            if abs(narr_val - round(gt_val, nd)) < 1e-6:
+                return True
+        # Narr is gt rounded to a whole number within half a unit (e.g. 19 -> 19.29).
+        if narr_val == round(gt_val, 0):
+            return True
+    return False
+
+
+def observer_quality_score(script: ScriptData) -> float:
+    """
+    Paraphrase-diversity score in [0,1]: 1 - mean pairwise sentence similarity,
+    so higher = more varied, less monotonous narration. Uses MiniLM embeddings
+    when the semantic backend is on, else a TF-IDF cosine fallback. Cheap, one
+    batch-encode; used to keep the best draft across revision rounds.
+    """
+    sentences = [
+        s.strip().lower()
+        for shot in script.shots
+        for s in re.split(r'[.!?]', shot.narration_text)
+        if len(s.strip()) > 15
+    ]
+    if len(sentences) < 2:
+        return 0.5
+    try:
+        import numpy as np
+        mat = None
+        if semantic_embedder.available:
+            mat = semantic_pairwise_similarity(sentences)
+        if mat is None:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.metrics.pairwise import cosine_similarity
+            mat = cosine_similarity(TfidfVectorizer().fit_transform(sentences)).astype(np.float32)
+        n = len(sentences)
+        off_diag = [mat[i][j] for i in range(n) for j in range(i + 1, n)]
+        mean_sim = float(np.mean(off_diag)) if off_diag else 0.0
+        return round(max(0.0, 1.0 - mean_sim), 4)
+    except Exception:
+        return 0.5
 
 
 class ObserverAgent:
@@ -62,11 +163,24 @@ class ObserverAgent:
                 if len(s.strip().split()) >= 12
             ]
             if corpus_sents:
+                _sem_on = semantic_embedder.available
                 for shot in script.shots:
                     for sent in re.split(r'[.!?]', shot.narration_text):
                         sent_norm = re.sub(r'[^a-z0-9 ]', '', sent.strip().lower()).strip()
                         if len(sent_norm.split()) < 12:
                             continue
+                        # Semantic paraphrase-copy check first: content-aware and
+                        # catches lightly-rewritten slop the substring test misses,
+                        # while avoiding false positives on short factual padding.
+                        if _sem_on:
+                            max_sim = semantic_max_similarity(sent_norm, corpus_sents)
+                            if max_sim is not None:
+                                if max_sim >= COPY_SEMANTIC_THRESHOLD:
+                                    violations.append(
+                                        f"Shot #{shot.shot_id} verbatim source copy: narration copies the "
+                                        f"RAG corpus nearly word-for-word (semantic sim {max_sim:.2f}): '{sent.strip()[:90]}'"
+                                    )
+                                continue
                         for cs in corpus_sents:
                             if sent_norm in cs or cs in sent_norm:
                                 violations.append(
@@ -100,6 +214,14 @@ class ObserverAgent:
                 if num not in gt_numbers:
                     cleaned_num = re.sub(r'[^\d.]', '', num)
                     if cleaned_num and float(cleaned_num) > 10 and cleaned_num not in [current_year, "100"]:
+                        # A3: a narration number that is a valid truncation / rounding
+                        # of a corpus number (e.g. "19" vs "19.29%", "41" vs "41.11",
+                        # "US$55" vs "US$55.11 billion") is NOT a fabrication — the LLM
+                        # just dropped precision. Only hard-flag figures with NO
+                        # supporting base in the corpus. This prevents truncation-only
+                        # diffs from aborting a run (hard fact audit).
+                        if _is_grounding_truncation(num, gt_numbers):
+                            continue
                         flagged_sentences_info.append((
                             shot.shot_id,
                             f"Numerical claim '{num}' in: {shot.narration_text}",
@@ -301,6 +423,22 @@ class ObserverAgent:
         # (A) Sentence repetition tracking — verbatim + semantic similarity (>0.82)
         all_narr_sentences: List[str] = []
 
+        # Semantic fast path: when the MiniLM backend is on, encode every shot
+        # sentence ONCE and reuse the pairwise matrix during the loop (avoids
+        # re-encoding the growing sentence list per sentence).
+        _sem_matrix = None
+        _sem_index: Dict[str, int] = {}
+        if semantic_embedder.available:
+            _all_shot_sents = [
+                s.strip().lower()
+                for shot in script.shots
+                for s in re.split(r'[.!?]', shot.narration_text)
+                if len(s.strip()) > 15
+            ]
+            if _all_shot_sents:
+                _sem_matrix = semantic_pairwise_similarity(_all_shot_sents)
+                _sem_index = {s: i for i, s in enumerate(_all_shot_sents)}
+
         for shot in script.shots:
             word_count = len(shot.narration_text.split())
             if word_count > 155:
@@ -313,11 +451,22 @@ class ObserverAgent:
             if "cinematic" not in v_prompt and "8k" not in v_prompt and "photorealistic" not in v_prompt:
                 violations.append(f"Shot #{shot.shot_id} visual prompt lacks aesthetic lighting/AQA keywords.")
 
-            # Sentence duplication (verbatim + TF-IDF semantic similarity >= 0.82)
+            # Sentence duplication (verbatim + semantic similarity >= 0.82)
             shot_sentences = [s.strip().lower() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]
             for sentence in shot_sentences:
                 if sentence in all_narr_sentences:
                     violations.append(f"Shot #{shot.shot_id} repetition: duplicate sentence '{sentence}'.")
+                elif all_narr_sentences and _sem_matrix is not None:
+                    _sidx = _sem_index.get(sentence)
+                    if _sidx is not None:
+                        prev_idxs = [i for s in all_narr_sentences if (i := _sem_index.get(s)) is not None]
+                        if prev_idxs:
+                            max_sim = max(float(_sem_matrix[_sidx][j]) for j in prev_idxs)
+                            if max_sim > 0.82:
+                                violations.append(
+                                    f"Shot #{shot.shot_id} repetition: sentence semantically too similar "
+                                    f"(sim {max_sim:.2f}): '{sentence}'"
+                                )
                 elif all_narr_sentences:
                     try:
                         from sklearn.feature_extraction.text import TfidfVectorizer
@@ -391,6 +540,41 @@ class ObserverAgent:
                 if t in _topic_tokens or t in _STOP or t.isdigit():
                     continue
                 _tok_freq[t] = _tok_freq.get(t, 0) + 1
+
+        # Semantic topic-membership: drop any candidate token whose MEANING matches
+        # the topic's OWN anchor words (keywords + headline/summary tokens). This
+        # generically excludes topic entities and their inflections/synonyms
+        # (e.g. 'chinese' ~ 'china') from the over-repetition count — the exact-
+        # string blacklist can't do that, and it is what caused false rejections
+        # like "chinese in 12/15 shots".
+        if semantic_embedder.available and _tok_freq and topic is not None:
+            try:
+                _anchor_words = []
+                for kw in (getattr(topic, "keywords", None) or []):
+                    _kw = re.sub(r"[^a-z0-9-]", "", str(kw).lower())
+                    if len(_kw) >= 4:
+                        _anchor_words.append(_kw)
+                _anchor_words += re.findall(
+                    r"\b[a-z][a-z0-9-]{4,}\b",
+                    ((getattr(topic, "headline", "") or "") + " " + (getattr(topic, "summary", "") or "")).lower(),
+                )
+                _anchor_words = list(dict.fromkeys(_anchor_words))
+                if _anchor_words:
+                    for _t in list(_tok_freq.keys()):
+                        # Per-token isolation: a failure scoring one candidate token
+                        # must NOT abort filtering for every other token (the old
+                        # whole-loop try/except swallowed errors and left false
+                        # positives like 'surge' ~ 'surging' in the count, causing
+                        # spurious 'keyword over-repetition' rejections).
+                        try:
+                            _mem = semantic_topic_membership(_t, _anchor_words)
+                        except Exception:
+                            continue
+                        if _mem is not None and _mem >= TOPIC_MEMBER_SEMANTIC_THRESHOLD:
+                            del _tok_freq[_t]
+            except Exception:
+                pass
+
         _n_shots = len(script.shots)
         if _tok_freq and _n_shots >= 6:
             _worst = max(_tok_freq, key=_tok_freq.get)
@@ -467,7 +651,8 @@ class ObserverAgent:
                     "script_title": state.script_data.title,
                     "total_shots": len(state.script_data.shots),
                     "runtime_minutes": round(state.script_data.estimated_runtime_seconds / 60.0, 2),
-                    "fact_audit": "PASSED"
+                    "fact_audit": "PASSED",
+                    "quality_score": observer_quality_score(state.script_data)
                 },
                 timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
             )
@@ -482,7 +667,8 @@ class ObserverAgent:
                     "status": "REJECTED",
                     "violations": violations,
                     "violation_count": len(violations),
-                    "fact_audit": "FAILED" if any("Fact Audit" in v or "Temporal Audit" in v for v in violations) else "PASSED"
+                    "fact_audit": "FAILED" if any("Fact Audit" in v or "Temporal Audit" in v for v in violations) else "PASSED",
+                    "quality_score": observer_quality_score(state.script_data)
                 },
                 timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
             )
