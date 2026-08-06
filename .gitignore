@@ -6,6 +6,7 @@ token.json
 client_secret.json
 logs/*.log
 logs/*.json
+logs/
 /tmp/
 *.wav
 *.mp4
@@ -24,3 +25,6 @@ published_topics.json
 .hf_cache/
 .huggingface/
 sentence_transformers/
+# Local editor/tooling config
+opencode.json
+*.md~
