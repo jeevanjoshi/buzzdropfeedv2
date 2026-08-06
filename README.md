@@ -283,9 +283,10 @@ python3 run_tests.py
 
 | Flag | Meaning | Example |
 |---|---|---|
-| *(none)* | **Runs a pre-flight health check** (env keys, ffmpeg/ffprobe, LLM availability, Pi audio-edge reachability, YouTube OAuth + daily quota); aborts before launch if any required check fails. If green: syncs code to the Pi, offers a checkpoint resume, spawns child, exits | `./run_production.sh` |
+| *(none)* | **Runs a pre-flight health check** (env keys, ffmpeg/ffprobe, LLM availability, Pi audio-edge reachability, YouTube upload quota + competitor-demand budget, RAG fact-source keys, BGM + disk space); aborts before launch if any required check fails. If green: syncs code to the Pi, offers a checkpoint resume, spawns child, exits | `./run_production.sh` |
 | `--no-detach` | Block/run in the foreground (keeps ALL flags; skips Pi code sync) | `./run_production.sh --no-detach --rag grounded` |
 | `--skip-health-check` | Bypass the pre-flight health gate (not recommended — a broken run just fails mid-pipeline) | `./run_production.sh --skip-health-check` |
+| `--probe-llm` / `--probe-yt` | Live probes during the health check: real 1-token LLM call / YouTube token-refresh + `channels.list` | `./run_production.sh --no-detach --probe-llm --probe-yt` |
 | `--rag` | Same A/B switch as `main.py` (survives the detach) | `./run_production.sh --rag grounded` |
 | `--renderer` | Survives the detach | `./run_production.sh --renderer moviepy` |
 | `--crossfade` | Survives the detach | `./run_production.sh --crossfade 1.0` |
