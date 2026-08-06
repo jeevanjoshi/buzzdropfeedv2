@@ -27,6 +27,7 @@ Options:
   --renderer <ENGINE>    Renderer: ffmpeg|moviepy (Default: 'ffmpeg')
   --crossfade <SEC>      Crossfade duration in seconds (float)
   --resume               Auto-resume the latest unfinished checkpoint
+  --skip-health-check    Skip the pre-flight health gate (LLM/YT/Pi) — not recommended
   -h, --help             Display this help menu and exit
 
 Notes:
@@ -52,6 +53,26 @@ ln -sfn "$(basename "$LOG_FILE")" "logs/pipeline_run.log"
 PI5_IP="100.108.116.100"
 PI5_USER="jeevanjoshi"
 PI5_TARGET_DIR="/home/jeevanjoshi/buzzdropfeedv2"
+
+# ── Pre-Flight Health Check ──────────────────────────────────────────────
+# Gate the run on LLM availability, YouTube quota+auth, Pi audio-edge
+# reachability, and required binaries/.env keys BEFORE any sync or run cost.
+# Aborts (exit 1) if any REQUIRED check fails. Pass --skip-health-check to
+# bypass (dangerous: a broken run will just fail mid-pipeline).
+if [[ " $* " != *" --skip-health-check "* ]]; then
+    echo "[HEALTH] Running production pre-flight health check..."
+    if [ -d "venv" ]; then
+        source venv/bin/activate
+    fi
+    if python healthcheck.py; then
+        echo "[HEALTH] All checks green — proceeding with production run."
+    else
+        echo "[HEALTH] FAILED — aborting production run before launch." >&2
+        exit 1
+    fi
+else
+    echo "[HEALTH] Skipping health check (--skip-health-check given)."
+fi
 
 # First step: push the latest codebase/config to the Pi edge node BEFORE the run.
 # Runs once in the parent (skipped in the detached --no-detach child). Delegates

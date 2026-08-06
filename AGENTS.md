@@ -6,7 +6,7 @@ Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPS
 - Activate venv first: `source venv/bin/activate`
 - `--offline` uses canned topic candidates instead of live RSS — it is NOT a full dry-run. It does NOT skip RAG (Tavily/Firecrawl), the LLM (aborts if unavailable), visuals (fal/Replicate), Pi TTS, or publish. Those each need their own flag or a mock: `--dummy-frames` (synthetic visuals, no fal/Replicate), `--till-upload` (no publish). The truly hermetic/no-network path is `tests/test_smoke.py` (stub agents mock LLM/RAG/TTS/visuals/publisher).
 - Real run without publishing: `python main.py --global --till-upload` (alias `--no-upload`)
-- Production run (recommended for real publishes): `./run_production.sh` — syncs code to Pi, runs in background, logs to `logs/`, emails result. `--no-detach` blocks; auto-resumes from latest `logs/state_*.json` checkpoint if a previous run didn't reach `PUBLISHED_SUCCESS`.
+- Production run (recommended for real publishes): `./run_production.sh` — **runs a pre-flight health check** (`healthcheck.py`: env keys, ffmpeg/ffprobe, LLM availability, Pi audio-edge reachability, YouTube OAuth + daily quota) and **aborts before launch if any required check fails**; then syncs code to Pi, runs in background, logs to `logs/`, emails result. `--no-detach` blocks; `--skip-health-check` bypasses the gate. Auto-resumes from latest `logs/state_*.json` checkpoint if a previous run didn't reach `PUBLISHED_SUCCESS`.
 - Resume a specific run: `python main.py --resume <pipeline_id>` (reads `logs/state_<pipeline_id>.json`).
 
 ### Flags (main.py)
