@@ -121,6 +121,86 @@ if [[ "$*" == *"--crossfade"* ]]; then
     done
 fi
 
+# ── Live Progress Monitor ──────────────────────────────────────────────────
+# Renders a single-line progress bar driven by the pipeline's PERSISTED
+# execution_stage (read from the newest logs/state_*.json), so the operator can
+# see, at a glance, the overall completion % and the current stage of the run.
+# The monitor only reads local files; the detached pipeline + Pi dashboard
+# keep working regardless. Ctrl+C stops the monitor, NOT the pipeline.
+stage_to_pct() {
+    case "$1" in
+        PUBLISHED_SUCCESS|"DONE") echo 100 ;;
+        QUALITY_VERIFIED)        echo 92 ;;
+        MEDIA_PRODUCED)          echo 85 ;;
+        SCRIPT_APPROVED)         echo 50 ;;
+        SCRIPT_REVISION_REQUIRED)echo 40 ;;
+        SCRIPT_GENERATED)        echo 35 ;;
+        TOPIC_SELECTED)          echo 20 ;;
+        INITIALIZATION|"")       echo 5  ;;
+        *)                       echo 30 ;;
+    esac
+}
+
+# Latest (most recently written) persisted stage, or "" if none yet.
+current_stage() {
+    local f state
+    f="$(ls -t logs/state_*.json 2>/dev/null | head -n 1)"
+    if [ -n "$f" ]; then
+        state="$(grep -o '"execution_stage": "[^"]*' "${f}" 2>/dev/null | head -n 1 | cut -d'"' -f4)"
+        if [ -n "$state" ] && [ "$state" != "INITIALIZATION" ]; then
+            echo "$state"; return
+        fi
+    fi
+    # Fallback: infer the furthest stage mentioned in the run log.
+    for s in PUBLISHED_SUCCESS QUALITY_VERIFIED MEDIA_PRODUCED SCRIPT_APPROVED \
+             SCRIPT_REVISION_REQUIRED SCRIPT_GENERATED TOPIC_SELECTED; do
+        if grep -q "${s}" "${LOG_FILE}" 2>/dev/null; then echo "$s"; return; fi
+    done
+    echo ""
+}
+
+stage_label() {
+    case "$1" in
+        PUBLISHED_SUCCESS)       echo "Publishing / done" ;;
+        QUALITY_VERIFIED)        echo "Quality gates passed" ;;
+        MEDIA_PRODUCED)          echo "Rendering media" ;;
+        SCRIPT_APPROVED)         echo "Script approved" ;;
+        SCRIPT_REVISION_REQUIRED)echo "Revising script" ;;
+        SCRIPT_GENERATED)        echo "Writing script" ;;
+        TOPIC_SELECTED)          echo "Topic + RAG" ;;
+        INITIALIZATION|"")       echo "Starting" ;;
+        *)                       echo "Working" ;;
+    esac
+}
+
+render_bar() {
+    local pct=$1 label=$2 elapsed=$3 width=40 i filled bar=""
+    filled=$(( pct * width / 100 ))
+    for ((i=0;i<width;i++)); do
+        if [ "$i" -lt "$filled" ]; then bar+="#"; else bar+="-"; fi
+    done
+    printf '\r[%s] %3d%%  %-22s %02d:%02d' "${bar}" "$pct" "$label" \
+        $((elapsed/60)) $((elapsed%60))
+}
+
+show_progress() {
+    local pid=$1 start=$SECONDS stage last=""
+    trap 'echo ""; echo "[PROGRESS] Monitor stopped; pipeline continues in the background."; exit 0' INT
+    while kill -0 "${pid}" 2>/dev/null; do
+        stage="$(current_stage)"
+        if [ -t 1 ]; then
+            render_bar "$(stage_to_pct "$stage")" "$(stage_label "$stage")" "$((SECONDS-start))"
+        elif [ "$stage" != "$last" ]; then
+            printf '[PROGRESS] %-22s %3d%% (%02d:%02d)\n' "$(stage_label "$stage")" \
+                "$(stage_to_pct "$stage")" $((SECONDS/60)) $((SECONDS%60))
+        fi
+        last="$stage"
+        sleep 3
+    done
+    if [ -t 1 ]; then render_bar 100 "Finished" "$((SECONDS-start))"; echo ""; fi
+    echo "[PROGRESS] Pipeline process finished with a reported exit code (see emails/logs)."
+}
+
 # Check if we should detach into the background
 if [ "${1:-}" != "--no-detach" ]; then
     LATEST_STATE=$(ls -t logs/state_*.json 2>/dev/null | head -n 1)
@@ -142,12 +222,24 @@ if [ "${1:-}" != "--no-detach" ]; then
     fi
 
     echo "[LAUNCH] Launching CSVG Production Pipeline in the background..."
-    # Launch itself with --no-detach in the background, forwarding resume + renderer + crossfade + rag
-    nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${RAG_ARG} > /dev/null 2>&1 &
+    # Launch itself with --no-detach in the background, forwarding resume + renderer + crossfade + rag.
+    # `setsid` fully detaches the child from this shell's session/controlling terminal so a closed
+    # SSH/tmux session can NEVER kill it mid/finish (the cause of "pipeline published but no final
+    # exit-code line and no email" — the child was reaped before its post-run steps).
+    setsid nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${RAG_ARG} \
+        < /dev/null > /dev/null 2>&1 &
     PID=$!
     echo "[SUCCESS] Pipeline successfully spawned in background (PID: ${PID})."
     echo "[LOGS] Real-time logs: tail -f ${LOG_FILE}"
     echo "[EMAIL] Notification will be sent to jeevan.z.joshi@gmail.com upon completion."
+    # Live progress bar so the operator can see what's happening in real time.
+    # (Only attach in an interactive terminal; never emit ANSI junk into scripts.)
+    if [ -t 1 ]; then
+        echo "[PROGRESS] Monitoring pipeline progress — (Ctrl+C stops the monitor only)..."
+        show_progress "${PID}"
+    else
+        echo "[PROGRESS] Non-interactive shell — progress bar skipped."
+    fi
     exit 0
 fi
 
@@ -186,6 +278,40 @@ if command -v rsync >/dev/null 2>&1; then
     SYNC_LOOP_PID=$!
 fi
 
+# ── Guaranteed finalization ────────────────────────────────────────────────
+# Runs the heartbeat-stop, exit-code log line, notification email and final Pi
+# log push. A trap on EXIT calls it so these happen even if the normal flow is
+# interrupted after main.py returns — fixing the "published but no exit code and
+# no email" failure where the child was reaped before its post-run steps.
+FINALIZED=0
+finalize() {
+    local ec=$1
+    [ "${FINALIZED}" -eq 1 ] && return "$ec"
+    FINALIZED=1
+    printf '{"running":false,"ts":"%s","exit_code":%s}\n' \
+        "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$ec" > "${HB_FILE}" 2>/dev/null || true
+    if [ -n "${SYNC_LOOP_PID}" ]; then kill "${SYNC_LOOP_PID}" 2>/dev/null; fi
+    {
+        echo "" >> "${LOG_FILE}"
+        echo "[FINISHED] PIPELINE RUN FINISHED WITH EXIT CODE: ${ec}" >> "${LOG_FILE}"
+        echo "========================================================================" >> "${LOG_FILE}"
+        local st=success; [ "$ec" -ne 0 ] && st=failure
+        echo "[EMAIL] Sending notification email (status=${st})..." >> "${LOG_FILE}"
+        python3 send_pipeline_email.py --status "${st}" --log_file "${LOG_FILE}" >> "${LOG_FILE}" 2>&1
+        echo "[EMAIL] Notification step done." >> "${LOG_FILE}"
+        if command -v rsync >/dev/null 2>&1; then
+            mkdir -p logs
+            rsync -az --exclude '*.onnx' --exclude '*.bin' --exclude '*.mp3' --exclude '*.wav' \
+                -e ssh \
+                logs/ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/logs/" 2>/dev/null \
+                || echo "[WARN] Failed to push logs to Pi" >> "${LOG_FILE}"
+            echo "[SYNC] Final logs pushed to Pi." >> "${LOG_FILE}"
+        fi
+    }
+    return "$ec"
+}
+trap 'finalize $? >/dev/null 2>&1' EXIT
+
 # Run the pipeline
 # --renderer is already present in "$@" (survived the detach), so just forward.
 if [[ "$*" == *"--resume"* ]]; then
@@ -195,35 +321,5 @@ else
 fi
 EXIT_CODE=$?
 
-# Mark the pipeline as no longer running (so the dashboard shows Idle).
-printf '{"running":false,"ts":"%s","exit_code":%s}\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${EXIT_CODE}" > "${HB_FILE}"
-if [ -n "${SYNC_LOOP_PID}" ]; then
-    kill "${SYNC_LOOP_PID}" 2>/dev/null
-fi
-
-echo "" >> "${LOG_FILE}"
-echo "[FINISHED] PIPELINE RUN FINISHED WITH EXIT CODE: ${EXIT_CODE}" >> "${LOG_FILE}"
-echo "========================================================================" >> "${LOG_FILE}"
-
-
-# Send email notification
-STATUS="success"
-if [ ${EXIT_CODE} -ne 0 ]; then
-    STATUS="failure"
-fi
-
-python3 send_pipeline_email.py --status "${STATUS}" --log_file "${LOG_FILE}" >> "${LOG_FILE}" 2>&1
-
-# Push run logs + state to the Pi so the on-Pi dashboard reflects the latest run.
-# The canonical logs/pipeline_run.log symlink travels too, so the dashboard's
-# /api/logs (which reads that fixed name) always points at the newest run.
-if command -v rsync >/dev/null 2>&1; then
-    mkdir -p logs
-    rsync -az \
-        --exclude '*.onnx' --exclude '*.bin' --exclude '*.mp3' --exclude '*.wav' \
-        -e ssh \
-        logs/ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/logs/" 2>/dev/null \
-        || echo "[WARN] Failed to push logs to Pi" >> "${LOG_FILE}"
-fi
-
+finalize ${EXIT_CODE}
 exit ${EXIT_CODE}

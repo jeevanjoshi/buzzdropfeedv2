@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#05070f">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="CSVG">
   <title>CSVG Pipeline Verification Center</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -226,6 +231,47 @@
 
     .footer-note { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 16px; font-size: 11px; color: #4b5563; font-family: 'JetBrains Mono', monospace; }
     .footer-note .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: blink 1.6s infinite; }
+
+    /* ── Mobile / iPhone optimizations ──────────────────── */
+    html { -webkit-text-size-adjust: 100%; }
+    body { -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
+    button { touch-action: manipulation; }
+
+    @media (max-width: 768px) {
+      .app { padding: 18px 14px 100px; }
+      .header { flex-direction: column; align-items: stretch; gap: 14px; margin-bottom: 20px; }
+      .header-actions { justify-content: space-between; flex-wrap: wrap; }
+      .tabs { display: flex; gap: 6px; width: 100%; margin-bottom: 18px; }
+      .tab { flex: 1; justify-content: center; padding: 13px 8px; font-size: 12.5px; min-height: 48px; border-radius: 12px; white-space: nowrap; }
+      .tab svg { width: 17px; height: 17px; }
+      .btn { min-height: 46px; }
+      .status-pill { font-size: 12px; padding: 10px 14px; }
+      .stage-tracker { padding: 12px 14px; }
+      .hb-age { margin-left: 0; width: 100%; }
+      .stage-progress { margin-top: 10px; }
+      .card { padding: 16px 18px; }
+      .card-value { font-size: 26px; }
+      .console-body { max-height: 46vh; padding: 12px 14px; font-size: 12px; }
+      .log-line { font-size: 12px; }
+    }
+
+    @media (max-width: 420px) {
+      .grid { grid-template-columns: 1fr; }
+      .brand h1 { font-size: 19px; }
+      .brand p { font-size: 11px; }
+      .brand-logo { width: 40px; height: 40px; font-size: 18px; }
+      .pub-item { flex-direction: column; align-items: stretch; gap: 14px; }
+      .pub-meta { gap: 8px 14px; }
+      .watch-btn { justify-content: center; min-height: 46px; }
+      .tab { padding: 12px 4px; font-size: 12px; }
+    }
+
+    /* Notch / home-indicator safe areas (iOS) */
+    @supports (padding: env(safe-area-inset-bottom)) {
+      .app { padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); }
+      .app { padding-bottom: calc(100px + env(safe-area-inset-bottom)); }
+      .footer-note { margin-bottom: env(safe-area-inset-bottom); }
+    }
   </style>
 </head>
 <body>

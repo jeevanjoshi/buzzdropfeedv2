@@ -18,12 +18,24 @@ Checks:
             TOPSIS score (yt_demand_quota.json vs YT_SEARCH_DAILY_BUDGET).
   [rag]      3rd-party fact/RAG keys present (Marketaux, Alpha Vantage, Exa,
             NewsAPI) — non-fatal fallbacks but missing keys degrade story grounding.
+  [grounding] Google-Search grounding pre-flight. When --rag grounded is
+            requested, GOOGLE_CLOUD_PROJECT + the google-genai SDK MUST be
+            configured; otherwise the run silently degrades to the scraper path.
+            In scraper mode a missing Vertex config is only a WARN.
+  [scrape]   Primary article deep-crawl path (Firecrawl). If FIRECRAWL_API_KEY
+            is absent, _scrape_selected_article falls back to a bare urllib GET
+            that many news sites 403 (the 'Article scrape fallback failed'
+            glitch) and grounding degrades.
   [media]   BGM asset present and disk space for render (final-video quality).
 
 Exit semantics:
   0  = all REQUIRED checks passed (proceed); WARN-level issues are advisory.
   1  = at least one REQUIRED check failed (abort the run).
   2  = a WARN-level advisory surfaced and --strict was given (treat warnings as fails).
+
+Audit trail: every run writes logs/health_check_<timestamp>.log (and a
+canonical logs/health_check.log) recording each check, verdict and summary so
+pre-flight state is auditable per run.
 
 OPT-IN live probes (skipped by default so this stays cheap / non-destructive):
   --probe-llm  make a real 1-token LLM call to confirm the model answers and
@@ -34,6 +46,7 @@ OPT-IN live probes (skipped by default so this stays cheap / non-destructive):
 Usage:
   source venv/bin/activate && python healthcheck.py
   source venv/bin/activate && python healthcheck.py --probe-llm --probe-yt
+  source venv/bin/activate && python healthcheck.py --rag grounded   # gate grounding
   source venv/bin/activate && python healthcheck.py --strict   # WARN fails too
 """
 import os
@@ -309,6 +322,80 @@ def check_rag_keys(strict: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# [grounding] Google-Search grounding pre-flight.
+# When the operator explicitly requests --rag grounded but Vertex/ADC is not
+# configured, the pipeline silently degrades to the scraper path (the
+# 'GOOGLE_CLOUD_PROJECT not set; grounding unavailable' glitch). That is a
+# hard FAIL when grounded was chosen; merely a WARN otherwise.
+# ---------------------------------------------------------------------------
+def check_grounding(rag_mode: str):
+    # "grounded" and "hybrid" both REQUIRE a live grounding config; scraper does not.
+    requested = rag_mode in ("grounded", "hybrid")
+    # Our client supports two auth paths: Enterprise (GOOGLE_CLOUD_PROJECT + ADC)
+    # or the Gemini Developer API (GEMINI_API_KEY).
+    project = env_key("GOOGLE_CLOUD_PROJECT")
+    api_key = env_key("GEMINI_API_KEY") or env_key("GOOGLE_API_KEY")
+    configured = bool(project) or bool(api_key)
+    try:
+        from google import genai as _genai  # noqa: F401
+        sdk_ok = True
+    except Exception:
+        sdk_ok = False
+
+    if requested:
+        if not configured:
+            record("grounding", "auth configured", _FAIL,
+                   f"--rag {rag_mode} requested but neither GOOGLE_CLOUD_PROJECT "
+                   "nor GEMINI_API_KEY set — run would silently fall back to scraper")
+            return False
+        if not sdk_ok:
+            record("grounding", "google-genai SDK", _FAIL,
+                   f"--rag {rag_mode} requested but google-genai not installed "
+                   "(pip install google-genai)")
+            return False
+        record("grounding", "configured", _OK,
+               f"{('GOOGLE_CLOUD_PROJECT=' + project) if project else 'GEMINI_API_KEY set'}, "
+               f"google-genai SDK present (location={env_key('GOOGLE_CLOUD_LOCATION') or 'global'})")
+        return True
+
+    # Not requested: grounding is an optional upgrade. Fail it as a hard error
+    # only under --strict, else warn so the operator knows it's unused.
+    if not configured:
+        record("grounding", "auth configured", _WARN,
+               "no grounding auth (GOOGLE_CLOUD_PROJECT / GEMINI_API_KEY) set — "
+               "grounding unavailable (using scraper path)")
+        return False
+    if not sdk_ok:
+        record("grounding", "google-genai SDK", _WARN,
+               "google-genai not installed — grounding unavailable")
+        return False
+    record("grounding", "configured", _OK,
+           "grounding auth + google-genai present (avail. if --rag grounded/hybrid)")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# [scrape] Primary article deep-crawl path (Firecrawl).
+# Without FIRECRAWL_API_KEY, _scrape_selected_article falls back to a bare
+# urllib GET that major news sites (NYT et al.) 403 — the 'Article scrape
+# fallback failed' glitch. Firecrawl present means the primary path avoids it.
+# ---------------------------------------------------------------------------
+def check_scrape_path(strict: bool = False):
+    fc = env_key("FIRECRAWL_API_KEY")
+    if not fc:
+        # Only a WARN: the pipeline still gathers corpus via the feeds/RAG keys
+        # and the urllib fallback, just less reliably for the full article body.
+        record("scrape", "Firecrawl key", _FAIL if strict else _WARN,
+               "FIRECRAWL_API_KEY unset — deep-crawl falls back to bare "
+               "urllib GET which many news sites 403; article body grounding "
+               "degrades")
+        return not strict
+    record("scrape", "Firecrawl key", _OK,
+           "primary deep-crawl path available (avoids urllib 403 fallback)")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # [media] BGM + disk space — final-video quality gates.
 # Missing resources/bgm.mp3 silently falls back to silence (bad audio);
 # low free disk aborts the ffmpeg render mid-way.
@@ -345,10 +432,49 @@ def check_media(strict: bool = False):
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
+def _parse_rag_mode(argv):
+    """Pull the ``--rag <mode>`` value from argv (default 'scraper')."""
+    try:
+        i = argv.index("--rag")
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    except ValueError:
+        pass
+    return "scraper"
+
+
+def _write_audit_log(exit_code: int):
+    """Persist a timestamped + canonical health-check audit log for this run."""
+    repo = os.path.dirname(os.path.abspath(__file__))
+    logs = os.path.join(repo, "logs")
+    try:
+        os.makedirs(logs, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines = [f"CSVG Health Check Audit — {stamp}",
+                 f"Exit code: {exit_code}", "=" * 62]
+        for comp, name, status, detail in results:
+            lines.append(f"{status:4} [{comp:9}] {name} — {detail}")
+        failed = [r for r in results if r[2] == "FAIL"]
+        warned = [r for r in results if r[2] == "WARN"]
+        lines.append("=" * 62)
+        lines.append(f"Summary: {len(failed)} FAILED, {len(warned)} WARN, "
+                     f"{len(results) - len(failed) - len(warned)} PASS")
+        body = "\n".join(lines) + "\n"
+        with open(os.path.join(logs, f"health_check_{ts}.log"), "w", encoding="utf-8") as f:
+            f.write(body)
+        with open(os.path.join(logs, "health_check.log"), "w", encoding="utf-8") as f:
+            f.write(body)
+        return os.path.join(logs, f"health_check_{ts}.log")
+    except Exception as e:  # audit log must never break the health gate
+        return f"<audit log write failed: {e}>"
+
+
 def main(argv):
     probe_llm = "--probe-llm" in argv
     probe_yt = "--probe-yt" in argv
     strict = "--strict" in argv
+    rag_mode = _parse_rag_mode(argv)
 
     # Load .env exactly like the pipeline (must precede app imports).
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -369,6 +495,8 @@ def main(argv):
         ("yt", lambda: check_youtube(probe=probe_yt)),
         ("yt-score", check_yt_score_budget),
         ("rag", lambda: check_rag_keys(strict=strict)),
+        ("grounding", lambda: check_grounding(rag_mode)),
+        ("scrape", lambda: check_scrape_path(strict=strict)),
         ("media", lambda: check_media(strict=strict)),
     ]
 
@@ -384,11 +512,14 @@ def main(argv):
     print("=" * 62)
     failed = [r for r in results if r[2] == "FAIL"]
     warned = [r for r in results if r[2] == "WARN"]
+    audit_path = _write_audit_log(1 if failed else
+                                  (2 if (strict and warned) else 0))
     if failed:
         print(f"HEALTH CHECK: FAILED — {len(failed)} required check(s) failing. "
               f"Run aborted.")
         for _, name, _, detail in failed:
             print(f"  ✗ {name}: {detail}")
+        print(f"Audit log written: {audit_path}")
         print("Fix the failures above, then re-run ./run_production.sh")
         return 1
     if strict and warned:
@@ -396,11 +527,13 @@ def main(argv):
               f"treated as failures.")
         for _, name, _, detail in warned:
             print(f"  ⚠ {name}: {detail}")
+        print(f"Audit log written: {audit_path}")
         print("Resolve the warnings (or drop --strict), then re-run.")
         return 2
     print(f"HEALTH CHECK: PASSED — all required checks green"
           + (f" (+{len(warned)} advisory warning(s))" if warned else "")
           + ". Proceeding with production run.")
+    print(f"Audit log written: {audit_path}")
     return 0
 
 

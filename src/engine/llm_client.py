@@ -4,8 +4,14 @@ import time
 import requests
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
+from src.engine.logger import logger
 
 load_dotenv()
+
+
+def _trunc(s: str, n: int = 2000) -> str:
+    s = s or ""
+    return s if len(s) <= n else s[:n] + f"...<truncated {len(s) - n} chars>"
 
 
 class LLMClient:
@@ -176,44 +182,81 @@ class LLMClient:
                 }
                 for retry_idx in range(3):  # client-level transient retry
                     backoff = 2 * (retry_idx + 1)
+                    t0 = time.time()
                     try:
                         print(f"[LLMClient] Invoking Cloud OpenRouter ({model}) [try {retry_idx + 1}/3]...")
                         response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
+                        latency_ms = int((time.time() - t0) * 1000)
+                        raw_text = response.text
 
                         if response.status_code in transient_status:
-                            print(f"[LLMClient] Transient HTTP {response.status_code} from '{model}'; backoff {backoff}s.")
+                            logger.warning(
+                                "LLM_CALL",
+                                f"Transient HTTP {response.status_code} from '{model}'; backoff {backoff}s.",
+                                component="LLM_CLIENT",
+                                extra_data={"api":"openrouter_chat_completions","model":model,
+                                            "url":self.base_url,"status":response.status_code,
+                                            "latency_ms":latency_ms,"prompt":_trunc(prompt),
+                                            "system_prompt":_trunc(system_prompt,800),
+                                            "response":_trunc(raw_text,1000),"retry":retry_idx+1})
                             time.sleep(backoff)
                             continue
                         if response.status_code >= 400:
-                            print(f"[LLMClient] Permanent HTTP {response.status_code} from '{model}': {response.text[:200]}")
+                            logger.error(
+                                "LLM_CALL",
+                                f"Permanent HTTP {response.status_code} from '{model}': {_trunc(raw_text,300)}",
+                                component="LLM_CLIENT",
+                                extra_data={"api":"openrouter_chat_completions","model":model,
+                                            "url":self.base_url,"status":response.status_code,
+                                            "latency_ms":latency_ms,"prompt":_trunc(prompt),
+                                            "response":_trunc(raw_text,1000)})
                             break  # permanent -> move to next model
 
                         data = response.json()
                         if "choices" not in data or not data["choices"]:
-                            print(f"[LLMClient] No choices from '{model}': {data}")
+                            logger.warning("LLM_CALL", f"No choices from '{model}'", component="LLM_CLIENT",
+                                           extra_data={"api":"openrouter_chat_completions","model":model,
+                                                       "status":response.status_code,"response":_trunc(raw_text,1000)})
                             time.sleep(backoff)
                             continue
 
                         choice = data["choices"][0]
                         finish_reason = choice.get("finish_reason")
                         content = choice.get("message", {}).get("content", "")
-                        print(f"[LLMClient] {model} status {response.status_code}, len {len(content)}, finish_reason: {finish_reason}")
 
                         if choice.get("error") or finish_reason == "error":
-                            print(f"[LLMClient] Model error from '{model}' (finish_reason=error); backoff {backoff}s.")
+                            logger.warning("LLM_CALL", f"Model error from '{model}' (finish_reason=error)",
+                                           component="LLM_CLIENT",
+                                           extra_data={"model":model,"finish_reason":finish_reason,
+                                                       "response":_trunc(content,1000)})
                             time.sleep(backoff)
                             continue  # transient model error -> retry, then next model
 
                         parsed = self._clean_and_parse_json(content)
                         if parsed is not None:
+                            logger.info(
+                                "LLM_CALL",
+                                f"{model} OK status {response.status_code}, len {len(content)}, finish_reason: {finish_reason}",
+                                component="LLM_CLIENT",
+                                extra_data={"api":"openrouter_chat_completions","model":model,
+                                            "url":self.base_url,"status":response.status_code,
+                                            "finish_reason":finish_reason,"latency_ms":latency_ms,
+                                            "prompt":_trunc(prompt),"system_prompt":_trunc(system_prompt,800),
+                                            "response":_trunc(content,4000),"retry":retry_idx+1})
                             return parsed
-                        print(f"[LLMClient] JSON parse failed from '{model}' (finish_reason={finish_reason}); backoff {backoff}s.")
+                        logger.warning("LLM_CALL", f"JSON parse failed from '{model}' (finish_reason={finish_reason})",
+                                       component="LLM_CLIENT",
+                                       extra_data={"model":model,"finish_reason":finish_reason,
+                                                   "prompt":_trunc(prompt),"response":_trunc(content,1000)})
                         time.sleep(backoff)  # malformed/truncated -> retry, then next model
                     except requests.exceptions.Timeout:
-                        print(f"[LLMClient] Timeout from '{model}'; backoff {backoff}s.")
+                        logger.warning("LLM_CALL", f"Timeout from '{model}'", component="LLM_CLIENT",
+                                       extra_data={"api":"openrouter_chat_completions","model":model,
+                                                   "latency_ms":int((time.time()-t0)*1000),"prompt":_trunc(prompt)})
                         time.sleep(backoff)
                     except Exception as e:
-                        print(f"[LLMClient] Cloud LLM Exception ({model}): {e}")
+                        logger.error("LLM_CALL", f"Cloud LLM Exception ({model}): {e}", component="LLM_CLIENT",
+                                     extra_data={"api":"openrouter_chat_completions","model":model,"error":str(e)})
                         time.sleep(backoff)
                 # this model exhausted its tries -> move to next fallback model
             return None
