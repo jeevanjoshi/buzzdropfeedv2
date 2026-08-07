@@ -59,12 +59,21 @@ class OrchestratorAgent:
         """
         Executes complete autonomous pipeline run with structured logging & trajectory tracing.
         """
-        # A/B switch: "grounded" uses the Google Search research pass (see
-        # src/engine/grounded_search.py); anything else uses the scraper RAG path.
-        rag_retriever.set_grounded(rag_mode == "grounded")
+        # A/B switch: "grounded" uses the Google Search research pass, "hybrid"
+        # uses grounded cited facts as the core AND on-topic scraper depth, and
+        # anything else uses the scraper RAG path (see src/engine/grounded_search.py).
+        rag_mode = (rag_mode or "scraper").strip().lower()
+        if rag_mode not in ("scraper", "grounded", "hybrid"):
+            rag_mode = "scraper"
+        rag_retriever.set_rag_mode(rag_mode)
+        _rag_desc = {
+            "scraper": "5-scraper path",
+            "grounded": "Google Search grounding only",
+            "hybrid": "grounded core + scraper depth",
+        }[rag_mode]
         logger.info(
             "INITIALIZATION",
-            f"RAG mode: {rag_mode} ({'Google Search grounding' if rag_mode == 'grounded' else '5-scraper path'})",
+            f"RAG mode: {rag_mode} ({_rag_desc})",
             pipeline_id=pipeline_id or (state.pipeline_id if state else None),
             component="RAG_RETRIEVER",
         )

@@ -23,7 +23,7 @@ Pi edge node, and email the result when it finishes.
 
 Options:
   --no-detach            Run in the foreground; keep all flags; skip Pi sync
-  --rag <MODE>           Research mode: grounded|scraper (Default: 'scraper')
+  --rag <MODE>           Research mode: grounded|hybrid|scraper (Default: 'scraper')
   --renderer <ENGINE>    Renderer: ffmpeg|moviepy (Default: 'ffmpeg')
   --crossfade <SEC>      Crossfade duration in seconds (float)
   --resume               Auto-resume the latest unfinished checkpoint
@@ -56,18 +56,30 @@ PI5_TARGET_DIR="/home/jeevanjoshi/buzzdropfeedv2"
 
 # ── Pre-Flight Health Check ──────────────────────────────────────────────
 # Gate the run on LLM availability, YouTube quota+auth, Pi audio-edge
-# reachability, and required binaries/.env keys BEFORE any sync or run cost.
-# Aborts (exit 1) if any REQUIRED check fails. Pass --skip-health-check to
-# bypass (dangerous: a broken run will just fail mid-pipeline).
+# reachability, grounding (when --rag grounded is requested), and required
+# binaries/.env keys BEFORE any sync or run cost. Aborts (exit 1) if any
+# REQUIRED check fails. Pass --skip-health-check to bypass (dangerous: a broken
+# run will just fail mid-pipeline).
 if [[ " $* " != *" --skip-health-check "* ]]; then
     echo "[HEALTH] Running production pre-flight health check..."
     if [ -d "venv" ]; then
         source venv/bin/activate
     fi
-    if python healthcheck.py; then
+    # Forward the requested RAG research mode so the grounding gate can FAIL
+    # when --rag grounded is asked for but Vertex is not configured.
+    HEALTH_RAG=""
+    if [[ "$*" == *"--rag"* ]]; then
+        for ((i=1; i<=$#; i++)); do
+            if [[ "${!i}" == "--rag" ]]; then
+                j=$((i+1)); HEALTH_RAG="--rag ${!j}"; break
+            fi
+        done
+    fi
+    if python healthcheck.py ${HEALTH_RAG}; then
         echo "[HEALTH] All checks green — proceeding with production run."
     else
         echo "[HEALTH] FAILED — aborting production run before launch." >&2
+        echo "[HEALTH] See logs/health_check.log for the audit trail." >&2
         exit 1
     fi
 else

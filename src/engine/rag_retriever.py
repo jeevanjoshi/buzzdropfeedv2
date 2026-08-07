@@ -169,13 +169,72 @@ class RAGTopicRetriever:
         self._rag_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._rag_cache_ttl_s = 6 * 3600
         # A/B switch for the Google Search grounding research pass. Set programmatically
-        # from the orchestrator --rag grounded|scraper flag, or from env RAG_GROUNDED=1.
+        # from the orchestrator --rag grounded|hybrid|scraper flag, or from env RAG_GROUNDED=1.
         # Defaults to the scraper path so pipeline behavior is unchanged unless opted in.
-        self.use_grounded = os.getenv("RAG_GROUNDED", "").strip().lower() in ("1", "true")
+        #   scraper  : 5-scraper crawl only (default)
+        #   grounded : Google-Search cited facts ONLY (replaces scraper)
+        #   hybrid   : grounded cited facts as the core + on-topic scraper depth (no pollution)
+        self.rag_mode = "grounded" if os.getenv("RAG_GROUNDED", "").strip().lower() in ("1", "true") else "scraper"
+        self.use_grounded = self.rag_mode in ("grounded", "hybrid")
 
     def set_grounded(self, enabled: bool) -> None:
         self.use_grounded = bool(enabled)
+        if self.use_grounded and self.rag_mode == "scraper":
+            self.rag_mode = "grounded"
         print(f"[RAGRetriever] Google Search grounding mode: {'ON' if self.use_grounded else 'OFF'}")
+
+    def set_rag_mode(self, mode: str) -> None:
+        mode = (mode or "scraper").strip().lower()
+        if mode not in ("scraper", "grounded", "hybrid"):
+            mode = "scraper"
+        self.rag_mode = mode
+        self.use_grounded = mode in ("grounded", "hybrid")
+        print(f"[RAGRetriever] RAG mode set: {mode} (grounding={'ON' if self.use_grounded else 'OFF'})")
+
+    @staticmethod
+    def _merge_grounded_scraper(grounded_pack: Dict[str, Any], scraper_pack: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge the Google-grounded (cited, high-precision) corpus as the CORE with
+        the scraper's on-topic depth, WITHOUT polluting.
+
+        Guards:
+          * Grounded facts go first (highest precision / cited).
+          * Scraper lines are appended only when they do NOT textually duplicate a
+            grounded fact (dedup by normalized alnum text) — prevents the Observer's
+            verbatim-copy / over-repetition false positives.
+          * All input lines already passed the promo-filter / on-topic(>=2) guards
+            in their respective builders.
+        """
+        def _norm(line: str) -> str:
+            return " ".join(re.findall(r"[a-z0-9]+", line.lower()))
+
+        g_lines = [l for l in (grounded_pack.get("fact_corpus", "") or "").splitlines() if l.strip()]
+        s_lines = [l for l in (scraper_pack.get("fact_corpus", "") or "").splitlines() if l.strip()]
+
+        seen: Set[str] = set()
+        merged = []
+        for l in g_lines + s_lines:
+            k = _norm(l)
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            merged.append(l)
+
+        scraper_pack["fact_corpus"] = "\n".join(merged)
+        scraper_pack["rag_mode"] = "grounded+scraper"
+        scraper_pack["_grounding_meta"] = grounded_pack.get("_grounding_meta", {})
+        g_ctx = grounded_pack.get("full_rag_context_text", "") or ""
+        if g_ctx:
+            scraper_pack["full_rag_context_text"] = (
+                "GROUNDED GOOGLE-SEARCH FACTS (CITED):\n" + g_ctx + "\n\n"
+                + (scraper_pack.get("full_rag_context_text", "") or "")
+            )
+        gtb = "\n".join(g_lines)
+        if gtb:
+            scraper_pack["ground_truth_block"] = (
+                gtb + "\n" + (scraper_pack.get("ground_truth_block", "") or "")
+            )
+        return scraper_pack
+
 
     def search_duckduckgo_facts(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
         """
@@ -400,17 +459,36 @@ class RAGTopicRetriever:
                         return text[:max_chars]
             except Exception as e:
                 print(f"[RAGRetriever] Firecrawl scrape failed: {e}")
-        # Fallback: urllib GET + HTML -> text
-        try:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=12) as response:
-                raw = response.read().decode("utf-8", errors="ignore")
-            text = self._html_to_text(raw)
-            if len(text) >= 200:
-                return text[:max_chars]
-        except Exception as e:
-            print(f"[RAGRetriever] Article scrape fallback failed: {e}")
+        # Fallback: urllib GET + HTML -> text. Bare GETs are aggressively
+        # 403-blocked by major news sites; retry once with a fuller browser-like
+        # header set before giving up, and keep the failure terse (not a raw
+        # exception dump) since a 403 here is an expected bot-block, not an error.
+        ua_pool = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+        ]
+        for attempt, ua in enumerate(ua_pool[:2]):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": ua,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=12) as response:
+                    raw = response.read().decode("utf-8", errors="ignore")
+                text = self._html_to_text(raw)
+                if len(text) >= 200:
+                    return text[:max_chars]
+            except Exception:
+                if attempt == 0:
+                    continue  # retry once with the alternate UA
+                print(f"[RAGRetriever] Article scrape fallback 403/blocked off its "
+                      f"source URL ({src_name or url}) — expecting this for "
+                      f"bot-protected sites; corpus already uses feed/fact sources.")
+                return ""
         return ""
 
     def extract_graph_triplets(self, text: str) -> List[Tuple[str, str, str]]:
@@ -601,23 +679,24 @@ class RAGTopicRetriever:
         keywords = [k for k in topic.keywords if len(k) > 3][:6]
         cache_key = f"{headline}|{len(verified_facts)}"
 
-        # OPT-IN Google Search grounding research pass (POC, env-gated). When
-        # RAG_GROUNDED=1 AND Vertex/ADC credentials are present, replace the
-        # 5-scraper crawl + 403-fragile deep-crawl with ONE cited Google-Search
-        # research call. The resulting pack reuses the SAME corpus schema so
-        # assess_corpus_sufficiency / story_designer / Observer are unchanged.
+        # Google Search grounding research pass. In "grounded" mode it REPLACES the
+        # scraper path with one cited Google-Search research call. In "hybrid" mode
+        # it is the high-precision CITATIONS core and the scraper path below then
+        # ADDS on-topic depth on top (with dedup guards so the grounded corpus is
+        # never diluted/polluted).
+        grounded_pack = None
         if self.use_grounded:
             try:
                 from src.engine.grounded_search import build_grounded_knowledge_pack
-                grounded = build_grounded_knowledge_pack(
+                grounded_pack = build_grounded_knowledge_pack(
                     headline=headline, summary=summary, keywords=keywords
                 )
             except Exception as e:
                 print(f"[RAGRetriever] Grounded research failed, falling back to scraper path: {e}")
-                grounded = None
-            if grounded is not None:
-                self._rag_cache[cache_key] = (time.time(), grounded)
-                return grounded
+                grounded_pack = None
+            if grounded_pack is not None and self.rag_mode == "grounded":
+                self._rag_cache[cache_key] = (time.time(), grounded_pack)
+                return grounded_pack
 
         # Cache: return recent RAG pack for the same headline/fact-count to avoid
         # redundant paid/network searches.  Passing ``refresh=True`` bypasses the
@@ -926,6 +1005,11 @@ class RAGTopicRetriever:
         }
 
         self._rag_cache[cache_key] = (time.time(), knowledge_pack)
+        # Hybrid: prepend the grounded cited core over the scraper depth (the pack
+        # was built above as `knowledge_pack`); dedup guards keep the corpus clean.
+        if grounded_pack is not None and self.rag_mode == "hybrid":
+            knowledge_pack = self._merge_grounded_scraper(grounded_pack, knowledge_pack)
+            self._rag_cache[cache_key] = (time.time(), knowledge_pack)
         return knowledge_pack
 
 

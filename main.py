@@ -35,8 +35,9 @@ RENDERING
   --crossfade <seconds>          crossfade duration (float, default 0.5)
 
 RAG / RESEARCH  (A/B: Google Search grounding vs 5-scraper path)
-  --rag grounded                 use the Google Search grounding research pass
-  --rag scraper                  use the 5-scraper RAG path (default)
+  --rag grounded                 Google Search grounding only (cited facts)
+  --rag hybrid                   grounded cited core + on-topic scraper depth
+  --rag scraper                  5-scraper RAG path (default)
 
 RESUME
   --resume <pipeline_id>         resume from logs/state_<pipeline_id>.json
@@ -44,6 +45,7 @@ RESUME
 EXAMPLES
   python3 main.py --global --till-upload                 # real run, no publish
   python3 main.py --global --rag grounded --till-upload  # grounded research arm, no publish
+  python3 main.py --global --rag hybrid --till-upload    # grounded core + scraper depth
   python3 main.py --global --rag scraper                 # scraper RAG arm (default), publish
   python3 main.py --resume csvg-exec-20260805-185905     # resume a specific run
   python3 main.py --offline --dummy-frames --till-upload # offline-ish smoke test
@@ -80,8 +82,11 @@ def main():
         if "--rag" in sys.argv:
             for i, arg in enumerate(sys.argv):
                 if arg == "--rag" and i + 1 < len(sys.argv):
-                    if sys.argv[i + 1] in ("grounded", "g"):
+                    val = sys.argv[i + 1].strip().lower()
+                    if val in ("grounded", "g"):
                         rag_mode = "grounded"
+                    elif val in ("hybrid", "h"):
+                        rag_mode = "hybrid"
                     else:
                         rag_mode = "scraper"
         if "--till-upload" in sys.argv or "--no-upload" in sys.argv:

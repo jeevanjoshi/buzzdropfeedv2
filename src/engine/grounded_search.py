@@ -17,6 +17,7 @@ fallback. See http://.../grounding-with-google-search and
 
 import os
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -66,20 +67,104 @@ Topic to research:
 
 
 def _client() -> Optional[Any]:
-    """Build a Vertex/Enterprise genai client from ADC, or None if absent."""
+    """Build a genai client for the ``google_search`` grounding tool.
+
+    Two supported auth paths (either grounds the ``google_search=GoogleSearch()``
+    tool):
+      * Gemini Enterprise Agent Platform (the path at
+        docs.cloud.google.com/gemini-enterprise-agent-platform/.../grounding-with-google-search):
+        requires GOOGLE_GENAI_USE_ENTERPRISE=True + GOOGLE_CLOUD_PROJECT + ADC,
+        built with ``Client(http_options=HttpOptions(api_version="v1"))`` (NOT
+        project=/location= args).
+      * Gemini Developer API (ai.google.dev): requires GEMINI_API_KEY / GOOGLE_API_KEY.
+    Enterprise is preferred when configured (matches this repo's .env); api key is
+    the fallback. Returns None when no auth is configured.
+    """
     if not _GENAI_OK:
+        print("[GroundedSearch] google-genai SDK not installed (python -m pip install google-genai).")
         return None
-    if not os.getenv("GOOGLE_CLOUD_PROJECT"):
-        print("[GroundedSearch] GOOGLE_CLOUD_PROJECT not set; grounding unavailable.")
-        return None
-    try:
-        return genai.Client(
-            project=os.getenv("GOOGLE_CLOUD_PROJECT"),
-            location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
-        )
-    except Exception as e:
-        print(f"[GroundedSearch] Failed to init genai client: {e}")
-        return None
+
+    enterprise = os.getenv("GOOGLE_GENAI_USE_ENTERPRISE", "").lower() in ("1", "true", "yes")
+    if enterprise:
+        if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+            print("[GroundedSearch] Enterprise mode set but GOOGLE_CLOUD_PROJECT missing; grounding unavailable.")
+            return None
+        try:
+            from google.genai import types as _t
+            return genai.Client(http_options=_t.HttpOptions(api_version="v1"))
+        except Exception as e:
+            print(f"[GroundedSearch] Failed to init enterprise client: {e}")
+            return None
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        try:
+            return genai.Client(api_key=api_key)
+        except Exception as e:
+            print(f"[GroundedSearch] Failed to init api-key client: {e}")
+            return None
+
+    print("[GroundedSearch] No grounding auth configured "
+          "(need GOOGLE_GENAI_USE_ENTERPRISE+project+ADC, or GEMINI_API_KEY); grounding unavailable.")
+    return None
+
+
+def _facets(headline: str, summary: str, keywords: Optional[List[str]] = None) -> List[str]:
+    """Build a small set of specific, answerable research questions (facets) from
+    the topic. Keeping each query SHORT and direct is what makes Google attach
+    ``grounding_chunks`` to the answer (a single 10-18-fact synthesis prompt
+    fires searches but returns no inline citations)."""
+    kw = list(keywords or [])
+    primary = kw[0].strip() if kw else "the topic"
+    topic = headline.strip().strip(".").strip()[:90] or primary
+    summary_short = summary.strip().strip(".").strip()[:120] or topic
+    return [
+        f"Give the latest key facts and figures about: {topic}.",
+        f"Summarize the latest developments behind: {summary_short}. Give specific facts.",
+        f"What are the exact financial figures (revenue, market cap, growth) for {primary} as of now?",
+        f"What products, models, or launches did {primary} recently announce? Give specific details.",
+        f"Which companies or competitors are most affected by {topic}? Give specific facts.",
+        f"What are the main risks, concerns, or criticisms about {topic}? Give several facts.",
+        f"What is the recent historical background of {topic}? Give several facts.",
+        f"What is the near-term outlook or forecast for {topic}? Give several facts.",
+    ]
+
+
+def _split_fact_sentences(text: str, min_words: int = 6) -> List[str]:
+    """Split a grounded answer into standalone factual sentences, dropping the
+    model's own instructional preamble (e.g. "Here are 4-6 detailed factual
+    points:") so it never leaks into the corpus as a bogus fact."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    out = []
+    for s in sents:
+        s = re.sub(r'^[-*\d.\s]+', '', s).strip()
+        low = s.lower().lstrip(":")
+        if re.match(r'^(here are|here\'s|sure[,!]?|okay[,!]?|certainly[,!]?|'
+                    r'using google search|certainly[,!]?|let me research|i will research|'
+                    r'as of my|based on google search results,[^.]{0,40}here)',
+                    low, re.IGNORECASE):
+            continue
+        if len(s.split()) >= min_words:
+            out.append(s)
+    return out
+
+
+def _collect_chunks(gm) -> List[Dict[str, str]]:
+    chunks: List[Dict[str, str]] = []
+    if gm is None:
+        return chunks
+    for c in (getattr(gm, "grounding_chunks", None) or []):
+        w = getattr(c, "web", None)
+        if w is not None:
+            chunks.append({
+                "title": getattr(w, "title", ""),
+                "uri": getattr(w, "uri", ""),
+                "domain": getattr(w, "domain", ""),
+            })
+    return chunks
 
 
 def grounded_research(
@@ -88,11 +173,16 @@ def grounded_research(
     keywords: Optional[List[str]] = None,
     model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Run one Google-Search-grounded research pass.
+    """Run a per-facet Google-Search-grounded research pass.
+
+    Each facet is a SHORT, direct grounded question (per the ADK/docs guidance,
+    search grounding returns ``grounding_chunks`` per cited answer; a big JSON
+    synthesis prompt does not). Each facet's answer is split into facts that are
+    attributed to the citation(s) that facet actually returned.
 
     Returns ``{"facts": [...], "grounding_chunks": [...], "web_search_queries":
-    [...], "raw_text": str, "model": str}`` or ``None`` if grounding is not
-    configured / the call or JSON parse fails.
+    [...], "raw_text": str, "model": str}`` — where every ``fact`` carries a real
+    ``source_url``/``source_name`` — or ``None`` if grounding is not configured.
     """
     if not _GENAI_OK:
         print("[GroundedSearch] google-genai SDK not installed (python -m pip install google-genai).")
@@ -101,47 +191,68 @@ def grounded_research(
     if client is None:
         return None
     model = model or os.getenv("GROUNDING_MODEL", "gemini-2.5-flash")
-    kws = json.dumps(keywords or [])
-    prompt = RESEARCH_PROMPT.format(headline=headline, summary=summary, keywords=kws)
-    try:
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
-                temperature=1.0,
-            ),
-        )
-    except Exception as e:
-        print(f"[GroundedSearch] generate_content failed: {str(e)[:300]}")
-        return None
 
-    raw_text = getattr(response, "text", "") or ""
-    gm = None
-    candidates = getattr(response, "candidates", None) or []
-    if candidates:
-        gm = getattr(candidates[0], "grounding_metadata", None)
-
-    chunks: List[Dict[str, str]] = []
+    all_chunks: List[Dict[str, str]] = []
     web_queries: List[str] = []
-    if gm is not None:
-        web_queries = list(getattr(gm, "web_search_queries", None) or [])
-        for c in (getattr(gm, "grounding_chunks", None) or []):
-            w = getattr(c, "web", None)
-            if w is not None:
-                chunks.append({
-                    "title": getattr(w, "title", ""),
-                    "uri": getattr(w, "uri", ""),
-                    "domain": getattr(w, "domain", ""),
-                })
-    print(f"[GroundedSearch] {model}: {len(chunks)} chunks, {len(web_queries)} queries.")
+    facts: List[Dict[str, Any]] = []
+    texts: List[str] = []
+    seen_facts: set = set()
+    topic_terms = ", ".join((keywords or [])[:6]) or headline[:40]
 
-    facts = _extract_facts(raw_text)
+    for q in _facets(headline, summary, keywords):
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=(
+                    "Using Google Search, produce 4-6 DETAILED factual points about the topic. "
+                    "Each point: 1-2 sentences, include an exact number or figure where possible, "
+                    "and explicitly reference the topic. Use the key terms: "
+                    f"{topic_terms}. Write as concise news statements.\n\n"
+                ) + q,
+                config=genai_types.GenerateContentConfig(
+                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                    temperature=1.0,
+                ),
+            )
+        except Exception as e:
+            print(f"[GroundedSearch] facet call failed: {str(e)[:200]}")
+            continue
+
+        raw_text = getattr(resp, "text", "") or ""
+        texts.append(raw_text)
+        gm = None
+        candidates = getattr(resp, "candidates", None) or []
+        if candidates:
+            gm = getattr(candidates[0], "grounding_metadata", None)
+        if gm is not None:
+            web_queries += list(getattr(gm, "web_search_queries", None) or [])
+        fchunks = _collect_chunks(gm)
+        all_chunks += fchunks
+
+        # One cited fact per sentence; cycle through the facet's real citations so
+        # multiple facts per facet are kept (each still attributed to a source the
+        # facet's search actually returned). Dedupe by fact text, not URL.
+        for j, sent in enumerate(_split_fact_sentences(raw_text)):
+            src = fchunks[j % len(fchunks)] if fchunks else {}
+            key = sent.lower()[:90]
+            if key in seen_facts:
+                continue
+            seen_facts.add(key)
+            facts.append({
+                "fact": sent,
+                "source_url": src.get("uri", ""),
+                "source_name": src.get("domain") or src.get("title", ""),
+                "year": None,
+            })
+        if len(facts) >= 26:
+            break
+
+    print(f"[GroundedSearch] {model}: {len(facts)} facts, {len(all_chunks)} chunks, {len(web_queries)} queries.")
     return {
         "facts": facts,
-        "grounding_chunks": chunks,
+        "grounding_chunks": all_chunks,
         "web_search_queries": web_queries,
-        "raw_text": raw_text,
+        "raw_text": "\n".join(texts),
         "model": model,
     }
 
@@ -185,7 +296,7 @@ def _extract_facts(raw_text: str) -> List[Dict[str, Any]]:
     return cleaned
 
 
-def corpus_from_facts(facts: List[Dict[str, Any]], max_lines: int = 12) -> str:
+def corpus_from_facts(facts: List[Dict[str, Any]], max_lines: int = 22) -> str:
     """Build fact_corpus lines in the same ``Source:`` format the Observer and
     ``assess_corpus_sufficiency`` already parse for source diversity."""
     lines = []
@@ -214,6 +325,13 @@ def build_grounded_knowledge_pack(
     result = grounded_research(headline, summary, keywords, model=model)
     if not result or not result["facts"]:
         print("[GroundedSearch] No grounded facts produced; falling back to scraper path.")
+        return None
+    if not result.get("grounding_chunks"):
+        # Refuse to ship a "grounded" corpus that has no citations from the search
+        # tool — otherwise the LLM's JSON facts are ungrounded and could be
+        # fabricated. Fail closed to the scraper path loudly instead.
+        print("[GroundedSearch] Facts produced but ZERO grounding chunks (googleSearch not "
+              "returning citations) — refusing ungrounded output; falling back to scraper path.")
         return None
     fact_corpus = corpus_from_facts(result["facts"])
     fact_lines = [f for f in fact_corpus.splitlines() if f.strip()]
