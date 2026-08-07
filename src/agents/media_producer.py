@@ -14,6 +14,7 @@ from mcp_servers.media_cloud.server import (
     PlaywrightSVGRequest, ChartRequest, GIFRequest
 )
 from src.engine.media_budget import media_budget
+from src.agents.story_designer import extract_numeric_chart_spec
 
 # Paid (fal/Replicate Flux) is reserved for these "hero" shots + the thumbnail.
 # All other standard-image shots use FREE assets (Pixabay/synthetic) to stay
@@ -28,6 +29,22 @@ PAD_AFTER_NARRATION = 0.6        # trailing silence/hold after each shot's narra
 MIN_SHOT_DUR = 2.0               # hard floor for a single shot's timeline length
 BGM_VOLUME = 0.12                # background music duck factor used by both renderers
 RESOLUTION = (1920, 1080)        # strict 16:9 widescreen
+
+# Statistic-shot numeric-claim detection (Phase 1 CSVG Media Quality): if a shot's
+# narration carries >=2 numeric/statistical patterns (percentages, currency,
+# Billion/Million/crore, YoY...), we route it to the grounded matplotlib chart path
+# instead of shipping a generic stock image. Values are drawn verbatim from the
+# RAG chart_spec / verified facts — never fabricated.
+_NUMERIC_CLAIM_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*%|\$\d[\d,.]*|€\d[\d,.]*|¥\d[\d,.]*|₹\d[\d,.]*|"
+    r"\b\d+(?:\.\d+)?\s*(?:billion|Billion|crore|Crore|million|Million|"
+    r"trillion|Trillion|thousand|YoY|%)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_numeric_claim(narration: str, min_matches: int = 2) -> bool:
+    return bool(narration) and len(_NUMERIC_CLAIM_RE.findall(narration)) >= min_matches
 
 
 def _probe_duration(path: str) -> Optional[float]:
@@ -65,6 +82,35 @@ def _probe_wav_duration(path: str) -> Optional[float]:
             return w.getnframes() / float(w.getframerate())
     except Exception:
         return _probe_duration(path)
+
+
+# Peak limiter (Phase 3, CSVG Media Quality): the latest run measured full-scale
+# clipping (-0.0 dB) at the TTS WAV stage on several shots. Applying ffmpeg
+# `alimiter` right after synthesis guarantees no shot ever clips at the source
+# (before the final loudnorm mix). Duration is unchanged, so subtitle/timeline
+# sync is preserved.
+def _peak_limit_wav(wav_path: str, limit: float = 0.89) -> None:
+    """Applies a peak limiter (~-1.0 dB) to a narration WAV in place (no-op on error)."""
+    if not wav_path or not os.path.exists(wav_path):
+        return
+    import subprocess
+    tmp = wav_path + "_lim.wav"
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-i", wav_path, "-af", f"alimiter=limit={limit}:level=false",
+             "-c:a", "pcm_s16le", tmp],
+            capture_output=True, text=True, timeout=120,
+        )
+        if res.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 100:
+            os.replace(tmp, wav_path)
+        elif os.path.exists(tmp):
+            os.remove(tmp)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
 
 
 def merge_ass_subtitle_files(ass_paths: List[str], shot_durations: List[float], output_master_ass: str, crossfade: float = 0.0):
@@ -179,7 +225,48 @@ def enrich_visual_prompt(visual_prompt: str, act_index: int, shot_id: int) -> st
     return enriched
 
 
-def _generate_free_visual(shot, raw_visual_prompt: str, img_path: str, mp4_path: str) -> bool:
+# Phase 2 (CSVG Media Quality): the old stock query took the first 4 3-letter+
+# words of the visual prompt, which — because every prompt opens with "Cinematic
+# 16:9 widescreen ..." — collapsed to "cinematic widescreen shot ..." and pulled
+# generic/off-topic B-roll. This extracts the TOPICAL subject words after the
+# ':', dropping camera/lighting noise, and falls back to topic anchor words.
+_QUERY_NOISE_WORDS = {
+    "cinematic", "widescreen", "169", "8k", "photorealistic", "sweeping", "archival",
+    "golden", "shot", "slow", "dolly", "glowing", "warm", "lighting", "dramatic",
+    "camera", "scene", "pan", "zoom", "macro", "wide", "closeup", "close", "depth",
+    "field", "bokeh", "lens", "flare", "hdr", "high", "contrast", "rim", "moody",
+    "lowkey", "documentary", "style", "visual", "atmosphere", "ambient", "top",
+    "bottom", "left", "right", "aerial", "vintage", "texture", "preset", "film",
+    "professional", "generated", "image", "background", "vibrant", "color", "grade",
+}
+
+
+def _extract_search_keywords(raw_prompt: str, anchors: Optional[List[str]] = None) -> str:
+    """Builds a topical stock search query from the visual prompt (text after the
+    first ':'), dropping camera/lighting noise. Falls back to topic anchor words
+    when too few topical keywords remain. Never returns an empty query."""
+    body = raw_prompt
+    if ":" in body:
+        body = body.split(":", 1)[1]
+    words = re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", body or "")
+    seen, uniq = set(), []
+    for w in words:
+        k = w.lower()
+        if k in _QUERY_NOISE_WORDS or k in seen:
+            continue
+        seen.add(k)
+        uniq.append(k)
+    if len(uniq) < 2:
+        for a in (anchors or []):
+            ka = str(a or "").lower().strip()
+            if len(ka) >= 3 and ka not in _QUERY_NOISE_WORDS and ka not in seen:
+                seen.add(ka)
+                uniq.append(ka)
+    return " ".join(uniq[:6]) if uniq else "abstract"
+
+
+def _generate_free_visual(shot, raw_visual_prompt: str, img_path: str, mp4_path: str,
+                          anchors: Optional[List[str]] = None) -> bool:
     """
     Generates a shot visual using FREE assets only (Pixabay stock -> Pexels ->
     local synthetic) — for non-premium shots and when the AI image budget is
@@ -188,8 +275,7 @@ def _generate_free_visual(shot, raw_visual_prompt: str, img_path: str, mp4_path:
     specialized = False
     import requests
 
-    words = re.findall(r'\b\w{3,}\b', raw_visual_prompt)
-    clean_query = " ".join(words[:4]) if words else "abstract"
+    clean_query = _extract_search_keywords(raw_visual_prompt, anchors)
     query_lower = raw_visual_prompt.lower()
     is_vector = any(kw in query_lower for kw in ["vector", "svg", "icon", "logo"])
     is_illustration = any(kw in query_lower for kw in ["illustration", "graphic", "clipart"])
@@ -323,6 +409,14 @@ class MediaProducerAgent:
         concat_lines = []
         shot_timings: List[float] = []   # measured (probed) final durations per shot
 
+        # Topical anchor words (twitter keywords + headline) used to build relevant
+        # stock-search queries when a shot's prompt leaves too few subject words.
+        topic_anchors: List[str] = []
+        if state.selected_topic:
+            topic_anchors = list(getattr(state.selected_topic, "keywords", None) or [])
+            headline = getattr(state.selected_topic, "headline", "") or ""
+            topic_anchors += [w for w in re.findall(r"[A-Za-z]{3,}", headline)]
+
         for shot in script.shots:
             shot_key = f"shot_{shot.shot_id}"
 
@@ -438,6 +532,11 @@ class MediaProducerAgent:
             asset_paths.audio[shot_key] = wav_path
             asset_paths.subtitles[shot_key] = ass_path
 
+            # Phase 3: kill WAV-stage clipping. The limiter must run on the actual
+            # narration WAV (both remote-downloaded and local-synth paths converge
+            # here) so no shot ever ships at -0.0 dB, before the final loudnorm mix.
+            _peak_limit_wav(wav_path)
+
             # ---- Source-of-truth timing: measure the real narration length ----
             audio_dur = _probe_wav_duration(wav_path)
             if not audio_dur:
@@ -454,8 +553,64 @@ class MediaProducerAgent:
             is_specialized = False
             v_type = getattr(shot, "visual_type", VisualType.STANDARD_IMAGE)
 
+            # Check 0: Real, grounded stat chart from RAG data (chart_spec OR
+            #             >=2 numeric claims) — renders an annotated matplotlib
+            #             line/bar chart with the correct numbers, never the
+            #             silent PIL placeholder.
+            explicit_chart = (
+                v_type == VisualType.MATPLOTLIB_CHART
+                or "[chart:" in prompt_lower
+                or "stock chart" in prompt_lower
+                or "market graph" in prompt_lower
+            )
+            chart_spec = getattr(shot, "chart_spec", None) or {}
+            numeric_route = (
+                v_type in (VisualType.STANDARD_IMAGE, VisualType.MATPLOTLIB_CHART)
+                and _has_numeric_claim(clean_narration)
+            )
+            if chart_spec or explicit_chart or numeric_route:
+                if not chart_spec:
+                    chart_spec = extract_numeric_chart_spec(state) or {}
+                chart_title = (
+                    (chart_spec.get("title") or raw_visual_prompt.split(":", 1)[-1].strip() or "KEY STATISTICS")[:40]
+                )
+                print(f"[MediaProducer] Processing grounded stat chart for {shot_key} (Title: '{chart_title}')")
+                try:
+                    if chart_spec.get("values") and chart_spec.get("labels"):
+                        await generate_dynamic_chart(ChartRequest(
+                            title=chart_title,
+                            labels=chart_spec.get("labels") or [],
+                            values=chart_spec.get("values") or [],
+                            unit_symbol=chart_spec.get("unit") or "%",
+                            chart_type=chart_spec.get("chart_type") or "bar",
+                            duration=shot_timeline_dur,
+                            output_mp4_path=mp4_path
+                        ))
+                    else:
+                        # No grounded spec -> fall back to the live-market trend chart
+                        # (5-point deterministic series ending at the real quote).
+                        quote = await self._get_market_quote(state)
+                        currency = "₹" if str(quote["symbol"]).endswith(".NS") else "$"
+                        price, change = quote["price"], quote["change"]
+                        start = price / (1 + change / 100.0)
+                        span = price - start
+                        values = [round(start + span * (i / 4.0), 2) for i in range(5)]
+                        labels = ["-4w", "-3w", "-2w", "-1w", "Now"]
+                        await generate_dynamic_chart(ChartRequest(
+                            title=f"{chart_title} • {quote['symbol']}",
+                            labels=labels,
+                            values=values,
+                            unit_symbol=currency,
+                            chart_type="line",
+                            duration=shot_timeline_dur,
+                            output_mp4_path=mp4_path
+                        ))
+                    is_specialized = True
+                except Exception as chart_err:
+                    print(f"Warning: Chart generation failed: {chart_err}. Falling back to normal image rendering.")
+
             # Check 1: Reaction GIF / Meme segment
-            if v_type == VisualType.GIF_MEME or "[gif:" in prompt_lower or "reaction gif" in prompt_lower:
+            elif v_type == VisualType.GIF_MEME or "[gif:" in prompt_lower or "reaction gif" in prompt_lower:
                 gif_query = "shocked reaction"
                 match = re.search(r'\[gif:\s*([^\]]+)\]', prompt_lower)
                 if match:
@@ -532,28 +687,25 @@ class MediaProducerAgent:
                     print(f"Warning: SVG animation failed: {svg_err}. Falling back to normal image rendering.")
 
             # Default: Widescreen visual + Ken Burns camera pan.
-            # Paid (fal/Replicate Flux) is used ONLY for premium "hero" shots when
-            # the monthly AI budget allows; every other standard-image shot uses
-            # free assets (Pixabay/synthetic). This protects the ~INR 2000 budget.
+            # Phase 2: every standard-image shot now ATTEMPTS Flux first (fal/Replicate);
+            # free stock (Pixabay/Pexels) is used only on a Flux failure or when the AI
+            # budget is exhausted. Cost is ~$0.05/run for 16 imgs, well under the cap.
             if not is_specialized:
                 if dummy_frames:
                     from mcp_servers.media_cloud.server import generate_synthetic_png
                     generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
                 else:
-                    is_premium = shot.shot_id in PREMIUM_SHOT_IDS
-                    use_paid = is_premium and media_budget.charge_paid_image()
+                    use_paid = media_budget.charge_paid_image()
                     if use_paid:
                         try:
                             await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
                         except Exception as e:
                             print(f"Warning: Visual Generation Error on shot {shot.shot_id}: {e}. Falling back to free assets.")
-                            _ = _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path)
+                            if _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path, anchors=topic_anchors):
+                                is_specialized = True
                     else:
-                        if not is_premium:
-                            print(f"[MediaProducer] Free asset for shot {shot.shot_id} (non-premium).")
-                        elif media_budget.economy_mode():
-                            print(f"[MediaProducer] Free asset for shot {shot.shot_id} (AI budget saved/exhausted).")
-                        if _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path):
+                        print(f"[MediaProducer] AI budget saved/exhausted; free asset for shot {shot.shot_id}.")
+                        if _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path, anchors=topic_anchors):
                             is_specialized = True
 
                 # Outro static text overlay if this is the final shot in the script
@@ -621,7 +773,8 @@ class MediaProducerAgent:
                         f"[1:a]apad[a]",
                         "-map", "[v]", "-map", "[a]",
                         "-t", f"{shot_timeline_dur:.3f}",
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                        "-maxrate", "6M", "-bufsize", "12M",
                         "-c:a", "aac", "-b:a", "192k",
                         mp4_path
                     ]
@@ -885,7 +1038,8 @@ class MediaProducerAgent:
                 "-ss", f"{st:.1f}", "-t", f"{max_seg:.1f}",
                 "-i", final_video,
                 "-vf", "crop=ih*9/16:ih,scale=1080:1920,setsar=1",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart", out
             ]

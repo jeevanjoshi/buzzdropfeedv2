@@ -65,7 +65,10 @@ def _clean_snippet_text(snippet: str) -> str:
 # "narration too long (>155)" gate AND blew the runtime to 16+ mins (hard abort).
 # We keep the floor for runtime but also enforce this ceiling deterministically so
 # both hard failures are impossible regardless of what the LLM returns.
-MAX_SHOT_WORDS = 155
+# Phase 5 (CSVG Media Quality): tightened 155 -> 115, with MORE shorter shots (18),
+# so no single static-image shot is held for a full minute. Keeps total >= 10-min
+# hard floor (Observer runtime gate) because the shot count rises in tandem.
+MAX_SHOT_WORDS = 115
 
 
 def _enforce_narration_ceiling(narr: str, max_words: int = MAX_SHOT_WORDS) -> str:
@@ -114,6 +117,135 @@ _SNIPPET_JUNK_RE = re.compile(
 def _snippet_is_junk(snippet: str) -> bool:
     """True if a snippet is dominated by boilerplate/ad/credit junk."""
     return bool(_SNIPPET_JUNK_RE.search(snippet or ""))
+
+
+# Grounded numeric-claim chart builder --------------------------------
+# Pulls ONLY verbatim numbers/percentages from the verified RAG facts so a
+# statistic shot renders a real annotated chart with the correct figures — never
+# the PIL placeholder. Values come from the facts; nothing is fabricated.
+_CHART_PCT_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(%|percent)', re.IGNORECASE)
+_CHART_NUM_RE = re.compile(
+    r'(?:[$€¥£₹]\s*)?(\d+(?:[.,]\d+)*)\s*'
+    r'(?:(Trillion|Billion|Crore|Million|Thousand|tn|bn|cr|mn|k))\b',
+    re.IGNORECASE,
+)
+_NUM_SCALE = {
+    "thousand": 1e3, "k": 1e3, "million": 1e6, "mn": 1e6, "bn": 1e9,
+    "billion": 1e9, "tn": 1e12, "trillion": 1e12, "crore": 1e7, "cr": 1e7,
+}
+
+
+def extract_numeric_chart_spec(state: Optional[GlobalState]) -> Optional[Dict[str, Any]]:
+    """
+    Scans `state.verified_facts` (+ selected_topic summary) for the strongest
+    grounded numeric/statistical claims and packages them into a `chart_spec`
+    dict {title, labels, values, unit, chart_type}. Values are verbatim numbers
+    from the facts only. Returns None when no usable numeric claim is found.
+    """
+    if state is None:
+        return None
+    facts = list(state.verified_facts or [])
+    if not facts:
+        return None
+
+    def _fmt(v: float) -> int:
+        return int(v) if v == int(v) else round(v, 2)
+
+    # Percentage claims first (most chart-worthy: "grew 33% YoY").
+    pct_entries = []
+    for f in facts:
+        text = f"{f.headline} {f.summary}"
+        label_base = (f.headline or f.source_name).strip()[:24]
+        for m in _CHART_PCT_RE.finditer(text):
+            val = float(m.group(1))
+            # Distinct labels so a bar chart never shows two identical x-ticks.
+            pct_entries.append((f"{label_base} · {_fmt(val)}%", _fmt(val)))
+        if len(pct_entries) >= 6:
+            break
+
+    if len(pct_entries) >= 1:
+        # Dedup by (label, value) preserving order.
+        seen, entries = set(), []
+        for label, val in pct_entries:
+            key = (label, val)
+            if key not in seen:
+                seen.add(key)
+                entries.append((label, val))
+        headline = (state.selected_topic.headline if state.selected_topic else "") or "KEY STATISTICS"
+        return {
+            "title": headline[:45],
+            "labels": [e[0] for e in entries],
+            "values": [e[1] for e in entries],
+            "unit": "%",
+            "chart_type": "bar",
+        }
+
+    # Fallback: absolute money/count claims (e.g. "$120B", "12 million").
+    num_entries = []
+    for f in facts:
+        text = f"{f.headline} {f.summary}"
+        for m in _CHART_NUM_RE.finditer(text):
+            raw = m.group(1).replace(",", "")
+            try:
+                val = float(raw)
+            except ValueError:
+                continue
+            scale = (m.group(2) or "").lower()
+            if scale:
+                val *= _NUM_SCALE.get(scale, 1.0)
+            label_base = (f.headline or f.source_name).strip()[:24]
+            num_entries.append((f"{label_base} · {_fmt(val)}", _fmt(val)))
+        if len(num_entries) >= 6:
+            break
+    if num_entries:
+        seen, entries = set(), []
+        for label, val in num_entries:
+            key = (label, val)
+            if key not in seen:
+                seen.add(key)
+                entries.append((label, val))
+        headline = (state.selected_topic.headline if state.selected_topic else "") or "KEY STATISTICS"
+        return {
+            "title": headline[:45],
+            "labels": [e[0] for e in entries],
+            "values": [e[1] for e in entries],
+            "unit": "units",
+            "chart_type": "bar",
+        }
+
+    return None
+
+
+def _sanitize_chart_spec(spec: Any) -> Optional[Dict[str, Any]]:
+    """Validates/normalises an LLM-provided chart_spec so labels/values are
+    usable (numeric values list). Returns None if unusable (caller falls back)."""
+    if not isinstance(spec, dict):
+        return None
+    labels = spec.get("labels") or []
+    values = spec.get("values") or []
+    try:
+        values = [float(v) for v in values]
+    except (TypeError, ValueError):
+        return None
+    if not values:
+        return None
+    labels = [str(l) for l in (labels or [])]
+    if not labels:
+        labels = [f"Point {i + 1}" for i in range(len(values))]
+    # Pad labels to match values length defensively.
+    while len(labels) < len(values):
+        labels.append(f"Point {len(labels) + 1}")
+    labels = labels[:len(values)]
+    ctype = str(spec.get("chart_type") or "bar").lower()
+    if ctype not in ("bar", "line"):
+        ctype = "bar"
+    return {
+        "title": str(spec.get("title") or "KEY STATISTICS")[:45],
+        "labels": labels,
+        "values": values,
+        "unit": str(spec.get("unit") or spec.get("unit_symbol") or "%"),
+        "chart_type": ctype,
+    }
 
 
 class StoryDesignerAgent:
@@ -237,7 +369,7 @@ class StoryDesignerAgent:
 
     def expand_narration_with_semantic_facts(
         self, narr: str, title: str, category: str, raw_snippets: List[str],
-        used_snippets: set, target_word_count: int = 115
+        used_snippets: set, target_word_count: int = 85
     ) -> str:
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
@@ -371,12 +503,12 @@ class StoryDesignerAgent:
                 prompt += """
 
                 Requirements:
-                1. Exactly 15 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict).
-                2. Return a JSON object with key "shots" containing an array of 15 shot objects.
+                1. Exactly 18 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict) — 3 shots per act.
+                2. Return a JSON object with key "shots" containing an array of 18 shot objects.
                 3. Each shot object MUST contain:
-                   - "shot_id": integer 1 to 15
+                   - "shot_id": integer 1 to 18
                    - "act_index": integer 1 to 6
-                   - "narration_text": string of 115-130 words deeply explaining facts from the RAG pack
+                   - "narration_text": string of 90-105 words deeply explaining facts from the RAG pack
                    - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
                    - "visual_type": string classification of the visual format. Choose EXACTLY one of:
                      * "standard_image" (default photorealistic cinematic scenes)
@@ -389,7 +521,9 @@ class StoryDesignerAgent:
                 7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
                 8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
                 9. STORYTELLING INTEGRATION: Seamlessly blend real-world facts from the RAG pack into a single, cohesive narrative arc. Do not output raw scrapped snippets verbatim; rephrase them using rich, evocative English prose.
-                10. CREATIVE CTA INTEGRATION: The final shot (Shot 15) must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
+                10. CREATIVE CTA INTEGRATION: The final shot must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
+                STATISTIC-SHOT CHART SPEC (IMPORTANT):
+                For ANY shot whose narration makes a numeric/statistical claim (percentages, growth figures, valuations, market-cap shifts), set its "visual_type" to "matplotlib_chart" AND add a "chart_spec" object: {{"title": "<short title>", "labels": ["<desc1>","<desc2>",...], "values": [<number>,<number>,...], "unit": "%" or "$" or "₹" or "B" etc, "chart_type": "bar" or "line"}}. The numbers in "values" MUST be the real figures from the RAG pack — never invent or round-away numbers. Prefer "bar" for discrete comparisons (e.g. market share, YoY %), "line" for trends over time. Include 2-6 values. If a shot has no numeric claim, omit "chart_spec".
                 """
                 system_prompt = (
                     f"You are a master documentary director and creative storyteller specializing in {category} in {current_year}. "
@@ -410,8 +544,8 @@ class StoryDesignerAgent:
                     repair_hint = (
                         "\n\n\u26a0\ufe0f CRITICAL REPAIR INSTRUCTION (PREVIOUS DRAFT FAILED VALIDATION):\n"
                         "Your previous draft did NOT meet the HARD requirements: it either contained fewer than 12 shots, "
-                        "had narration_text under 115 words, the total fell below 1,500 words, or the JSON was "
-                        "truncated/incomplete. Produce EXACTLY 15 shot objects, each narration_text between 115 and 130 "
+                        "had narration_text under 85 words, the total fell below 1,500 words, or the JSON was "
+                        "truncated/incomplete. Produce EXACTLY 18 shot objects, each narration_text between 90 and 105 "
                         "words, so the script total exceeds 1,500 words. Return ONLY one complete, valid JSON object with "
                         "a single 'shots' key. Do NOT truncate or omit any shot.\n"
                     )
@@ -440,10 +574,17 @@ class StoryDesignerAgent:
                             v_type_raw = s.get("visual_type") or "standard_image"
                             if v_type_raw not in ["standard_image", "gif_meme", "matplotlib_chart", "svg_ticker"]:
                                 v_type_raw = "standard_image"
+
+                            # Grounded chart spec for stat shots: prefer the LLM's
+                            # explicitly provided spec; fall back to deriving one
+                            # from the verified RAG facts (never fabricated numbers).
+                            chart_spec = _sanitize_chart_spec(s.get("chart_spec"))
+                            if chart_spec is None and v_type_raw == "matplotlib_chart":
+                                chart_spec = extract_numeric_chart_spec(state)
                         
                             # Enrich short narration with dynamic RAG facts using semantic search/TF-IDF similarity
-                            if len(narr.split()) < 115:
-                                narr = self.expand_narration_with_semantic_facts(narr, headline, category, raw_snippets, _used_snips, target_word_count=115)
+                            if len(narr.split()) < 85:
+                                narr = self.expand_narration_with_semantic_facts(narr, headline, category, raw_snippets, _used_snips, target_word_count=85)
                             # Ceiling: never hand the Observer a shot over its 155-word cap
                             # (prevents "narration too long" + runtime-bounds hard aborts).
                             narr = _enforce_narration_ceiling(narr)
@@ -454,6 +595,7 @@ class StoryDesignerAgent:
                                 narration_text=narr,
                                 visual_prompt=vis,
                                 visual_type=VisualType(v_type_raw),
+                                chart_spec=chart_spec,
                                 duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1))
                             ))
 
@@ -538,7 +680,7 @@ class StoryDesignerAgent:
                 "number, name, date, source attribution and the original meaning. Remove any raw "
                 "citation tags like '[Tavily:...]' or '[Exa:...]' and keep clean prose.\n"
                 "Rules:\n"
-                "- Keep every shot's narration between 110 and 135 words (aim ~120).\n"
+                "- Keep every shot's narration between 85 and 105 words (aim ~95).\n"
                 "- Vary sentence lengths dramatically; avoid repeating words/phrases across sentences and shots.\n"
                 "- Use precise, vivid English vocabulary; avoid cliches, robotic templates and monotony.\n"
                 "- Blend rhetorical questions, storytelling scenes, analogies and punchy declarations.\n"
@@ -578,6 +720,7 @@ class StoryDesignerAgent:
                         narration_text=narr,
                         visual_prompt=shot.visual_prompt,
                         visual_type=shot.visual_type,
+                        chart_spec=shot.chart_spec,
                         duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1)),
                     ))
                 total_words = sum(len(s.narration_text.split()) for s in polished)
@@ -609,8 +752,8 @@ class StoryDesignerAgent:
         the stashed RAG snippet pool (semantic TF-IDF selection). If the pool is
         exhausted the script is returned with its honest (recomputed) runtime.
         """
-        MIN_TOTAL_WORDS = 1500    # ~10.0 mins @ 150 wpm
-        MIN_SHOT_WORDS = 110      # keeps shots within Observer's 155-word max
+        MIN_TOTAL_WORDS = 1500    # ~10.0 mins @ 150 wpm (Observer hard floor)
+        MIN_SHOT_WORDS = 75       # shorter shots (~90 words) so no still is held a full minute
         headline = state.selected_topic.headline if state.selected_topic else script.title
         category = getattr(state.selected_topic, "niche_category", "") if state.selected_topic else ""
 

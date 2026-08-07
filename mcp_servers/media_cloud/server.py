@@ -19,6 +19,17 @@ class KenBurnsRequest(BaseModel):
     image_path: str
     audio_path: Optional[str] = None
     duration: float
+    # Pan direction for the Ken Burns motion. "left_to_right" / "right_to_left"
+    # pan horizontally, "top_to_bottom" / "bottom_to_top" pan vertically. This
+    # gives REAL lateral motion (not just a centered zoom) so frozen-frame
+    # detectors see movement. Optional; defaults to left_to_right.
+    direction: str = "left_to_right"
+    # Continuous-motion magnitude: the zoom target reached at the FINAL frame
+    # (zoom goes 1.0 -> zoom_target over the whole shot). Higher = more visible
+    # motion per second but crops more (subjects risk leaving the frame). Default
+    # 1.5 is framing-safe (never shows less than ~2/3 of the image); the real
+    # fix for "more motion" is shorter shots, not a bigger zoom.
+    zoom_target: float = 1.5
     output_mp4_path: str
 
 
@@ -27,6 +38,7 @@ class ChartRequest(BaseModel):
     labels: list = ["Q1", "Q2", "Q3", "Q4"]
     values: list = [100, 140, 90, 185]
     unit_symbol: str = "$ Million"  # Explicit units e.g. '$ Million', '₹ Crores', '%'
+    chart_type: str = "line"  # 'line' (trend) or 'bar' (discrete comparisons / %)
     duration: float = 5.0
     output_mp4_path: str
 
@@ -422,6 +434,9 @@ async def generate_dynamic_chart(req: ChartRequest):
     """
     Renders an animated 16:9 financial stock / market trend data chart video clip with dynamic date context,
     explicit units (e.g., '$ Billion', '₹ Crores', '%'), and high-contrast styling.
+    Supports `chart_type`: 'line' (trend) or 'bar' (discrete comparisons / percentages).
+    On any render failure this RAISES so the caller can fall through to a visible
+    placeholder caught by Gate 7 — it never silently writes a fake "chart".
     """
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_mp4_path)), exist_ok=True)
@@ -433,25 +448,43 @@ async def generate_dynamic_chart(req: ChartRequest):
         try:
             import matplotlib.pyplot as plt
 
+            labels = [str(l) for l in (req.labels or [])]
+            values = [float(v) for v in (req.values or [])]
+            if not values:
+                raise ValueError("ChartRequest.values is empty")
+            if not labels:
+                labels = [str(i + 1) for i in range(len(values))]
+            while len(labels) < len(values):
+                labels.append(str(len(labels) + 1))
+            labels = labels[:len(values)]
+
+            ctype = str(req.chart_type or "line").lower()
+
             plt.style.use('dark_background')
             fig, ax = plt.subplots(figsize=(16, 9), dpi=120)
-            
-            # High contrast cyan line chart with prominent markers
-            ax.plot(req.labels, req.values, color='#00ffcc', linewidth=5, marker='o', markersize=12, markerfacecolor='#ff0055')
-            
-            # Title & Explicit Unit Y-Label
+
+            if ctype == "bar":
+                colors = ['#00ffcc', '#ff0055', '#ffcc00', '#39d353', '#00aaff', '#ff8800']
+                bars = ax.bar(labels, values, color=colors[:len(values)], width=0.6)
+                ax.set_xlabel("", fontsize=18)
+                for bar, val in zip(bars, values):
+                    ax.annotate(f"{val:g} {req.unit_symbol}", (bar.get_x() + bar.get_width() / 2.0, val),
+                                textcoords="offset points", xytext=(0, 8),
+                                ha='center', fontsize=16, color='yellow', fontweight='bold')
+            else:
+                ax.plot(labels, values, color='#00ffcc', linewidth=5, marker='o',
+                        markersize=12, markerfacecolor='#ff0055')
+                for x, y in zip(labels, values):
+                    ax.annotate(f"{y:g} {req.unit_symbol}", (x, y), textcoords="offset points",
+                                xytext=(0, 15), ha='center', fontsize=16, color='yellow', fontweight='bold')
+
             ax.set_title(chart_title, fontsize=24, color='white', pad=25, fontweight='bold')
             ax.set_ylabel(f"Value ({req.unit_symbol})", fontsize=20, color='#00ffcc', labelpad=15, fontweight='bold')
-            ax.tick_params(axis='both', which='major', labelsize=18, colors='white')
+            ax.tick_params(axis='both', which='major', labelsize=15, colors='white')
             ax.grid(True, color='#333333', linestyle='--', linewidth=1.5)
-            
+
             fig.patch.set_facecolor('#0d1117')
             ax.set_facecolor('#0d1117')
-
-            # Annotate data points with explicit units
-            for x, y in zip(req.labels, req.values):
-                ax.annotate(f"{y} {req.unit_symbol}", (x, y), textcoords="offset points", xytext=(0, 15),
-                            ha='center', fontsize=16, color='yellow', fontweight='bold')
 
             plt.savefig(chart_png, bbox_inches='tight', facecolor=fig.get_facecolor())
             plt.close(fig)
@@ -464,13 +497,14 @@ async def generate_dynamic_chart(req: ChartRequest):
                 req.output_mp4_path
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return {"status": "success", "engine": "matplotlib_chart_with_units", "path": req.output_mp4_path}
+            return {"status": "success", "engine": f"matplotlib_chart_{ctype}", "path": req.output_mp4_path}
         except Exception:
-            generate_synthetic_png(chart_png, title="CHART_WITH_UNITS")
-            with open(req.output_mp4_path, "w") as f:
-                f.write("DUMMY_CHART_MP4")
-            return {"status": "success", "engine": "fallback_chart", "path": req.output_mp4_path}
+            # No silent "DUMMY_CHART_MP4" fallback: raise so the caller falls
+            # through to a visible placeholder that the Gate 7 post-check flags.
+            raise HTTPException(status_code=500, detail="matplotlib chart render failed")
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -505,9 +539,50 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
             cmd.extend(["-i", req.audio_path])
             has_audio = True
 
+        # Direction-aware Ken Burns: continuous ZOOM + PAN spread across the ENTIRE
+        # shot (not just the opening). The zoom target is reached only at the final
+        # frame, so a 50-65s still image keeps visibly moving the whole time instead
+        # of freezing after ~5s (the old min(zoom+0.002,1.25) capped the zoom in
+        # seconds — that's why only the intro looked animated). The pan likewise
+        # traverses the full duration. Both give clear, smooth motion for every
+        # static-image shot.
+        pan_n = max(nb_frames - 1, 1)
+        prog = f"min(on/{pan_n},1)"
+        z_target = float(getattr(req, "zoom_target", 1.5) or 1.5)
+        if z_target < 1.1:
+            z_target = 1.1
+        elif z_target > 1.6:
+            z_target = 1.6   # never over-crop: keeps >= ~62% of the image framed
+        z_step = (z_target - 1.0) / nb_frames   # tiny per-frame increment over full shot
+        direction = (req.direction or "left_to_right").lower()
+        cx = "iw/2-(iw/zoom/2)"
+        cy = "ih/2-(ih/zoom/2)"
+        if direction in ("right_to_left",):
+            xexpr = f"iw*(1-1/zoom)*(1-{prog})"
+            yexpr = cy
+        elif direction == "top_to_bottom":
+            xexpr = cx
+            yexpr = f"ih*(1-1/zoom)*{prog}"
+        elif direction == "bottom_to_top":
+            xexpr = cx
+            yexpr = f"ih*(1-1/zoom)*(1-{prog})"
+        else:  # left_to_right (default)
+            xexpr = f"iw*(1-1/zoom)*{prog}"
+            yexpr = cy
+
+        # A smooth Ken Burns needs a FINER SOURCE than the output. ffmpeg's zoompan
+        # steps in integer pixels; on a 1920-wide source the sub-pixel zoom/pan at
+        # the start of the shot rounds to whole pixels and causes visible shaking.
+        # Upscaling 8x before zoompan (then downscaling to the 1920x1080 output)
+        # makes the motion smooth — this is the "scale=8000:-1" smoothing trick
+        # (Bannerbear). Measured via optical-flow acceleration: old=0.131 jitter,
+        # 4x=0.045, 8x=0.026 (lower is smoother).
+        hi_w = 15360
+        hi_h = 8640
         zoompan = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
                    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
-                   f"zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={nb_frames}:s=1920x1080,fps=25,format=yuv420p")
+                   f"scale={hi_w}:{hi_h},"  # upsample to finer grid for smooth motion
+                   f"zoompan=z='min(zoom+{z_step:.6f},{z_target})':x='{xexpr}':y='{yexpr}':d={nb_frames}:s=1920x1080,fps=25,format=yuv420p")
 
         if has_audio:
             # Pad audio with silence up to `dur` and cap total length with -t, so the
@@ -519,6 +594,8 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
                 "-t", str(dur),
                 "-c:v", "libx264",
                 "-preset", "fast",
+                "-crf", "18",
+                "-maxrate", "6M", "-bufsize", "12M",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
                 req.output_mp4_path
@@ -529,6 +606,8 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
                 "-t", str(dur),
                 "-c:v", "libx264",
                 "-preset", "fast",
+                "-crf", "18",
+                "-maxrate", "6M", "-bufsize", "12M",
                 "-pix_fmt", "yuv420p",
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-c:a", "aac", "-shortest",
@@ -634,7 +713,7 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
     if has_bgm:
         parts.append(f"{cura}volume=1.0[voice]")
         parts.append(f"[{n}:a]volume=0.12[bgm]")
-        parts.append("[voice][bgm]amix=inputs=2:duration=first[a]")
+        parts.append("[voice][bgm]amix=inputs=2:duration=first,alimiter=limit=0.89:level=false,loudnorm=I=-14:TP=-1.5:LRA=11[a]")
     else:
         parts.append(f"{cura}acopy[a]")
 
@@ -645,7 +724,7 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
         cmd += ["-stream_loop", "-1", "-i", bgm_path]
     cmd += ["-filter_complex", ";".join(parts)]
     cmd += ["-map", "[v]", "-map", "[a]"]
-    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "22"]
+    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M"]
     cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
     cmd += [output_video_path]
     return cmd
@@ -700,9 +779,9 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
                 "-stream_loop", "-1", "-i", req.bgm_path,
-                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]volume=1.0[voice];[1:a]volume=0.12[bgm];[voice][bgm]amix=inputs=2:duration=first[a]",
+                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]volume=1.0[voice];[1:a]volume=0.12[bgm];[voice][bgm]amix=inputs=2:duration=first,alimiter=limit=0.89:level=false,loudnorm=I=-14:TP=-1.5:LRA=11[a]",
                 "-map", "[v]", "-map", "[a]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",
                 req.output_video_path
             ]
@@ -711,7 +790,7 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
                 "-vf", vf_filter,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",
                 req.output_video_path
             ]

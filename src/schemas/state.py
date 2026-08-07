@@ -87,6 +87,10 @@ class ShotData(BaseModel):
     visual_prompt: str = Field(..., description="16:9 cinematic visual prompt")
     visual_type: VisualType = Field(default=VisualType.STANDARD_IMAGE, description="Visual format type to generate")
     duration_estimate: float = Field(default=5.0, description="Estimated duration in seconds")
+    # Optional grounded numeric chart spec for stat/`matplotlib_chart` shots:
+    # {title, labels, values, unit, chart_type}. Values must come verbatim from
+    # RAG verified facts (never fabricated). Backward-compatible (default None).
+    chart_spec: Optional[Dict[str, Any]] = Field(default=None, description="Grounded bar/line chart data {title, labels, values, unit, chart_type}")
 
 
 class ScriptData(BaseModel):

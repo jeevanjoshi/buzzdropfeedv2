@@ -380,6 +380,97 @@ class StageQualityVerifier:
         return frames
 
     @staticmethod
+    def _raw_frames(path, fps: float = 1.0, size=(64, 36)) -> List[bytes]:
+        """Decode downscaled frames via ffmpeg rawvideo; return raw RGB bytes per frame."""
+        w, h = size
+        cmd = ["ffmpeg", "-v", "error", "-i", path,
+               "-vf", f"scale={w}:{h},fps={fps}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=60)
+        except Exception:
+            return []
+        if res.returncode != 0 or not res.stdout:
+            return []
+        frame_bytes = w * h * 3
+        n = len(res.stdout)
+        return [res.stdout[o:o + frame_bytes] for o in range(0, n - frame_bytes + 1, frame_bytes)]
+
+    @staticmethod
+    def _motion_ratio(path, fps: float = 1.0, size=(64, 36), pixel_thresh: int = 8) -> float:
+        """
+        Fraction of pixels that change between consecutive sampled frames, maxed
+        across all adjacent pairs (0.0 = static; ~1.0 = strong motion). Unlike the
+        per-frame MEAN comparison, this is sensitive to lateral pans AND zooms, so
+        a genuine Ken Burns pan is never misreported as a frozen frame.
+        """
+        frames = StageQualityVerifier._raw_frames(path, fps=fps, size=size)
+        if len(frames) < 2:
+            return 0.0
+        w, h = size
+        fb = w * h * 3
+        best = 0.0
+        for i in range(1, len(frames)):
+            prev, cur = frames[i - 1], frames[i]
+            if len(prev) < fb or len(cur) < fb:
+                continue
+            changed = 0
+            # sample a subgrid for speed (every px row/col step 2)
+            step = 2
+            for y in range(0, h, step):
+                row = y * w * 3
+                for x in range(0, w * 3, step * 3):
+                    o = row + x
+                    if o + 2 >= fb:
+                        break
+                    d = abs(cur[o] - prev[o]) + abs(cur[o + 1] - prev[o + 1]) + abs(cur[o + 2] - prev[o + 2])
+                    if d > pixel_thresh:
+                        changed += 1
+            total = ((w + step - 1) // step) * ((h + step - 1) // step)
+            best = max(best, changed / max(1, total))
+        return best
+
+
+    @staticmethod
+    def _first_frame(path, size=(320, 180)):
+        """Decode ONLY the first video frame as RGB bytes (w*h*3), or None."""
+        w, h = size
+        cmd = ["ffmpeg", "-v", "error", "-i", path, "-frames:v", "1",
+               "-vf", f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=60)
+        except Exception:
+            return None
+        if res.returncode != 0 or not res.stdout:
+            return None
+        return res.stdout[: w * h * 3]
+
+    @staticmethod
+    def _is_synthetic_placeholder(frame, w=320, h=180) -> bool:
+        """
+        True if a first-frame strongly matches the `generate_synthetic_png` PIL
+        placeholder: a mostly-uniform navy fill. The placeholder uses #0f141e
+        (15,20,30) which after ffmpeg yuv420p chroma-subsampling reads ~(13,19,28);
+        the matplotlib chart background #0d1117 (13,17,23) has b=23 which this
+        tighter b-window excludes — so a real chart is never mistaken for the
+        placeholder (verified: placeholder frac ~0.92 vs chart ~0.03-0.06).
+        """
+        if not frame or len(frame) < w * h * 3:
+            return False
+        total = w * h
+        match = 0
+        step = 4
+        for i in range(0, total, step):
+            o = i * 3
+            if o + 2 >= len(frame):
+                break
+            r, g, b = frame[o], frame[o + 1], frame[o + 2]
+            # Exact-ish #0f141e navy fill (post-subsampling ~13,19,28).
+            if abs(r - 13) <= 4 and abs(g - 19) <= 4 and abs(b - 28) <= 6:
+                match += 1
+        sampled = (total + step - 1) // step
+        return sampled > 0 and (match / sampled) > 0.30
+
+    @staticmethod
     def _ffmpeg_afstats(path) -> Dict[str, Any]:
         """Run silencedetect + volumedetect, returning silence-seconds and peak dB."""
         out = {"silence_sec": 0.0, "max_volume_db": None, "duration": 0.0}
@@ -425,13 +516,22 @@ class StageQualityVerifier:
             black = sum(1 for mean, std in frames if mean < 8.0 and std < 6.0)
             if black / max(1, len(frames)) > 0.6:
                 issues.append(f"Gate 7 Fail: {shot_key} renders black/empty ({black}/{len(frames)} frames sampled). Re-render required.")
-            # Frozen: consecutive sampled frames essentially identical
-            identical = 0
-            for i in range(1, len(frames)):
-                if abs(frames[i][0] - frames[i - 1][0]) < 1.0:
-                    identical += 1
-            if len(frames) >= 4 and identical / max(1, len(frames) - 1) > 0.85:
-                warnings.append(f"{shot_key}: suspect frozen frame (no motion across samples).")
+            # Frozen: real pixel MOVEMENT, not mean-comparison — a Ken Burns pan
+            # changes many pixels and must not be flagged; a truly static tile has
+            # ~0 pixels changing between samples.
+            motion = 0.0
+            if frames and (frames[0][1] >= 6.0 or frames[0][0] >= 8.0):  # only if it has visible content
+                motion = self._motion_ratio(clip, fps=1.0)
+            if len(frames) >= 4 and motion < 0.02:
+                warnings.append(f"{shot_key}: static/frozen frame (pixel motion {motion:.3f}; no movement across samples).")
+            # Never ship the synthetic PIL placeholder (e.g. chart/free-stock failed):
+            # abort before publish instead of letting a blank box reach YouTube.
+            first = self._first_frame(clip)
+            if self._is_synthetic_placeholder(first):
+                issues.append(
+                    f"Gate 7 Fail: {shot_key} is the synthetic PIL placeholder "
+                    f"(real visual/chart render failed). Re-render required."
+                )
 
         # --- Per-shot audio silence / peak ---
         audio_map = state.asset_paths.audio or {}
