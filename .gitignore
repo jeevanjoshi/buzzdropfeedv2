@@ -28,3 +28,7 @@ sentence_transformers/
 # Local editor/tooling config
 opencode.json
 *.md~
+
+# Rust dashboard build artifacts
+rust_dashboard/target/
+

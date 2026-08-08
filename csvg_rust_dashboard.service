@@ -1,0 +1,18 @@
+[Unit]
+Description=CSVG Rust Live Log & Budget Dashboard (replaces dashboard_server.py)
+After=network.target
+
+[Service]
+Type=simple
+User=jeevanjoshi
+WorkingDirectory=/home/jeevanjoshi/buzzdropfeedv2
+Environment=CSVG_ROOT=/home/jeevanjoshi/buzzdropfeedv2
+Environment=CSVG_DASHBOARD_PORT=8080
+# Optional tuning:
+# Environment=CSVG_HEARTBEAT_TTL=60
+ExecStart=/home/jeevanjoshi/buzzdropfeedv2/rust_dashboard/target/release/csvg_dashboard
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

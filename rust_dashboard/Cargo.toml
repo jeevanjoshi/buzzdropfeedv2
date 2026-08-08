@@ -1,0 +1,14 @@
+[package]
+name = "csvg_dashboard"
+version = "0.1.0"
+edition = "2021"
+description = "CSVG live pipeline log + budget dashboard (replaces dashboard_server.py)"
+license = "MIT"
+
+[[bin]]
+name = "csvg_dashboard"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+strip = true

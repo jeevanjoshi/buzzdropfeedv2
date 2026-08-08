@@ -34,6 +34,7 @@ rsync -avz --delete \
     --exclude '.hf_cache/' \
     --exclude '.huggingface/' \
     --exclude 'sentence_transformers/' \
+    --exclude 'rust_dashboard/target/' \
     -e ssh \
     ./ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/"
 

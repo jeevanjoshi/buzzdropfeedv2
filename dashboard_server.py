@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPRECATED.
+# Replaced by the Rust dashboard: `rust_dashboard/` (csvg_dashboard.service is
+# superseded by csvg_rust_dashboard.service). The Rust server re-implements
+# /api/status, /api/logs, /api/published and adds /api/budget + /api/runs, and
+# serves rust_dashboard/web/index.html (live logs + budget).
+#
+# Kept only for rollback during transition. Do not add new features here.
+# ─────────────────────────────────────────────────────────────────────────────
 import os
 import json
 import http.server

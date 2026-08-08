@@ -1,5 +1,7 @@
 [Unit]
-Description=CSVG Verification Dashboard Server
+# DEPRECATED: superseded by csvg_rust_dashboard.service (rust_dashboard/).
+# The legacy Python dashboard was replaced by the Rust server on port 8080.
+Description=CSVG Verification Dashboard Server (DEPRECATED - use csvg_rust_dashboard.service)
 After=network.target
 
 [Service]

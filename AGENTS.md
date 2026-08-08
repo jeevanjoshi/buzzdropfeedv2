@@ -29,12 +29,15 @@ Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPS
 - `src/agents/` — sequential A2A agents wired by `orchestrator.py`: `fact_retriever` -> `story_designer` -> `observer` (quality gates + bounded 3-revision loop) -> `media_producer` -> `publisher`. `orchestrator.run_pipeline()` is the single entrypoint.
 - `src/engine/` — stateless/stateful helpers (RAG, TOPSIS, quality_verifier, llm_client, channel_phase_manager, etc.). Random leaf files; no surprises here.
 - `src/schemas/` — pydantic models (`state.py`, `a2a.py`); `GlobalState` is the checkpoint schema.
-- `mcp_servers/` — three standalone FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi), `media_cloud` (fal/flux visuals + ffmpeg, port 8001), `youtube_cloud` (upload/quota, port 8002). Only `audio_edge` has a committed systemd unit (`kokoro_tts.service`, port 8000, Pi); `csvg_dashboard.service` runs the dashboard; `media_cloud`/`youtube_cloud` run via `uvicorn.run` (no committed unit; `deploy.sh` only restarts `kokoro_tts`). Add new model/http endpoints here, not in `src/engine`.
+- `mcp_servers/` — three standalone FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi), `media_cloud` (fal/flux visuals + ffmpeg, port 8001), `youtube_cloud` (upload/quota, port 8002). Only `audio_edge` has a committed systemd unit (`kokoro_tts.service`, port 8000, Pi); `media_cloud`/`youtube_cloud` run via `uvicorn.run` (no committed unit; `deploy.sh` only restarts `kokoro_tts`). Add new model/http endpoints here, not in `src/engine`.
+
+## Dashboard (Rust)
+- `rust_dashboard/` — zero-dependency (std-only) Rust web dashboard that **replaces the deprecated Python `dashboard_server.py` + legacy `index.html`**. Built with `cargo build --release`; run as `csvg_rust_dashboard.service` (port 8080, `CSVG_ROOT` env points at the repo dir holding `logs/` + `*.json`). Serves a self-contained SPA (`rust_dashboard/web/index.html`, embedded via `include_str!`) plus JSON endpoints: `/api/status` (heartbeat freshness + latest stage + channel stats), `/api/logs` (`pipeline_run.log` tail + `csvg_execution.log`), `/api/published` (`published_topics.json`), `/api/budget` (per-run + monthly ledger from `logs/run_budget.json`), `/api/runs` (recent `logs/state_*.json` checkpoints), `/health`. No JSON crate — `src/json.rs` is a minimal parser/serializer; build the binary per-node (the OCI x86 build is NOT pushed to the Pi via `sync_to_pi.sh`, which excludes `rust_dashboard/target/`; `deploy.sh` builds it on the Pi and switches the service).
 
 ## Distributed layout (this is not a single-host repo)
 - Master pipeline (agents, media_cloud, youtube_cloud) runs on the OCI cloud host.
 - Audio/TTS (audio_edge, Kokoro, Whisper) runs on a Raspberry Pi 5 edge node, reached via `AUDIO_EDGE_URL` and `LLAMA_CPP_URL`.
-- `deploy.sh` git-clones/reset-hards the repo to both nodes over SSH and restarts services; `sync_to_pi.sh` rsyncs the working tree to the Pi (excludes logs/media/venv).
+- `deploy.sh` git-clones/reset-hards the repo to both nodes over SSH and restarts services; it also builds the Rust dashboard on the Pi and fires up `csvg_rust_dashboard.service` (stopping the deprecated Python one); `sync_to_pi.sh` rsyncs the working tree to the Pi (excludes logs/media/venv/`rust_dashboard/target/`).
 - `run_production.sh` pushes logs/state/heartbeat to the Pi for a dashboard there; the Pi dashboard reads the fixed `logs/pipeline_run.log` name and heartbeat freshness to infer "running".
 
 ## Runtime/generated files (all gitignored, auto-created per run)

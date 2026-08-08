@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#05070f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>CSVG Live Dashboard (Rust)</title>
+<style>
+  :root {
+    --bg:#05070f; --panel:rgba(15,20,38,.62); --border:rgba(255,255,255,.08);
+    --text:#eef1f8; --muted:#7c8598; --blue:#3b82f6; --green:#10b981;
+    --red:#ef4444; --purple:#8b5cf6; --amber:#f59e0b; --cyan:#22d3ee;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html { -webkit-text-size-adjust:100%; }
+  body {
+    font-family:'Outfit',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    background:
+      radial-gradient(circle at 12% 18%,rgba(59,130,246,.14),transparent 42%),
+      radial-gradient(circle at 88% 78%,rgba(139,92,246,.13),transparent 42%),
+      radial-gradient(circle at 72% 12%,rgba(16,185,129,.08),transparent 32%),
+      radial-gradient(circle at 25% 85%,rgba(34,211,238,.07),transparent 34%),var(--bg);
+    color:var(--text); min-height:100vh; overflow-x:hidden;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .wrap { max-width:1220px; margin:0 auto; padding:28px 20px 90px; }
+
+  header { display:flex; justify-content:space-between; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:24px; padding-bottom:18px; border-bottom:1px solid var(--border); }
+  .brand { display:flex; align-items:center; gap:14px; }
+  .logo { width:46px; height:46px; border-radius:13px; background:linear-gradient(135deg,#3b82f6,#8b5cf6 60%,#22d3ee); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px; color:#fff; box-shadow:0 10px 26px rgba(59,130,246,.4); }
+  .brand h1 { font-size:21px; font-weight:800; letter-spacing:-.4px; }
+  .brand p { font-size:11.5px; color:var(--muted); }
+  .h-right { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+
+  .pill { display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--border); padding:9px 14px; border-radius:30px; font-size:12.5px; font-weight:600; }
+  .dot { width:9px; height:9px; border-radius:50%; }
+  .dot.running { background:var(--green); animation:blink 1.2s infinite; }
+  .dot.idle { background:#64748b; }
+  .dot.error { background:var(--red); animation:blink .7s infinite; }
+  .pill.running { border-color:rgba(16,185,129,.35); }
+  .pill.error { border-color:rgba(239,68,68,.4); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  .btn { background:rgba(255,255,255,.05); border:1px solid var(--border); color:var(--text); padding:9px 15px; border-radius:30px; font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; }
+  .btn:hover { background:rgba(255,255,255,.1); }
+  .btn:active { transform:scale(.96); }
+
+  .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:22px; }
+  .tab { background:transparent; border:1px solid transparent; color:var(--muted); padding:10px 16px; border-radius:10px; cursor:pointer; font-family:inherit; font-weight:600; font-size:13.5px; }
+  .tab:hover { color:var(--text); background:rgba(255,255,255,.04); }
+  .tab.active { color:var(--text); background:var(--panel); border-color:var(--border); }
+
+  .stage { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:14px 18px; background:var(--panel); border:1px solid var(--border); border-radius:14px; margin-bottom:20px; }
+  .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1.2px; font-weight:700; }
+  .badge { font-family:var(--mono); font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:8px; border:1px solid; }
+  .hb { margin-left:auto; font-size:12px; color:var(--muted); font-family:var(--mono); }
+  .hb b { color:var(--green); }
+  .prog { flex:1 1 100%; display:flex; gap:6px; margin-top:10px; }
+  .seg { flex:1; height:4px; border-radius:2px; background:rgba(255,255,255,.07); }
+  .seg.filled { background:linear-gradient(90deg,#3b82f6,#8b5cf6,#22d3ee); }
+  .seg.current { animation:pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:14px; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:15px; padding:18px 20px; backdrop-filter:blur(14px); }
+  .card .t { font-size:10.5px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
+  .card .v { font-size:27px; font-weight:800; letter-spacing:-1px; line-height:1.1; font-variant-numeric:tabular-nums; }
+  .card .s { margin-top:8px; font-size:12px; color:var(--muted); }
+  .bar { height:6px; background:rgba(255,255,255,.07); border-radius:3px; margin-top:12px; overflow:hidden; }
+  .bar > i { display:block; height:100%; background:linear-gradient(90deg,var(--blue),var(--purple)); border-radius:3px; transition:width .8s; }
+
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:15px; padding:18px 20px; margin-bottom:18px; backdrop-filter:blur(14px); }
+  .panel h3 { font-size:13.5px; font-weight:700; margin-bottom:14px; }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.8px; padding:8px 10px; border-bottom:1px solid var(--border); }
+  td { padding:9px 10px; border-bottom:1px solid rgba(255,255,255,.05); vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  .mono { font-family:var(--mono); }
+  .r { text-align:right; }
+
+  .console { background:#04060d; border:1px solid var(--border); border-radius:15px; overflow:hidden; }
+  .console-head { display:flex; justify-content:space-between; align-items:center; padding:11px 16px; background:rgba(255,255,255,.02); border-bottom:1px solid var(--border); }
+  .dots { display:flex; gap:6px; }
+  .dots i { width:11px; height:11px; border-radius:50%; display:block; }
+  .dots i:nth-child(1){background:var(--red)} .dots i:nth-child(2){background:var(--amber)} .dots i:nth-child(3){background:var(--green)}
+  .console-title { font-size:11.5px; color:var(--muted); font-family:var(--mono); }
+  .console-body { font-family:var(--mono); font-size:12px; line-height:1.7; padding:14px 16px; max-height:52vh; overflow-y:auto; white-space:pre-wrap; word-wrap:break-word; color:#7dd3fc; }
+  .empty { text-align:center; color:var(--muted); padding:40px; font-size:13.5px; }
+
+  .list { display:flex; flex-direction:column; gap:11px; }
+  .item { background:var(--panel); border:1px solid var(--border); border-radius:13px; padding:15px 17px; }
+  .item .title { font-size:14.5px; font-weight:700; margin-bottom:6px; }
+  .item .meta { font-size:12px; color:var(--muted); display:flex; gap:14px; flex-wrap:wrap; }
+  .tag { padding:2px 8px; border-radius:6px; font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:.5px; border:1px solid; }
+  .ok { background:rgba(16,185,129,.14); color:#34d399; border-color:rgba(16,185,129,.3); }
+  .warn { background:rgba(245,158,11,.14); color:#fbbf24; border-color:rgba(245,158,11,.3); }
+  .err { background:rgba(239,68,68,.14); color:#f87171; border-color:rgba(239,68,68,.3); }
+  a.watch { color:#f87171; text-decoration:none; font-weight:700; }
+  details summary { cursor:pointer; color:var(--cyan); font-size:12px; }
+  .muted { color:var(--muted); }
+
+  .foot { margin-top:14px; font-size:11px; color:#4b5563; font-family:var(--mono); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+  .live { display:flex; align-items:center; gap:6px; }
+  .live::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--green); animation:blink 1.6s infinite; }
+
+  @media (max-width:768px){
+    .wrap { padding:18px 13px 100px; }
+    header { flex-direction:column; align-items:stretch; }
+    .h-right { justify-content:space-between; }
+    .tabs { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
+    .tabs::-webkit-scrollbar { display:none; }
+    .tab { flex:1; min-width:0; text-align:center; padding:12px 6px; font-size:12px; white-space:nowrap; }
+    .grid { grid-template-columns:1fr 1fr; }
+    .card .v { font-size:22px; }
+    .console-body { max-height:46vh; }
+    .hb { margin-left:0; width:100%; }
+  }
+  @media (max-width:420px){ .grid { grid-template-columns:1fr; } }
+  @media (prefers-reduced-motion:reduce){ * { animation:none!important; } }
+  @supports (padding:env(safe-area-inset-bottom)) { .wrap { padding-bottom:calc(90px + env(safe-area-inset-bottom)); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">CSVG</div>
+      <div>
+        <h1>CSVG Live Dashboard</h1>
+        <p>Rust edge server · pipeline logs &amp; budget</p>
+      </div>
+    </div>
+    <div class="h-right">
+      <button class="btn" id="refreshBtn">↻ Refresh</button>
+      <div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusTxt">—</span></div>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="logs">Live Logs</button>
+    <button class="tab" data-tab="budget">Budget</button>
+    <button class="tab" data-tab="runs">Runs</button>
+    <button class="tab" data-tab="published">Published</button>
+  </nav>
+
+  <div id="view"></div>
+
+  <div class="foot">
+    <span class="live">live feed</span>
+    <span id="upd">last updated: —</span>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (s, el=document) => el.querySelector(s);
+const $$ = (s, el=document) => Array.from(el.querySelectorAll(s));
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = (n, d=2) => Number(n||0).toLocaleString(undefined,{maximumFractionDigits:d});
+const money = n => '$' + num(n,4);
+const ONE_DAY_YT = 10000;
+
+const STAGES = ['INITIALIZATION','TOPIC_SELECTED','SCRIPT_GENERATED','SCRIPT_APPROVED','MEDIA_PRODUCED','QUALITY_GATES_PASSED','PUBLISHED','PUBLISHED_SUCCESS'];
+const STAGE_IDX = {};
+STAGES.forEach((s,i)=>STAGE_IDX[s]=i);
+
+let tab = 'overview';
+const DATA = { status:null, logs:null, budget:null, runs:[], published:[], objFailed:false };
+
+const pill = (kind, txt) => {
+  const p = $('#statusPill'), d = $('#statusDot');
+  d.className = 'dot ' + kind;
+  $('#statusTxt').textContent = txt;
+  p.className = 'pill' + (kind==='running'?' running':kind==='error'?' error':'');
+};
+
+async function fetchJ(path){
+  const r = await fetch(path, {cache:'no-store'});
+  if(!r.ok) throw new Error(path+' '+r.status);
+  return r.json();
+}
+
+async function loadAll(){
+  try {
+    const s0 = await fetchJ('/api/status');
+    const [budget, runs, published, logs] = await Promise.all([
+      fetchJ('/api/budget'), fetchJ('/api/runs'), fetchJ('/api/published'), fetchJ('/api/logs')
+    ]);
+    DATA.status = s0; DATA.budget = budget; DATA.runs = runs; DATA.published = published; DATA.logs = logs;
+    DATA.objFailed = false;
+  } catch(e) {
+    DATA.objFailed = true;
+    pill('error', 'Offline');
+  }
+  paint();
+  $('#upd').textContent = 'last updated: ' + new Date().toLocaleTimeString();
+}
+
+// status pill + stage
+function paintStatus(){
+  const st = DATA.status;
+  if(DATA.objFailed){ pill('error','Connection Error'); return; }
+  if(!st){ pill('idle','No data'); return; }
+  pill(st.is_running ? 'running' : 'idle', st.is_running ? 'Pipeline Running' : 'Pipeline Idle');
+  const hb = $('#hb');
+  if(hb){
+    if(st.heartbeat_age_sec != null){
+      hb.innerHTML = 'heartbeat: ' + (st.is_running ? '<b>live</b>' : '<b>' + Math.round(st.heartbeat_age_sec) + 's ago</b>');
+    } else hb.textContent = 'heartbeat: —';
+  }
+}
+
+function stageTracker(stage){
+  const idx = STAGE_IDX[stage] ?? -1;
+  const color = stage ? (stage.startsWith('PUBLISHED') ? '#34d399' : stage.startsWith('MEDIA')||stage.startsWith('QUALITY') ? '#a78bfa' : '#60a5fa') : '#fbbf24';
+  let segs = STAGES.slice(1).map((s,i) => '<div class="seg'+(i<=idx?' filled':'')+(i===idx?' current':'')+'"></div>').join('');
+  return `<div class="stage"><span class="lbl">Pipeline Stage</span>
+    <span class="badge" style="color:${color};border-color:${color}55;background:${color}1c">${esc(stage||'NOT_STARTED')}</span>
+    <span class="hb" id="hb">heartbeat: —</span><div class="prog">${segs}</div></div>`;
+}
+
+function statCards(){
+  const st = DATA.status || {};
+  const cs = st.channel_stats || {};
+  const latestRun = DATA.budget && DATA.budget.latest;
+  const lt = latestRun && latestRun.totals || {};
+  const lp = latestRun && DATA.budget.latest.pipeline_id;
+  const subs = cs.subscribers||0, wch = cs.total_watch_hours||0;
+  return `<div class="grid">
+    ${card('Channel Phase', esc(cs.channel_phase||'GROWTH'), cs.ypp_unlocked?'Monetization Active':'Unlocking YPP', '#a78bfa')}
+    ${card('Subscribers', num(subs,0), 'Target 1,000 for YPP', '#60a5fa', Math.min(100, subs/10))}
+    ${card('Watch Hours', num(wch,1)+'h', 'Target 4,000h', '#34d399', Math.min(100, wch/40))}
+    ${card('Last Run est. $', money(lt.est_usd||0), esc(lp||'no run recorded'), '#22d3ee')}
+    ${card('Last Run YT units', num((lt.yt_units||0),0), 'of 10,000/day', '#fbbf24', Math.min(100, (lt.yt_units||0)/100))}
+  </div>`;
+}
+
+function card(t,v,s,color,pct){
+  const bar = pct!=null ? `<div class="bar"><i style="width:${pct}%;background:${color}"></i></div>` : '';
+  return `<div class="card"><div class="t">${t}</div><div class="v" style="color:${color}">${v}</div><div class="s">${s}</div>${bar}</div>`;
+}
+
+function structuredLines(){
+  const logs = DATA.logs && DATA.logs.structured_logs || [];
+  if(!logs.length) return '<div class="empty">No structured logs found.</div>';
+  return `<div class="console"><div class="console-head"><div class="dots"><i></i><i></i><i></i></div><div class="console-title">csvg_execution.log · last ${logs.length}</div></div>
+    <div class="console-body">${logs.map(l=>esc(l)).join('\n')}</div></div>`;
+}
+
+function budgetPanel(){
+  const b = DATA.budget;
+  if(!b || !b.runs || !b.runs.length){
+    return `<div class="panel"><h3>Budget ledger</h3><div class="empty">No per-run budget records yet. Each pipeline run persists logs/run_budget_&lt;id&gt;.json + logs/run_budget.json.</div></div>`;
+  }
+  const tot = b.total||{};
+  const latest = b.latest||{};
+  const lt = latest.totals||{};
+  const rows = (b.runs||[]).slice(0,25).map(runRow).join('');
+  const monthlyRows = Object.entries(b.monthly||{}).slice().reverse()
+    .map(([mo,x])=>`<tr><td class="mono">${esc(mo)}</td><td class="r">${money(x.est_usd)}</td><td class="r">${num(x.yt_units,0)}</td><td class="r">${x.runs}</td><td class="r">${Math.min(100,(x.yt_units/ONE_DAY_YT*100)).toFixed(1)}%</td></tr>`).join('');
+
+  return `
+  <div class="grid">
+    ${card('All-time est. $', money(tot.est_usd), tot.runs+' run(s) tracked', '#22d3ee')}
+    ${card('All-time YT units', num(tot.yt_units,0), 'each 10k/day is ~'+ (tot.yt_units/ONE_DAY_YT).toFixed(1)+' full days', '#fbbf24')}
+    ${card('Latest run est. $', money(lt.est_usd||0), esc(latest.status||'—')+' · '+esc(latest.pipeline_id||'—'), '#34d399')}
+    ${card('Latest run YT units', num(lt.yt_units||0,0), esc((latest.stage||'—').slice(0,40)), '#a78bfa', Math.min(100,(lt.yt_units||0)/100))}
+  </div>
+
+  <div class="panel"><h3>Budget categories — latest run</h3>${catTable(latest)}</div>
+  <div class="panel"><h3>Monthly totals</h3>
+    <table><thead><tr><th>Month</th><th class="r">Est. $</th><th class="r">YT units</th><th class="r">Runs</th><th class="r">Units/day %</th></tr></thead>
+    <tbody>${monthlyRows||'<tr><td colspan="5" class="empty">—</td></tr>'}</tbody></table>
+  </div>
+  <div class="panel"><h3>Recent per-run budget</h3><table><thead><tr>
+    <th>Run / status</th><th class="r">Est. $</th><th class="r">YT units</th><th>Stage</th><th></th>
+  </tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function catTable(rec){
+  const cats = rec && rec.categories;
+  if(!cats || !Object.keys(cats).length) return '<div class="empty">No categories recorded (stub/dry runs cost $0).</div>';
+  const rows = Object.entries(cats).map(([k,c])=>`<tr><td class="mono">${esc(k)}</td><td class="r">${money(c.est_usd||0)}</td><td class="r">${num(c.yt_units||0,0)}</td><td class="r">${num(c.calls||0,0)}</td></tr>`).join('');
+  return `<table><thead><tr><th>Category</th><th class="r">Est. $</th><th class="r">YT units</th><th class="r">Calls</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function runRow(r){
+  const st = (r.status||'').toLowerCase();
+  const sttag = st==='success' ? '<span class="tag ok">success</span>'
+    : st==='failed' ? '<span class="tag err">failed</span>'
+    : st==='in_progress' ? '<span class="tag warn">running</span>'
+    : '<span class="tag">'+esc(r.status||'—')+'</span>';
+  const cats = r.categories ? Object.entries(r.categories).map(([k,c]) => esc(k)+' $'+num(c.est_usd,4)+' · '+num(c.yt_units,0)+'u').join(' · ') : '';
+  return `<tr>
+    <td><div class="mono">${esc(r.pipeline_id||'—')}</div><div class="meta muted">${esc(r.started_at||r.finished_at||'')}</div></td>
+    <td class="r">${money((r.totals&&r.totals.est_usd)||0)}</td>
+    <td class="r" title="est $/unit">${num((r.totals&&r.totals.yt_units)||0,0)}</td>
+    <td>${esc((r.stage||'') .slice(0,32))} ${sttag}</td>
+    <td>${cats?'<details><summary>details</summary><div class="muted">'+cats+'</div></details>':''}</td>
+  </tr>`;
+}
+
+function runsList(){
+  const rs = DATA.runs||[];
+  if(!rs.length) return '<div class="empty">No state checkpoints found in logs/state_*.json</div>';
+  return `<div class="list">${rs.map(r=>{
+    const stage=(r.execution_stage||'');
+    const ok = r.video_id || stage==='PUBLISHED_SUCCESS';
+    const tag = ok?'<span class="tag ok">published</span>':(stage.includes('FAIL')||stage.includes('ERROR'))?'<span class="tag err">failed</span>':'<span class="tag warn">'+esc(stage.slice(0,18))+'</span>';
+    return `<div class="item"><div class="title">${esc(r.headline||r.script_title||r.pipeline_id||'—')}</div>
+      <div class="meta"><span class="mono">${esc(r.pipeline_id||'—')}</span><span>${esc(r.timestamp||'')}</span>${tag}
+      ${r.video_id?`<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${esc(r.video_id)}">Watch ↗</a>`:''}</div></div>`;
+  }).join('')}</div>`;
+}
+
+function publishedList(){
+  const ps = DATA.published||[];
+  if(!ps || !ps.length) return '<div class="empty">No published topics recorded yet.</div>';
+  return `<div class="list">${ps.slice().reverse().map(p=>{
+    const ts = p.timestamp?new Date(p.timestamp).toLocaleString():'N/A';
+    const to = (v)=>v!=null?Number(v).toFixed(4):'—';
+    return `<div class="item"><div class="title">${esc(p.headline||p.topic||'Untitled')}</div>
+      <div class="meta"><span>${esc(ts)}</span><span>TOPSIS <b>${to(p.topsis_score)}</b></span>
+      <span class="tag ${p.published?'ok':'warn'}">${p.published?'Published':'Generated'}</span>
+      ${p.video_id?'<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v='+esc(p.video_id)+'">Watch ↗</a>':''}</div></div>`;
+  }).join('')}</div>`;
+}
+
+function liveLogs(){
+  const raw = (DATA.logs && DATA.logs.raw_logs) || '';
+  return `<div class="console"><div class="console-head"><div class="dots"><i></i><i></i><i></i></div>
+    <div class="console-title">pipeline_run.log · tail</div></div>
+    <div class="console-body" id="logbody">${raw?esc(raw):'<span class="empty">No log output yet.</span>'}</div></div>`;
+}
+
+function paint(){
+  paintStatus();
+  const v = $('#view');
+  switch(tab){
+    case 'overview':
+      v.innerHTML = (DATA.status?stageTracker(DATA.status.latest_stage):'') + statCards() + structuredLines();
+      paintStatus();
+      break;
+    case 'logs': v.innerHTML = liveLogs(); break;
+    case 'budget': v.innerHTML = budgetPanel(); break;
+    case 'runs': v.innerHTML = runsList(); break;
+    case 'published': v.innerHTML = publishedList(); break;
+  }
+}
+
+$('#refreshBtn').addEventListener('click', loadAll);
+$('#tabs').addEventListener('click', e=>{
+  const b = e.target.closest('.tab'); if(!b) return;
+  tab = b.dataset.tab;
+  $$('.tab').forEach(t=>t.classList.toggle('active', t===b));
+  paint();
+});
+
+loadAll();
+setInterval(loadAll, 8000);
+</script>
+</body>
+</html>

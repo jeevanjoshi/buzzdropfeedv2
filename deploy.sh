@@ -67,6 +67,23 @@ ssh -o StrictHostKeyChecking=no ${PI5_USER}@${PI5_IP} bash -s << EOF
     if [ -f "mcp_servers/audio_edge/server.py" ]; then
         sudo systemctl restart kokoro_tts.service || echo "Warning: systemctl restart kokoro_tts failed; check if service is enabled."
     fi
+
+    # ── Rust dashboard ─────────────────────────────────────────────────────
+    # The legacy Python dashboard (dashboard_server.py) is deprecated. Build the
+    # new zero-dependency Rust dashboard on this node (it must be built per-arch;
+    # the OCI x86 binary won't run on the ARM Pi) and switch the service over.
+    if command -v cargo >/dev/null 2>&1; then
+        cd \${TARGET_DIR}/rust_dashboard
+        cargo build --release || echo "Warning: cargo build failed; keeping previous dashboard binary."
+        cd \${TARGET_DIR}
+        sudo systemctl stop csvg_dashboard.service 2>/dev/null || true  # legacy, deprecated
+        sudo cp -f \${TARGET_DIR}/csvg_rust_dashboard.service /etc/systemd/system/csvg_rust_dashboard.service
+        sudo systemctl daemon-reload
+        sudo systemctl enable csvg_rust_dashboard.service 2>/dev/null || true
+        sudo systemctl restart csvg_rust_dashboard.service || echo "Warning: csvg_rust_dashboard restart failed."
+    else
+        echo "Warning: cargo not found on node; Rust dashboard NOT built/installed."
+    fi
 EOF
 
 echo "Raspberry Pi 5 Edge Node Deployment Completed Successfully!"
