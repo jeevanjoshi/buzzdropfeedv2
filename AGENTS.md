@@ -10,7 +10,7 @@ Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPS
 - Resume a specific run: `python main.py --resume <pipeline_id>` (reads `logs/state_<pipeline_id>.json`).
 
 ### Flags (main.py)
-`--offline`, `--india` / `--global` (region), `--till-upload`/`--no-upload`, `--dummy-frames` (synthetic visuals, skips fal/Replicate), `--renderer ffmpeg|moviepy`, `--crossfade <seconds>`, `--resume <id>`, `--rag grounded|scraper` (A/B: Google Search grounding research pass vs the 5-scraper RAG path; default = scraper).
+`--offline`, `--india` / `--global` (region), `--till-upload`/`--no-upload`, `--dummy-frames` (synthetic visuals, skips fal/Replicate), `--renderer ffmpeg|moviepy`, `--crossfade <seconds>`, `--tail <seconds>` (video-only hold after each shot's narration, default 1.2; env `CSVG_PAD_AFTER_NARRATION`), `--resume <id>`, `--rag grounded|scraper` (A/B: Google Search grounding research pass vs the 5-scraper RAG path; default = scraper).
 - There is NO `--help`; `main.py` scans `sys.argv` (no argparse) so unknown flags (incl. `--help`) are silently ignored. Semantic gates are env-only (`USE_SEMANTIC_GATES=1`), not a CLI flag.
 
 ### Tests

@@ -38,27 +38,102 @@ _WEB_CHATTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Raw scrape/citation junk that must never survive into final narration (the
+# "pasted slop" class observed live: markdown links like [Skip to content](url),
+# bare URLs, datelines "(Washington, D.C. – January 12, 2026)" and bibliography
+# tails like "The Washington Post. Retrieved October 1, 2021."). Scrubbed here
+# AND at the corpus side (rag_retriever._BOILERPLATE_RE) AND enforced as a hard
+# non-soft gate by the Observer (observer._RAW_JUNK_IN_NARR_RE).
+_RAW_JUNK_RE = re.compile(
+    r'\[[^\]\n]{0,120}?\]\((?:https?://|#|/)[^)\n]{0,300}?\)'      # markdown link
+    r'|https?://\S+',                                             # bare URL
+)
+
+# Dateline fragment " (City, St. – Month DD, YYYY)" anywhere in a sentence.
+_DATELINE_RE = re.compile(
+    r'\(\s*[A-Z][A-Za-z.-]*(?:\s*,\s*[A-Z][A-Za-z.-]*)*\s*[–—-]\s*'
+    r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+'
+    r'\d{1,2},?\s+\d{4}\s*\)',
+    re.IGNORECASE,
+)
+
+# Whole-sentence citation/bibliography tails to DROP (not just scrub): anything
+# containing "Retrieved <date>", an end-of-sentence dateline, or an author-
+# monogram bibliography entry like "McCammon, Sarah (August 10, 2016)".
+_CITATION_DROP_RE = re.compile(
+    r'\bRetrieved\b'
+    r'|\((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+'
+    r'\d{1,2},?\s+\d{4}\s*\)\.?'
+    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+\((?:January|February|March|April|May|June|July|August|September|'
+    r'October|November|December)\s+\d{1,2},?\s+\d{4}\)\.?',
+    re.IGNORECASE,
+)
+
+# Raw quoted/fragment profanity leaked from scraped articles (e.g. "no other
+# president could do the shit I'm doing"). A polished documentary sentence
+# containing these is almost always a source leak, so the sentence is dropped.
+_VULGAR_RE = re.compile(
+    r'\b(shit|bull\s?shit|fuck(?:ing|er|ed)?|cunt|bitch|motherf\w+|dickhead|a\s?s\s?s\s?hole|whore)\b',
+    re.IGNORECASE,
+)
+
+# Intraday market-ticker sentences leaked from scraped financial wrap-ups, e.g.
+# "Orsted A/S dropped 7.7% to the lowest level in over a year" / "Systems A/S
+# fell as much as 7.3% Wednesday". These are coherent but off-topic stock moves
+# pasted after the narration (Shot 17 class). Anchored on a corporate designator
+# + a price-move verb + a % figure so it never nicks legitimate narration.
+_MARKET_TICKER_SENT_RE = re.compile(
+    r'\b[A-Z][A-Za-z&\'.\-]*\s+(?:A\/S|Inc\.?|Ltd\.?|Corp\.?|PLC|NV|ASA|AG|SE|Oyj)\b'
+    r'[^.!?]{0,90}?\b(?:fell|dropped|rose|gained|jumped|surged|slid|sank|slumped|soared|plunged|retreated|advanced)\b'
+    r'[^.!?]{0,90}?\b\d+(?:\.\d+)?\s*%'
+)
+
+
+def _is_market_ticker_sentence(sent: str) -> bool:
+    return bool(_MARKET_TICKER_SENT_RE.search(sent or ""))
+
 
 def _clean_narration(narr: str) -> str:
     """
     Fixes 2 & 3: strips raw search-tool citation tags (so narration never cites
-    'Tavily'/'Exa'), '[...]' scrape artifacts, and pasted web-community/advertorial
-    sentences from script narration. Applied to the finished script so even the raw
-    LLM output reads as clean prose.
+    'Tavily'/'Exa'), '[...]' scrape artifacts, markdown links, URLs, datelines,
+    'Retrieved' bibliography tails, profane quoted fragments, and pasted
+    web-community/advertorial sentences from script narration. Applied to the
+    finished script so even the raw LLM output reads as clean prose.
     """
     s = _TOOL_TAG_RE.sub("", narr or "")
     s = _ELLIPSIS_RE.sub(" ", s)
+    s = _RAW_JUNK_RE.sub(" ", s)
+    s = _DATELINE_RE.sub(" ", s)
     sents = re.split(r'(?<=[.!?])\s+', s)
-    s = " ".join(x for x in sents if not _WEB_CHATTER_RE.search(x))
+    sents = [x for x in sents if x.strip() and not re.fullmatch(r'[.!?…\-–]{1,}', x.strip())]
+    sents = [x for x in sents if not _WEB_CHATTER_RE.search(x)]
+    sents = [x for x in sents if not _CITATION_DROP_RE.search(x)]
+    sents = [x for x in sents if not _is_market_ticker_sentence(x)]
+    sents = [x for x in sents if not _VULGAR_RE.search(x)]
+    s = " ".join(sents)
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
 def _clean_snippet_text(snippet: str) -> str:
-    """Cleans an individual retrieved-snippet line (leading tool tag + artifacts)
-    before it is used as narration padding."""
+    """Cleans an individual retrieved-snippet line (leading tool tag, markdown
+    links, URLs, datelines + artifacts) before it is used as narration padding."""
     s = _TOOL_TAG_RE.sub("", snippet or "")
     s = _ELLIPSIS_RE.sub(" ", s)
+    s = _RAW_JUNK_RE.sub(" ", s)
+    s = _DATELINE_RE.sub(" ", s)
     return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _truncate_at_word(text: str, max_chars: int) -> str:
+    """Truncate text to <= max_chars, cutting only at a word boundary (never
+    mid-word). Used for fallback titles so "wind pow..." never ships."""
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    trimmed = cut.rsplit(" ", 1)[0].rstrip(" ,;:.-")
+    return trimmed if trimmed else cut
 
 
 # Observer's per-shot narration cap (see observer.py:331/393). The story designer
@@ -103,21 +178,26 @@ def _enforce_narration_ceiling(narr: str, max_words: int = MAX_SHOT_WORDS) -> st
 
 # Boilerplate/credit/advert lines must never become narration padding — they
 # read as pasted slop (e.g. "SKIP ADVERTISEMENT", "Video by ...") and trip the
-# Observer's verbatim-source-copy gate. Mirrors the corpus-side cleaner.
+# Observer's verbatim-source-copy gate. Mirrors the corpus-side cleaner and adds
+# the raw scrape/citation classes (markdown links, URLs, datelines, "Retrieved").
 _SNIPPET_JUNK_RE = re.compile(
     r'\b(SKIP ADVERTISEMENTS?\b|Read\s?More|Subscribe\s?(now)?|Sign\s?up|Sign\s?in|'
     r'Log\s?in|Log\s?out|Listen(?:\s|·)|Video\s?by\b|Written\s?by\b|Reporting\s?by\b|'
     r'By\s+[A-Z][A-Za-z. -]+\s+(For|via)?\s*The\s+[A-Z]|Supported\s?by\b|Advertisement\b|'
     r'Advertorial\b|Sponsored(?: Content)?\b|Newsletter\b|Comments?(?:\s+closed)?\b|'
     r'Recommended(?: Stories| Videos)?\b|Most\s?Read\b|Trending\b|Menu\b|Close\b|'
-    r'Privacy\s?Policy\b|Terms\s?of\s?Service\b|Cookie\s?Preferences?\b)',
+    r'Privacy\s?Policy\b|Terms\s?of\s?Service\b|Cookie\s?Preferences?\b|'
+    r'\[[^\]\n]{0,120}?\]\((?:https?://|#|/)|https?://\S+|'
+    r'\((?:January|February|March|April|May|June|July|August|September|October|'
+    r'November|December)\s+\d{1,2},?\s+\d{4}\s*\)|\bRetrieved\b)',
     re.IGNORECASE,
 )
 
 
 def _snippet_is_junk(snippet: str) -> bool:
-    """True if a snippet is dominated by boilerplate/ad/credit junk."""
-    return bool(_SNIPPET_JUNK_RE.search(snippet or ""))
+    """True if a snippet is dominated by boilerplate/ad/credit/citation/market junk."""
+    return bool(_SNIPPET_JUNK_RE.search(snippet or "") or _CITATION_DROP_RE.search(snippet or "")
+                or _is_market_ticker_sentence(snippet))
 
 
 # Grounded numeric-claim chart builder --------------------------------
@@ -730,7 +810,7 @@ class StoryDesignerAgent:
                             self._last_rag_snippets = raw_snippets
                             self._last_used_snips = _used_snips
                             return ScriptData(
-                                title=llm_result.get("title", f"The Hidden Truth Behind {headline[:35]}... ({current_month_year})"),
+                                title=llm_result.get("title", f"The Hidden Truth Behind {_truncate_at_word(headline, 35)}... ({current_month_year})"),
                                 target_shots=len(shots),
                                 shots=shots,
                                 estimated_runtime_seconds=round(runtime, 1)
@@ -1004,7 +1084,7 @@ class StoryDesignerAgent:
         """
         headline = topic.headline
         ctr_title = self._generate_ctr_title(headline, getattr(topic, "niche_category", ""))
-        clean_title = ctr_title if ctr_title else (headline[:65] if len(headline) > 65 else headline)
+        clean_title = ctr_title if ctr_title else _truncate_at_word(headline, 65)
         tags = [t.strip().lower() for t in topic.keywords if len(t.strip()) > 2][:10]
         tags.extend(["infotainment", "documentary", "2026", "analysis", "explained"])
         
@@ -1093,6 +1173,18 @@ class StoryDesignerAgent:
                 s.narration_text = self._dissolve_verbatim_copies(s.narration_text, corpus_sents)
             script.estimated_runtime_seconds = round(
                 sum(len(x.narration_text.split()) for x in script.shots) / 150.0 * 60.0, 1)
+
+        # Final residual junk scrub (idempotent): the polish pass and word-floor
+        # re-padding can re-introduce markdown links / datelines / 'Retrieved'
+        # citation tails / profane quoted fragments from raw corpus chunks. This
+        # is the LAST chance to scrub before the Observer's hard junk gate, so a
+        # shot either reads clean or hard-aborts at audit.
+        for s in script.shots:
+            s.narration_text = _clean_narration(s.narration_text)
+        script.estimated_runtime_seconds = round(
+            sum(len(x.narration_text.split()) for x in script.shots) / 150.0 * 60.0, 1)
+        script.title = (script.title or "").strip() or _truncate_at_word(
+            state.selected_topic.headline, 65)
 
         state.script_data = script
         state.seo_metadata = self.generate_seo_metadata(state.selected_topic, script)

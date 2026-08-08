@@ -36,6 +36,22 @@ _SOFT_VIOLATION_MARKERS = (
     "narration too long",
 )
 
+# Narration must NEVER contain raw scrape/citation junk (markdown links, bare
+# URLs, datelines "(City, St – Month DD, YYYY)", "Retrieved ..." bibliography
+# tails). These are unambiguous production errors (paste/leak) — NOT style — so
+# violations are HARD aborts and are excluded from the soft-approval path.
+_RAW_JUNK_IN_NARR_RE = re.compile(
+    r'\[[^\]\n]{0,120}?\]\((?:https?://|#|/)[^)\n]{0,300}?\)'
+    r'|\bhttps?://'
+    r'|\(\s*[A-Z][A-Za-z.-]*(?:\s*,\s*[A-Z][A-Za-z.-]*)*\s*[–—-]\s*'
+    r'(?:January|February|March|April|May|June|July|August|September|October|'
+    r'November|December)\s+\d{1,2},?\s+\d{4}\s*\)'
+    r'|\bRetrieved\b'
+    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+\((?:January|February|March|April|May|June|'
+    r'July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\)\.?',
+    re.IGNORECASE,
+)
+
 
 def is_soft_violation(violation: str) -> bool:
     """True for revisable style-class violations; False (=> hard) for fact,
@@ -403,6 +419,18 @@ class ObserverAgent:
         7. Anti-Hallucination Audit: Cross-checks figures against verified_facts.
         """
         violations = []
+
+        # ── Gate: raw markup/scrape/citation junk in narration (HARD) ────────
+        # Markdown links, URLs, datelines and 'Retrieved' tails in the narration
+        # are paste/leak errors, not style, so they abort rather than soft-approve.
+        for _shot in script.shots:
+            _m = _RAW_JUNK_IN_NARR_RE.search(_shot.narration_text or "")
+            if _m:
+                violations.append(
+                    f"Raw markup/citation junk in Shot #{_shot.shot_id} narration "
+                    f"contains a markdown link, URL, dateline, or 'Retrieved' tail "
+                    f"(leaked {_m.group(0)[:60]!r}). Scrub before publish."
+                )
 
         # ── Gate 0: Audience Type Gate ──────────────────────────────────────
         # Hard-block entertainment/gossip regardless of other scores

@@ -54,6 +54,7 @@ class OrchestratorAgent:
         state: Optional[GlobalState] = None,
         renderer: str = "ffmpeg",
         crossfade: float = 0.5,
+        pad_after_narration: Optional[float] = None,
         rag_mode: str = "scraper"
     ) -> GlobalState:
         """
@@ -81,6 +82,8 @@ class OrchestratorAgent:
         if renderer in ("moviepy", "ffmpeg"):
             self.media_producer.renderer = renderer
         self.media_producer.crossfade = max(0.0, crossfade)
+        if pad_after_narration is not None:
+            self.media_producer.pad_after_narration = max(0.0, pad_after_narration)
         if state is None:
             p_id = pipeline_id or f"csvg-exec-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
             state = GlobalState(

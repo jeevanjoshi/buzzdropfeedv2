@@ -33,6 +33,8 @@ DISTRIBUTION / FEED
 RENDERING
   --renderer ffmpeg|moviepy      renderer to use (default ffmpeg)
   --crossfade <seconds>          crossfade duration (float, default 0.5)
+  --tail <seconds>               video-only hold after each shot's narration
+                                 (float, default 1.2; 0 = cut on narration end)
 
 RAG / RESEARCH  (A/B: Google Search grounding vs 5-scraper path)
   --rag grounded                 Google Search grounding only (cited facts)
@@ -69,6 +71,7 @@ def main():
     dummy_frames = False
     renderer = "ffmpeg"
     crossfade = 0.5
+    pad_after_narration = None
     rag_mode = "scraper"
 
     state = None
@@ -104,6 +107,13 @@ def main():
                         crossfade = float(sys.argv[i + 1])
                     except ValueError:
                         crossfade = 0.5
+        if "--tail" in sys.argv:
+            for i, arg in enumerate(sys.argv):
+                if arg == "--tail" and i + 1 < len(sys.argv):
+                    try:
+                        pad_after_narration = float(sys.argv[i + 1])
+                    except ValueError:
+                        pad_after_narration = None
         
         # Parse --resume <pipeline_id>
         for i, arg in enumerate(sys.argv):
@@ -129,6 +139,7 @@ def main():
         state=state,
         renderer=renderer,
         crossfade=crossfade,
+        pad_after_narration=pad_after_narration,
         rag_mode=rag_mode
     ))
 
