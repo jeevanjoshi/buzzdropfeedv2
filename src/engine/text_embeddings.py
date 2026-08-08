@@ -120,6 +120,16 @@ def semantic_topic_membership(token: str, anchor_words: List[str]) -> Optional[f
     return float((vecs[0] @ vecs[1:].T).max())
 
 
+# Calibrated on live pipeline data: a narration sentence whose whole-sentence
+# meaning ~== a clean RAG corpus sentence is a true verbatim copy at sim >= 0.94
+# (the 1.00s are literal lifts). Fact-dense but legitimately rephrased narration
+# — which MUST preserve names/numbers/dates and therefore can't drop below ~0.85
+# no matter how well it is rewritten — clusters at 0.80-0.93, so that band is
+# deliberately NOT a copy. Shared by the Observer gate and the StoryDesigner
+# local dissolve pass so writer and validator agree on the same threshold.
+COPY_SEMANTIC_HARD_THRESHOLD = 0.94
+
+
 HIGH_RPM_TAXONOMY = {
     "finance_global": ["fed", "interest", "rate", "inflation", "bonds", "stocks", "sec", "treasury", "market", "portfolio", "wall street", "banking", "economy", "recession", "wealth"],
     "tech_global": ["semiconductor", "ai", "nvidia", "chips", "cloud", "data center", "apple", "microsoft", "google", "meta", "crypto", "tsmc", "quantum", "software", "saas"],

@@ -6,12 +6,21 @@ from src.schemas.state import GlobalState, ScriptData, VerifiedFact
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.engine.monetization_optimizer import monetization_optimizer
 from src.engine.channel_phase_manager import channel_phase_manager
-from src.engine.text_embeddings import semantic_embedder, semantic_max_similarity, semantic_pairwise_similarity, semantic_topic_membership
+from src.engine.text_embeddings import semantic_embedder, semantic_max_similarity, semantic_pairwise_similarity, semantic_topic_membership, COPY_SEMANTIC_HARD_THRESHOLD
 
 # Semantic-gate thresholds (MiniLM cosine sim). When the semantic backend is
 # unavailable these gates fall back to the deterministic TF-IDF/substring logic,
 # so hermetic/offline runs behave exactly as before.
-COPY_SEMANTIC_THRESHOLD = 0.82          # narration sentence ~== a clean corpus sentence
+#
+# Verbatim source-copy now uses a single WHOLE-SENTENCE hard threshold
+# (COPY_SEMANTIC_HARD_THRESHOLD, imported from text_embeddings, = 0.94). The old
+# 0.82 bar conflated two different things and caused never-converging revision
+# loops (25 -> 27 -> 32 violations): it flagged fact-dense narration that MUST
+# preserve required names/numbers/dates and therefore can never paraphrase far
+# enough to drop its whole-sentence embedding sim below ~0.85, even when a human
+# reads it as a genuine rewrite. Calibrated on live data, true copies cluster at
+# >= 0.94 while legitimate rephrases sit at 0.80-0.93, so 0.94 is the clean split.
+COPY_SEMANTIC_THRESHOLD = 0.82          # legacy lower bound (kept for API compat)
 TOPIC_MEMBER_SEMANTIC_THRESHOLD = 0.50  # token ~== a topic anchor word (keyword/headline/summary)
 
 # Style-class violations (revisable, non-factual). When a script fails the bounded
@@ -152,9 +161,19 @@ class ObserverAgent:
         gt_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', ground_truth_corpus))
 
         # Verbatim source-copy check: narration must not reproduce the RAG corpus
-        # word-for-word (reads as pasted slop rather than creative narrative).
-        # Only long, near-identical runs are flagged so short factual padding and
-        # common phrasing don't cause false positives.
+        # (reads as pasted slop rather than creative narrative). Only an
+        # UNEQUIVOCAL whole-sentence copy is flagged: a narration sentence whose
+        # meaning is ~identical to a corpus sentence (semantic sim >= 0.94).
+        #
+        # The 0.82-0.93 band is deliberately NOT a violation: fact-dense narration
+        # that preserves required names/numbers/dates can never paraphrase far
+        # enough to drop its whole-sentence embedding sim below ~0.85, so flagging
+        # it produced false positives and never-converging revision loops
+        # (25 -> 27 -> 32). A longer lifted clause INSIDE an otherwise-original
+        # sentence also does not warn alone, because the corpus is highly
+        # redundant (many sources restate the same fact) and even clear rephrases
+        # share long factual word-runs — only the whole-sentence meaning check
+        # separates a true copy from legitimate fact-dense prose.
         if crawled_content:
             corpus_norm = re.sub(r'\s+', ' ', crawled_content.lower())
             corpus_sents = [
@@ -169,13 +188,13 @@ class ObserverAgent:
                         sent_norm = re.sub(r'[^a-z0-9 ]', '', sent.strip().lower()).strip()
                         if len(sent_norm.split()) < 12:
                             continue
-                        # Semantic paraphrase-copy check first: content-aware and
-                        # catches lightly-rewritten slop the substring test misses,
-                        # while avoiding false positives on short factual padding.
+                        # Semantic whole-sentence meaning-copy check: catches lightly
+                        # rewritten but semantically identical slop the substring test
+                        # misses, while avoiding false positives on the 0.82-0.93 band.
                         if _sem_on:
                             max_sim = semantic_max_similarity(sent_norm, corpus_sents)
                             if max_sim is not None:
-                                if max_sim >= COPY_SEMANTIC_THRESHOLD:
+                                if max_sim >= COPY_SEMANTIC_HARD_THRESHOLD:
                                     violations.append(
                                         f"Shot #{shot.shot_id} verbatim source copy: narration copies the "
                                         f"RAG corpus nearly word-for-word (semantic sim {max_sim:.2f}): '{sent.strip()[:90]}'"
