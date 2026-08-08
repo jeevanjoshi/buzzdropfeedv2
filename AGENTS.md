@@ -55,7 +55,7 @@ The model cache stays in `.hf_cache/` (gitignored, excluded from `sync_to_pi.sh`
 ### What it replaces (observer.py)
 | Gate | Current (fallback) | Semantic (when ON) |
 |---|---|---|
-| Verbatim/paraphrase copy | ≥12-word substring match | MiniLM cosine sim ≥ 0.82 vs clean corpus; catches lightly-rewritten slop |
+| Verbatim/paraphrase copy | ≥12-word substring match | MiniLM cosine sim ≥ 0.94 vs clean corpus = whole-sentence meaning copy. The 0.82–0.93 band is deliberately NOT flagged: fact-dense narration that must preserve names/numbers/dates can't paraphrase below ~0.85, so flagging it was a false positive (calibrated live: 27→13 flags) |
 | Keyword over-repetition | Exact-token blacklist | Semantic topic-membership: token vs topic anchor words (keywords + headline + summary); `chinese~china` = 0.68, `gadget~china` = 0.31; threshold 0.50 |
 | Sentence monotony / duplication | TF-IDF cos ≥ 0.82 | MiniLM pairwise similarity ≥ 0.82; one-batch-encode, precomputed matrix |
 | Quality score | N/A | Paraphrase diversity = 1 − mean pairwise sentence sim; used for best-draft retention across revisions |
@@ -69,9 +69,17 @@ The model loads lazily on first use and stays **resident** for the process lifet
 ### Clean RAG (rag_retriever.py + story_designer.py)
 `_strip_boilerplate()` strips ad/credit/nav junk (SKIP ADVERTISEMENT, Video by, Listen ·, Subscribe, etc.) from deep-crawled articles before they enter the fact corpus, crawled_content, and the snippet padding pool. The same junk filter (`_SNIPPET_JUNK_RE`) protects the story designer's RAG snippets. This removes the "verbatim NYT boilerplate in Shot #15" class of false positives at the source.
 
-### Thresholds (observer.py module-level constants)
-- `COPY_SEMANTIC_THRESHOLD = 0.82` — narration sentence ~== clean corpus sentence
+### Thresholds (shared: text_embeddings.py, consumed by observer.py + story_designer.py)
+- `COPY_SEMANTIC_HARD_THRESHOLD = 0.94` — narration sentence ~== clean corpus sentence (whole-sentence meaning copy; the verbatim gate)
+- `COPY_SEMANTIC_THRESHOLD = 0.82` — legacy lower bound, kept only for API compatibility (no longer used by the gate)
 - `TOPIC_MEMBER_SEMANTIC_THRESHOLD = 0.50` — token ~== topic anchor word (keyword/headline/summary)
+
+### Anti-verbatim writer (story_designer.py)
+The writer self-corrects copies BEFORE the Observer audits, in two layers:
+1. **LLM polish prompt** (`_polish_script`, `process()` passes `corpus_sents`): the polish prompt detects narration sentences that are whole-sentence meaning copies (sim ≥ 0.94) and lists them explicitly, demanding a *structurally different* rewrite (restructure clause order, split/merge) — not just synonym substitution. A standing ANTI-VERBATIM rule in the prompt forbids mirroring a source sentence's wording.
+2. **Local WordNet dissolve** (`_dissolve_verbatim_copies`, run after polish + word-floor): a deterministic, no-LLM, offline pass that swaps local NLTK WordNet synonyms in any remaining ≥0.94 sentence until it drops below threshold, protecting proper nouns/numbers/dates/currency. Requires `wordnet` + `omw-1.4` data in NLTK (installed under `/home/ubuntu/nltk_data/corpora/`); a no-op when WordNet or the semantic backend is unavailable (never fails/hangs, never hits the network).
+
+Net effect: the validator stops flagging fact-dense rephrases (27→13 on live data) and the writer dissolves the true copies, so the 3-revision loop converges instead of growing (was 25→27→32).
 
 ### Not learning (frozen encoder)
 The MiniLM model is a **frozen pretrained encoder** — no gradient updates, no RL, no weight adaptation across runs. It generalises to `china→chinese` because it was trained on billions of text pairs, not because it learns from your pipeline. If you want learned gates, future options (in order of complexity):
