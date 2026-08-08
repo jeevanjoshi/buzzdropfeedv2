@@ -129,8 +129,8 @@ class RunBudget:
         try:
             os.makedirs(BUDGET_LOGS_DIR, exist_ok=True)
             with self._lock:
-                with open(os.path.join(BUDGET_LOGS_DIR, f"run_budget_{rid}.json"), "w", encoding="utf-8") as f:
-                    json.dump(rec, f, indent=2)
+                per_run = os.path.join(BUDGET_LOGS_DIR, f"run_budget_{rid}.json")
+                self._atomic_dump(per_run, rec)
                 agg: dict = {}
                 if os.path.exists(AGGREGATE_FILE):
                     try:
@@ -140,11 +140,19 @@ class RunBudget:
                         agg = {}
                 rec["pipeline_id"] = rid
                 agg[rid] = rec
-                with open(AGGREGATE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(agg, f, indent=2)
+                self._atomic_dump(AGGREGATE_FILE, agg)
                 return rec
         except (IOError, OSError):
             return None
+
+    @staticmethod
+    def _atomic_dump(path: str, data: dict) -> None:
+        """Write JSON atomically (temp file + rename) so a concurrent reader /
+        rsync never sees a half-written file."""
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
 
     def _start_flush_thread(self) -> None:
         thr = self._flush_thread
