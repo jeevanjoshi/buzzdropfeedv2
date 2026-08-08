@@ -36,7 +36,23 @@ _BOILERPLATE_RE = re.compile(
     r'Supported\s?by\b|Advertisement\b|Advertorial\b|Sponsored(?: Content)?\b|'
     r'Newsletter\b|Comments?(?:\s+closed)?\b|Recommended(?: Stories| Videos)?\b|'
     r'Most\s?Read\b|Trending\b|Menu\b|Close\b|Skip\s?to\s?content\b|'
-    r'Privacy\s?Policy\b|Terms\s?of\s?Service\b|Cookie\s?Preferences?\b)',
+    r'Privacy\s?Policy\b|Terms\s?of\s?Service\b|Cookie\s?Preferences?\b|'
+    # Raw scrape/citation junk: markdown links, bare URLs, datelines, "Retrieved"
+    # tails and author-monogram bibliography entries. These read as pasted slop
+    # and leak verbatim into narration, so they are dropped sentence-by-sentence.
+    r'\[[^\]\n]{0,120}?\]\((?:https?://|#|/)[^)\n]{0,300}?\)|'
+    r'https?://\S+|'
+    r'\(\s*[A-Z][A-Za-z.-]*(?:\s*,\s*[A-Z][A-Za-z.-]*)*\s*[–—-]\s*'
+    r'(?:January|February|March|April|May|June|July|August|September|October|'
+    r'November|December)\s+\d{1,2},?\s+\d{4}\s*\)|'
+    r'\bRetrieved\b|'
+    r'[A-Z][a-z]+,\s+[A-Z][a-z]+\s+\((?:January|February|March|April|May|June|'
+    r'July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\)\.?|'
+    # Intraday market-ticker wrap-ups ("Orsted A/S dropped 7.7% ..."), coherent
+    # but off-topic stock moves that leak verbatim into narration (Shot 17 class).
+    r'\b[A-Z][A-Za-z&\'.\-]*\s+(?:A\/S|Inc\.?|Ltd\.?|Corp\.?|PLC|NV|ASA|AG|SE|Oyj)\b'
+    r'[^.!?]{0,90}?\b(?:fell|dropped|rose|gained|jumped|surged|slid|sank|slumped|soared|plunged|retreated|advanced)\b'
+    r'[^.!?]{0,90}?\b\d+(?:\.\d+)?\s*%)',
     re.IGNORECASE,
 )
 
@@ -141,6 +157,56 @@ _PROMO_RE = re.compile(
 def _is_promotional(text: str) -> bool:
     """True if a snippet/title contains promotional, ad, or web-chatter language."""
     return bool(_PROMO_RE.search(text or ""))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SOCIAL-MEDIA SOURCE EXCLUSION
+# Social/community platforms carry low-trust, non-citable opinion (and verbatim
+# user chatter) that pollutes the fact corpus and feeds Observer false positives.
+# Excluded BOTH in the scraper path (per-source + C3 final filter) and in Google
+# grounding (grounded_search). Medium/Substack/forums are treated as social
+# because they host self-published, uncurated opinion masquerading as journalism.
+# ─────────────────────────────────────────────────────────────────────────────
+_SOCIAL_DOMAINS = frozenset({
+    "reddit.com", "redd.it",
+    "x.com", "twitter.com", "t.co",
+    "facebook.com", "fb.com", "fb.watch",
+    "instagram.com",
+    "linkedin.com",
+    "tiktok.com",
+    "youtube.com", "youtu.be", "m.youtube.com",
+    "quora.com",
+    "pinterest.com", "pin.it",
+    "snapchat.com",
+    "threads.net",
+    "discord.com",
+    "medium.com",
+    "substack.com",
+})
+
+_SOCIAL_SOURCE_RE = re.compile(
+    r"\b(reddit|twitter|tweet|facebook|instagram|linkedin|tiktok|"
+    r"quora|pinterest|snapchat|threads|discord|substack)\b|"
+    r"\b(r/[\w-]+|u/[\w-]+)\b|"
+    r"(?<![\w.])@[\w.-]+\b",
+    re.IGNORECASE,
+)
+
+
+def _is_social_source(url: str = "", title: str = "", snippet: str = "") -> bool:
+    """True if a source (by URL domain or by source/text) is a social/community
+    platform. Conservative: URL host match first, then source-name/text markers.
+    """
+    text = f"{url or ''} {title or ''} {snippet or ''}"
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(str(url or "")).netloc.lower().lstrip("www.").split(":")[0]
+        if any(d == host or host.endswith("." + d) for d in _SOCIAL_DOMAINS):
+            return True
+    except Exception:
+        pass
+    return bool(_SOCIAL_SOURCE_RE.search(text))
+
 
 
 
@@ -322,8 +388,8 @@ class RAGTopicRetriever:
                 for a in articles:
                     title = a.get("title", "")
                     desc = a.get("description", "")
-                    if desc and len(desc) > 30:
-                        results.append({"title": title, "snippet": desc})
+                    if desc and len(desc) > 30 and not _is_social_source(a.get("url", ""), title, desc):
+                        results.append({"title": title, "snippet": desc, "url": a.get("url", "")})
         except Exception as e:
             print(f"[RAGRetriever] NewsAPI Warning: {e}")
         return results
@@ -345,7 +411,7 @@ class RAGTopicRetriever:
                     snippet = item.get("snippet", "")
                     clean_snippet = re.sub(r'<[^>]+>', '', snippet)
                     clean_snippet = html.unescape(clean_snippet)
-                    if len(clean_snippet) > 30:
+                    if len(clean_snippet) > 30 and not _is_social_source("", title, clean_snippet):
                         results.append({"title": title, "snippet": clean_snippet})
         except Exception as e:
             print(f"[RAGRetriever] Wikipedia Warning: {e}")
@@ -374,9 +440,10 @@ class RAGTopicRetriever:
             )
             data = resp.json()
             return [
-                {"title": r.get("title", ""), "snippet": r.get("content", "")}
+                {"title": r.get("title", ""), "snippet": r.get("content", ""), "url": r.get("url", "")}
                 for r in data.get("results", [])
                 if r.get("content") and len(r.get("content", "")) > 30
+                and not _is_social_source(r.get("url", ""), r.get("title", ""), r.get("content", ""))
             ]
         except Exception as e:
             print(f"[RAGRetriever] Tavily Warning: {e}")
@@ -403,8 +470,9 @@ class RAGTopicRetriever:
             for it in items:
                 desc = it.get("description") or (it.get("metadata", {}) or {}).get("description", "")
                 title = it.get("title", "")
-                if desc and len(str(desc)) > 30:
-                    out.append({"title": title, "snippet": str(desc)})
+                meta_url = (it.get("metadata", {}) or {}).get("url", "")
+                if desc and len(str(desc)) > 30 and not _is_social_source(meta_url, title, str(desc)):
+                    out.append({"title": title, "snippet": str(desc), "url": meta_url})
             return out
         except Exception as e:
             print(f"[RAGRetriever] Firecrawl Warning: {e}")
@@ -829,6 +897,10 @@ class RAGTopicRetriever:
         # Promotional/advertorial content filter across ALL sources: drop any
         # snippet that reads like marketing/web-chatter so it can't pollute the pack.
         retrieved_facts = [l for l in retrieved_facts if not _is_promotional(l)]
+        # C3 defense-in-depth: run the built lines through the social-source check
+        # too (the [Tavily: …]/[Exa: …]/[NewsAPI: …]/[Wikipedia: …] title tags are
+        # inspected) so nothing survives if a per-source check was missed.
+        retrieved_facts = [l for l in retrieved_facts if not _is_social_source("", l)]
         # Dedup: the same result is often returned across the multiple queries.
         seen_lines: Set[str] = set()
         unique_lines = []

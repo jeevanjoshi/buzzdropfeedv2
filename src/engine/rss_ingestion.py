@@ -6,6 +6,7 @@ import uuid
 from typing import List, Dict, Any, Tuple, Optional
 from src.schemas.state import TopicCandidate, VerifiedFact
 from src.engine.youtube_topic_demand import youtube_topic_demand
+from src.engine.opportunity_score import compute_opportunity
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HIGH-RPM GLOBAL ENGLISH FEEDS ONLY
@@ -567,6 +568,8 @@ class LiveRSSIngestionEngine:
                 audience_type=audience_type,
                 niche_category=niche_category,
                 competitor_30d_avg_views=comp_30d,
+                competing_video_count=float(competing),
+                opportunity_score=compute_opportunity(comp_30d, competing),
             )
             candidates.append(cand)
 
@@ -595,7 +598,8 @@ class LiveRSSIngestionEngine:
                 sdi = self._compute_sdi(headline, summary)
                 ctr_result = ctr_predictor.predict_ctr(headline, summary)
                 shm = self._compute_shm(headline, ctr_result)
-                sat = self._compute_sat(self._estimate_competing_video_count(keywords, coverage.get(idx - 1, 1)))
+                competing = self._estimate_competing_video_count(keywords, coverage.get(idx - 1, 1))
+                sat = self._compute_sat(competing)
                 measured_vph, comp_30d = self._compute_vph(headline, keywords)
                 if measured_vph is not None:
                     vph = measured_vph
@@ -607,7 +611,9 @@ class LiveRSSIngestionEngine:
                     source_url=item["url"], keywords=keywords,
                     tvs_score=tvs, rpm_score=rpm, idi_score=idi,
                     sdi_score=sdi, shm_score=shm, vph_score=vph, sat_score=sat,
-                    competitor_30d_avg_views=comp_30d
+                    competitor_30d_avg_views=comp_30d,
+                    competing_video_count=float(competing),
+                    opportunity_score=compute_opportunity(comp_30d, competing),
                 ))
                 facts.append(VerifiedFact(
                     source_id=f"fallback-fact-{idx:03d}",

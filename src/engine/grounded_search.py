@@ -19,10 +19,39 @@ import os
 import json
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Social/community platforms excluded from grounding chunks/facts. These host
+# low-trust, non-citable opinion that pollutes the corpus. Mirrors
+# rag_retriever._SOCIAL_DOMAINS so the grounded path drops the same domains.
+_SOCIAL_DOMAINS = frozenset({
+    "reddit.com", "redd.it", "x.com", "twitter.com", "t.co", "facebook.com",
+    "fb.com", "instagram.com", "linkedin.com", "tiktok.com", "youtube.com",
+    "youtu.be", "quora.com", "pinterest.com", "snapchat.com", "threads.net",
+    "discord.com", "medium.com", "substack.com",
+})
+
+
+def _is_social_domain(domain: str = "") -> bool:
+    """True if a grounding chunk's domain (or a URL's host) is a social platform."""
+    host = (domain or "").strip().lower().lstrip("www.").split(":")[0]
+    if host:
+        if any(d == host or host.endswith("." + d) for d in _SOCIAL_DOMAINS):
+            return True
+    return False
+
+
+def _is_social_url(url: str = "") -> bool:
+    if not url:
+        return False
+    try:
+        return _is_social_domain(urlparse(url).netloc)
+    except Exception:
+        return False
 
 try:
     from google import genai
@@ -159,10 +188,13 @@ def _collect_chunks(gm) -> List[Dict[str, str]]:
     for c in (getattr(gm, "grounding_chunks", None) or []):
         w = getattr(c, "web", None)
         if w is not None:
+            domain = getattr(w, "domain", "") or ""
+            if _is_social_domain(domain):
+                continue
             chunks.append({
                 "title": getattr(w, "title", ""),
                 "uri": getattr(w, "uri", ""),
-                "domain": getattr(w, "domain", ""),
+                "domain": domain,
             })
     return chunks
 
@@ -234,6 +266,8 @@ def grounded_research(
         # facet's search actually returned). Dedupe by fact text, not URL.
         for j, sent in enumerate(_split_fact_sentences(raw_text)):
             src = fchunks[j % len(fchunks)] if fchunks else {}
+            if _is_social_url(src.get("uri", "")):
+                continue
             key = sent.lower()[:90]
             if key in seen_facts:
                 continue

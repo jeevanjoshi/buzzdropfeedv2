@@ -4,6 +4,27 @@ from typing import List, Dict, Any, Optional
 from src.schemas.state import VerifiedFact, TopicCandidate
 
 
+# Social/community platforms excluded from the RAG fact corpus (Exa results).
+# Mirrors rag_retriever._SOCIAL_DOMAINS so the Exa path is self-contained.
+_SOCIAL_DOMAINS = frozenset({
+    "reddit.com", "redd.it", "x.com", "twitter.com", "t.co", "facebook.com",
+    "fb.com", "instagram.com", "linkedin.com", "tiktok.com", "youtube.com",
+    "youtu.be", "quora.com", "pinterest.com", "snapchat.com", "threads.net",
+    "discord.com", "medium.com", "substack.com",
+})
+
+
+def _is_social_hostname(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower().lstrip("www.").split(":")[0]
+        return any(d == host or host.endswith("." + d) for d in _SOCIAL_DOMAINS)
+    except Exception:
+        return False
+
+
 class ExternalAPIManager:
     """
     Unified Master External API Manager integrating top-priority data APIs:
@@ -120,6 +141,8 @@ class ExternalAPIManager:
                 results = res.json().get("results", [])
                 facts = []
                 for idx, r in enumerate(results):
+                    if _is_social_hostname(r.get("url", "")):
+                        continue
                     facts.append(VerifiedFact(
                         source_id=f"exa-{idx+1}",
                         headline=r.get("title", query),

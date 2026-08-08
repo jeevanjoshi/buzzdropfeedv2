@@ -70,6 +70,10 @@ class TopicCandidate(BaseModel):
     niche_category: str = Field(default="Technology & Artificial Intelligence", description="High-RPM niche label")
     # Real competitor view-demand data (YouTube Data API) when measured, else 0 (unknown)
     competitor_30d_avg_views: float = Field(default=0.0, description="Avg competitor 30-day views for this topic (0 = not measured)")
+    # Opportunity score: views-per-competitor = competitor_30d_avg_views / max(1, competing_video_count)
+    # A log-tamed [0, 1] measure of how much attention each competing video claims. 0 = not measured.
+    competing_video_count: float = Field(default=0.0, description="Estimated # of competing videos on this topic (0 = not measured)")
+    opportunity_score: float = Field(default=0.0, description="Views-per-competitor opportunity = competitor_30d_avg_views / max(1, competing_video_count)")
 
 
 from enum import Enum

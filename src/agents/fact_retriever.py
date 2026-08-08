@@ -1,3 +1,4 @@
+import os
 import uuid
 import datetime
 from typing import List, Dict, Any, Optional
@@ -9,6 +10,12 @@ from src.engine.api_ninjas import APINinjasRetriever
 from src.engine.external_apis import external_api_manager
 from src.engine.space_cinema_apis import space_cinema_api_manager
 from src.engine.monetization_optimizer import monetization_optimizer
+from src.engine.opportunity_score import compute_opportunity
+from src.engine.youtube_topic_demand import youtube_topic_demand
+
+# Floor for the opportunity (views-per-competitor) hard gate. Tune via env
+# (calibration script) without code edits.
+OPPORTUNITY_MIN_SCORE = float(os.getenv("OPPORTUNITY_MIN_SCORE", "0.5"))
 
 
 class FactRetrieverAgent:
@@ -120,6 +127,35 @@ class FactRetrieverAgent:
 
         return [c1, c2], [f1, f2]
 
+    def _apply_precise_shortlist(self, ranked: List[TopicCandidate]) -> List[TopicCandidate]:
+        """Re-order the TOPSIS top-3 by precise per-topic opportunity.
+
+        Runs one on-topic search + batch stats per candidate and recomputes the
+        ``opportunity_score``. On any failure the candidate keeps its measured-or-
+        unknown score and ordering. Only the top-3 are touched; the rest are
+        returned in original order.
+        """
+        if not ranked:
+            return ranked
+        top = list(ranked[:3])
+        rest = list(ranked[3:])
+        for c in top:
+            query = (" ".join(c.keywords[:3]) if getattr(c, "keywords", None)
+                     else (c.headline or "")[:40]).strip() or (c.headline or "")
+            demand = None
+            try:
+                demand = youtube_topic_demand.precise_topic_demand(query)
+            except Exception:
+                demand = None
+            if demand and demand.get("competitor_30d_avg_views"):
+                count = float(demand.get("video_count") or 0)
+                avg_views = float(demand["competitor_30d_avg_views"])
+                c.competitor_30d_avg_views = avg_views
+                c.competing_video_count = count
+                c.opportunity_score = compute_opportunity(avg_views, count)
+        top.sort(key=lambda x: x.opportunity_score, reverse=True)
+        return top + rest
+
     def process(self, state: GlobalState, use_live_rss: bool = True, region: str = "all",
                 channel_phase: str = "REVENUE",
                 exclude_headlines: Optional[List[str]] = None) -> A2AMessage:
@@ -139,6 +175,24 @@ class FactRetrieverAgent:
         if not candidates:
             raise ValueError("No topic candidates available for selection.")
 
+        # Pre-TOPSIS opportunity hard gate (REVENUE/SCALE only, measured only).
+        # A topic with a MEASURED but low views-per-competitor opportunity is a
+        # poor bet; cull it before TOPSIS so it can't win. Unmeasured (score 0)
+        # passes through so "unknown -> TOPSIS decides". If every candidate is
+        # culled in a monetised phase, abort the run rather than ship a bad topic.
+        if channel_phase in ("REVENUE", "SCALE"):
+            gated = [
+                c for c in candidates
+                if not (c.opportunity_score > 0 and c.opportunity_score < OPPORTUNITY_MIN_SCORE)
+            ]
+            if not gated:
+                raise ValueError(
+                    f"All {len(candidates)} candidate topics failed the opportunity hard gate "
+                    f"(OPPORTUNITY_MIN_SCORE={OPPORTUNITY_MIN_SCORE}). "
+                    "Refusing to select a low-opportunity topic."
+                )
+            candidates = gated
+
         # Rank candidates using phase-aware TOPSIS Decision Engine
         ranked_candidates = self.topsis_engine.rank_candidates(candidates, channel_phase=channel_phase)
 
@@ -155,7 +209,13 @@ class FactRetrieverAgent:
                     "All topic candidates were excluded (previously failed RAG "
                     "quality gate). No alternative topic available."
                 )
-        
+
+        # B1 shortlist precise check (first pass): for the TOPSIS top-3, measure
+        # TRUE on-topic competition and re-rank just those three by opportunity
+        # so an underserved-but-strong topic can surface first. Silent
+        # fall-through on quota/API failure keeps the TOPSIS ordering.
+        ranked_candidates = self._apply_precise_shortlist(ranked_candidates)
+
         # Apply pre-filtering using Audience and Revenue Gates
         # High-RPM enforcement: if any genuinely-classified (non-general, non-blocked)
         # niche candidate exists, do not let a low-value 'general' lifestyle topic win,

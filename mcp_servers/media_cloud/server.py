@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import datetime
 from typing import Optional, List
@@ -61,6 +62,9 @@ class GIFRequest(BaseModel):
 class ThumbnailRequest(BaseModel):
     headline_text: str
     subtitle_text: str = ""
+    visual_prompt: Optional[str] = ""   # theme-matched scene description (e.g. the hero
+                                        # shot's visual prompt) so the AI art matches the
+                                        # story's subject instead of the raw CTR text.
     output_thumbnail_path: str
 
 
@@ -306,6 +310,23 @@ async def generate_thumbnail(req: ThumbnailRequest):
             import cv2
             import numpy as np
 
+            # Theme-matched scene: prefer the story's own visual prompt (offshore
+            # wind farm, etc.), so the art matches the CONTENT, not the CTR text.
+            scene = (req.visual_prompt or req.headline_text or "a dramatic hub of renewable energy").strip()
+            scene = re.sub(
+                r'^\s*cinematic\s+16:9(?:\s+widescreen)?\s*\.?\s*', '', scene, flags=re.IGNORECASE
+            )
+            # Bright, vibrant, on-theme background: "dark moody" reads muddy/dark
+            # and the raw headline string produces garbled "text-in-image" tearing.
+            # Explicit no-text guard stops fal/replicate from painting letters.
+            prompt = (
+                f"Widescreen 16:9 YouTube thumbnail background image of: {scene}. "
+                f"Photorealistic, bright natural daylight, vivid vibrant colors, high contrast, "
+                f"sunny optimistic atmosphere, crisp sharp focus. "
+                f"Absolutely no text, no words, no letters, no numbers, no typography, "
+                f"no watermark, no logo, no captions, no UI, no people overlaid."
+            )
+
             # Try generating a background image using fal.ai or replicate
             bg_data = None
             fal_key = os.getenv("FAL_KEY")
@@ -313,13 +334,12 @@ async def generate_thumbnail(req: ThumbnailRequest):
                 try:
                     import fal_client
                     import requests
-                    prompt = f"Widescreen 16:9 cinematic background representing: {req.headline_text}. Hyperrealistic, dark moody ambient lighting, dramatic atmosphere."
                     handler = fal_client.submit(
                         "fal-ai/flux/schnell",
                         arguments={
                             "prompt": prompt,
                             "image_size": "landscape_16_9",
-                            "num_inference_steps": 4,
+                            "num_inference_steps": 8,
                             "enable_safety_checker": True
                         }
                     )
@@ -339,7 +359,6 @@ async def generate_thumbnail(req: ThumbnailRequest):
                             "Authorization": f"Bearer {replicate_token}",
                             "Content-Type": "application/json"
                         }
-                        prompt = f"Widescreen 16:9 cinematic background representing: {req.headline_text}. Hyperrealistic, dark moody ambient lighting, dramatic atmosphere."
                         body = {
                             "input": {
                                 "prompt": prompt,
@@ -367,23 +386,34 @@ async def generate_thumbnail(req: ThumbnailRequest):
                     except Exception as e:
                         print(f"[Thumbnail] Replicate background generation failed: {e}")
 
-            # Decode the image data or fall back to plain dark background
+            # Decode the image data or fall back to a bright sky-blue gradient
             if bg_data:
                 try:
                     nparr = np.frombuffer(bg_data, np.uint8)
                     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     img = cv2.resize(img, (1280, 720))
-                    # Apply a slight dark tint/overlay to ensure text readability on top of the image
-                    overlay = img.copy()
-                    cv2.rectangle(overlay, (0, 0), (1280, 720), (10, 10, 15), -1)
-                    cv2.addWeighted(overlay, 0.4, img, 0.6, 0, img)
+                    # Mild overall dim ONLY for text contrast — keep the scene bright
+                    # (previously 0.4 of a near-black overlay crushed brightness).
+                    img = cv2.convertScaleAbs(img, alpha=1.02, beta=6)
+                    cv2.addWeighted(img, 0.84, np.full_like(img, 10), 0.16, 0, img)
                 except Exception as img_err:
-                    print(f"[Thumbnail] Failed to decode generated background: {img_err}. Using solid fallback.")
+                    print(f"[Thumbnail] Failed to decode generated background: {img_err}. Using bright fallback.")
                     img = np.zeros((720, 1280, 3), dtype=np.uint8)
-                    img[:] = (15, 10, 5)
+                    for yy in range(720):
+                        t = yy / 720.0
+                        img[yy, :] = (int(38 + 40 * t), int(78 + 100 * t), int(138 + 110 * t))
             else:
                 img = np.zeros((720, 1280, 3), dtype=np.uint8)
-                img[:] = (15, 10, 5)
+                for yy in range(720):
+                    t = yy / 720.0
+                    img[yy, :] = (int(38 + 40 * t), int(78 + 100 * t), int(138 + 110 * t))
+
+            # Soft dark gradient on the lower half ONLY, under the text zone, so the
+            # bottom reads legibly while the top of the scene stays bright.
+            h, w = img.shape[:2]
+            grad_area = int(h * 0.5)
+            grad = np.linspace(0.0, 0.45, grad_area, dtype=np.float32).reshape(-1, 1, 1)
+            img[h - grad_area:] = (img[h - grad_area:].astype(np.float32) * (1.0 - grad)).astype(np.uint8)
 
             # Glowing border & high-contrast yellow/white text overlay
             cv2.rectangle(img, (20, 20), (1260, 700), (0, 215, 255), 6)
@@ -412,13 +442,20 @@ async def generate_thumbnail(req: ThumbnailRequest):
             elif not lines:
                 lines = ["EXPLAINED"]
 
-            # Draw lines with clean anti-aliasing
+            # Draw lines with clean anti-aliasing + black outline so the text stays
+            # legible over a bright background.
+            def _draw_outlined(text, pos, scale, color, thick=4, outline_thick=9):
+                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                            (0, 0, 0), outline_thick, cv2.LINE_AA)
+                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                            color, thick, cv2.LINE_AA)
+
             y_start = 260 if len(lines) > 1 else 340
             for idx, line in enumerate(lines):
-                cv2.putText(img, line, (60, y_start + (idx * 90)), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 4, cv2.LINE_AA)
-            
+                _draw_outlined(line, (60, y_start + (idx * 90)), 1.4, (0, 235, 255))
+
             sub_y = y_start + (len(lines) * 90) + 10
-            cv2.putText(img, sub_text, (60, sub_y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3, cv2.LINE_AA)
+            _draw_outlined(sub_text, (60, sub_y), 1.1, (255, 255, 255))
 
             cv2.imwrite(req.output_thumbnail_path, img)
             return {"status": "success", "engine": "high_ctr_thumbnail", "path": req.output_thumbnail_path}
@@ -651,6 +688,26 @@ def _probe_dur(path: str) -> float:
         return 0.0
 
 
+def _bgm_duck_filter(narration_stream: str, bgm_stream: str) -> str:
+    """Build the narration + sidechain-ducked-BGM mix filter.
+
+    Music rides down under narration (sidechain keyed on the voice) and swells
+    back in the pauses. Env-tunable without code edits:
+      - BGM_VOLUME            resting music level (default 0.5)
+      - BGM_SIDECHAIN_THRESHOLD  duck trigger level (default 0.02)
+    Emits a stream named ``[a]`` ready for ffmpeg's ``-map [a]``.
+    """
+    bgm_vol = os.getenv("BGM_VOLUME", "0.5")
+    sc_thresh = os.getenv("BGM_SIDECHAIN_THRESHOLD", "0.02")
+    return (
+        f"{bgm_stream}volume={bgm_vol}[bgm];"
+        f"{narration_stream}volume=1.0,asplit=2[voice][sc];"
+        f"[bgm][sc]sidechaincompress=threshold={sc_thresh}:ratio=12:attack=150:release=1200[duck];"
+        f"[voice][duck]amix=inputs=2:duration=first,alimiter=limit=0.9:level=false,"
+        f"loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+    )
+
+
 def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
                          subtitle_path, output_video_path, bgm_path=None):
     """
@@ -709,11 +766,9 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
     else:
         parts.append(f"{cur}format=yuv420p[v]")
 
-    # Voice + ducked BGM, or narration only.
+    # Voice + sidechain-ducked BGM, or narration only.
     if has_bgm:
-        parts.append(f"{cura}volume=1.0[voice]")
-        parts.append(f"[{n}:a]volume=0.12[bgm]")
-        parts.append("[voice][bgm]amix=inputs=2:duration=first,alimiter=limit=0.89:level=false,loudnorm=I=-14:TP=-1.5:LRA=11[a]")
+        parts.append(_bgm_duck_filter(cura, f"[{n}:a]"))
     else:
         parts.append(f"{cura}acopy[a]")
 
@@ -779,7 +834,7 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
                 "-stream_loop", "-1", "-i", req.bgm_path,
-                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]volume=1.0[voice];[1:a]volume=0.12[bgm];[voice][bgm]amix=inputs=2:duration=first,alimiter=limit=0.89:level=false,loudnorm=I=-14:TP=-1.5:LRA=11[a]",
+                "-filter_complex", f"[0:v]{vf_filter}[v];" + _bgm_duck_filter("[0:a]", "[1:a]"),
                 "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",

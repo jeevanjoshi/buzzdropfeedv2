@@ -22,6 +22,8 @@ from tests.test_smoke import (
     test_negative_observer_hard_reject_persists,
     test_negative_media_production_fails,
     test_negative_quality_gate_fails,
+    test_unit_opportunity_score,
+    test_unit_social_exclusion,
 )
 
 CASES = [
@@ -34,6 +36,8 @@ CASES = [
     ("NEGATIVE observer hard reject", test_negative_observer_hard_reject_persists),
     ("NEGATIVE media production fails", test_negative_media_production_fails),
     ("NEGATIVE quality gate fails", test_negative_quality_gate_fails),
+    ("UNIT opportunity score", test_unit_opportunity_score),
+    ("UNIT social exclusion", test_unit_social_exclusion),
 ]
 
 

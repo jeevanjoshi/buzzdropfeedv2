@@ -10,18 +10,18 @@ from src.engine.logger import logger
 # while per-topic demand is served mostly via cheap, high-limit videos.list batch
 # stats (VideoBatchGetStats metric).
 _NICHE_SEED = {
-    "Personal Finance & Investing": "personal finance investing",
-    "Global Economics & Finance": "economics news",
-    "Technology & Artificial Intelligence": "technology news",
-    "Business & Entrepreneurship": "business news",
-    "Health & Science": "health news",
-    "Health & Wellness": "health wellness",
-    "Legal & Law": "legal news",
-    "Real Estate": "real estate news",
-    "Space & Scientific Innovation": "space science news",
-    "Geopolitics & World Affairs": "geopolitics news",
-    "Global Trends & Infotainment": "trending news",
-    "Global Trends & Cultural Infotainment": "trending news",
+    "Personal Finance & Investing": "investing personal finance stock market news",
+    "Global Economics & Finance": "global economy finance markets news",
+    "Technology & Artificial Intelligence": "artificial intelligence technology companies news",
+    "Business & Entrepreneurship": "business startups entrepreneurship news",
+    "Health & Science": "health science research news",
+    "Health & Wellness": "health wellness fitness news",
+    "Legal & Law": "legal law court cases news",
+    "Real Estate": "real estate housing market news",
+    "Space & Scientific Innovation": "space exploration nasa science news",
+    "Geopolitics & World Affairs": "geopolitics world affairs international news",
+    "Global Trends & Infotainment": "global trends viral news",
+    "Global Trends & Cultural Infotainment": "global trends culture news",
 }
 _DEFAULT_NICHE_KEY = "Trending"
 POOLS_FILE = "yt_demand_pools.json"
@@ -264,6 +264,27 @@ class YouTubeTopicDemand:
             if cache_key:
                 self._cache[cache_key] = result
         return result
+
+    def precise_topic_demand(self, query: str, max_videos: int = 5) -> Optional[Dict[str, Any]]:
+        """Precise per-topic competitor check (B1 shortlist) for a SINGLE topic.
+
+        Runs ONE on-topic ``search.list`` (order=viewCount) to land real
+        competitors, then a cheap ``videos.list`` batch for their stats — giving
+        a true views-per-competitor signal instead of the broad niche-pool proxy.
+
+        Honors the ``_can_search`` daily budget; on cap/API failure returns
+        ``None`` (silent fall-through, never raises) so the caller keeps the
+        TOPSIS ordering.
+        """
+        query = (query or "").strip()
+        if not query:
+            return None
+        if not self._can_search():
+            return None
+        ids = self._search_ids(query, 10)
+        if not ids:
+            return None
+        return self._stats_for_ids(ids, max_videos)
 
 
 youtube_topic_demand = YouTubeTopicDemand()

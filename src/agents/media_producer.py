@@ -22,12 +22,13 @@ from src.agents.story_designer import extract_numeric_chart_spec
 PREMIUM_SHOT_IDS = {1, 8, 12, 15}
 
 # Sync-quality knobs: the final timeline is driven by the MEASURED narration
-# audio duration, not the script-time words/2.2 estimate. A short trailing pad
-# gives a professional "hold" after each spoken clip; the subs/BGM follow the
-# same measured clock so nothing drifts.
-PAD_AFTER_NARRATION = 0.6        # trailing silence/hold after each shot's narration
+# audio duration, not the script-time words/2.2 estimate. A trailing hold gives a
+# professional "beat" after each spoken clip (validated live: 0.6s reads as the
+# next shot firing too fast at the 0.5s crossfade); the subs/BGM follow the same
+# measured clock so nothing drifts. Tunable via --tail, CSVG_PAD_AFTER_NARRATION.
+PAD_AFTER_NARRATION = float(os.getenv("CSVG_PAD_AFTER_NARRATION", "1.2"))  # breathing hold after each shot's narration
 MIN_SHOT_DUR = 2.0               # hard floor for a single shot's timeline length
-BGM_VOLUME = 0.12                # background music duck factor used by both renderers
+BGM_VOLUME = float(os.getenv("BGM_VOLUME", "0.08"))  # bgm mix level (moviepy fallback is FLAT; the true ducking happens in the ffmpeg/media_cloud renderer)
 RESOLUTION = (1920, 1080)        # strict 16:9 widescreen
 
 # Statistic-shot numeric-claim detection (Phase 1 CSVG Media Quality): if a shot's
@@ -333,13 +334,17 @@ class MediaProducerAgent:
     """
 
     def __init__(self, name: str = "MediaProducer", storage_dir: str = "/tmp/csvg_media",
-                 renderer: str = "ffmpeg", crossfade: float = 0.5):
+                 renderer: str = "ffmpeg", crossfade: float = 0.5, pad_after_narration: Optional[float] = None):
         self.name = name
         self.storage_dir = storage_dir
         # "ffmpeg" = probe-driven concat (default); "moviepy" = MoviePy timeline composer.
         self.renderer = renderer
         # Crossfade (seconds) between consecutive shots; 0.0 = hard cuts.
         self.crossfade = max(0.0, crossfade)
+        # Breathing hold (seconds) of video-only silence after each shot's narration
+        # ends, before the crossfade into the next shot. Defaults to the env knob.
+        self.pad_after_narration = max(
+            0.0, pad_after_narration if pad_after_narration is not None else PAD_AFTER_NARRATION)
         os.makedirs(self.storage_dir, exist_ok=True)
         # Cache the live market quote per topic so we fetch it once, not per shot.
         self._quote_cache: Dict[str, dict] = {}
@@ -384,12 +389,13 @@ class MediaProducerAgent:
         self._quote_cache[symbol] = {"symbol": symbol_out, "price": price, "change": change}
         return self._quote_cache[symbol]
 
-    async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None, crossfade: Optional[float] = None) -> AssetPaths:
+    async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None, crossfade: Optional[float] = None, pad_after_narration: Optional[float] = None) -> AssetPaths:
         """
         Synthesizes audio & subtitles via Edge MCP tools, generates visuals & timeline via Cloud MCP tools.
         """
         renderer = renderer or self.renderer
         crossfade = self.crossfade if crossfade is None else max(0.0, crossfade)
+        tail = self.pad_after_narration if pad_after_narration is None else max(0.0, pad_after_narration)
         script = state.script_data
         if not script:
             raise ValueError("Media production failed: state.script_data is None")
@@ -544,7 +550,7 @@ class MediaProducerAgent:
                 print(f"[MediaProducer] WARNING: could not probe narration duration for {shot_key}; "
                       f"falling back to estimate {audio_dur:.1f}s")
             # Final shot timeline length = spoken audio + trailing hold (never cuts narration).
-            shot_timeline_dur = max(audio_dur + PAD_AFTER_NARRATION, MIN_SHOT_DUR)
+            shot_timeline_dur = max(audio_dur + tail, MIN_SHOT_DUR)
 
             # Stage 8 Quality-by-Design: Alternate Ken Burns pan direction for optical flow continuity
             ken_burns_direction = "left_to_right" if shot.shot_id % 2 == 1 else "right_to_left"
@@ -858,7 +864,9 @@ class MediaProducerAgent:
                 transition="fade"
             ))
 
-        # Generate dynamic widescreen high-CTR Thumbnail (uses the CTR-optimized brief)
+        # Generate dynamic widescreen high-CTR Thumbnail (uses the CTR-optimized brief
+        # for the text, and the hero shot's theme-matched visual prompt for the art so
+        # the background matches the story's subject instead of the raw CTR text).
         thumbnail_path = os.path.join(self.storage_dir, "thumbnail.png")
         try:
             from mcp_servers.media_cloud.server import ThumbnailRequest, generate_thumbnail
@@ -867,8 +875,12 @@ class MediaProducerAgent:
                 if state.seo_metadata and state.seo_metadata.thumbnail_brief
                 else (state.selected_topic.headline if state.selected_topic else "Market Shift")
             )
+            hero_prompt = None
+            if state.script_data and state.script_data.shots:
+                hero_prompt = state.script_data.shots[0].visual_prompt
             await generate_thumbnail(ThumbnailRequest(
                 headline_text=brief,
+                visual_prompt=hero_prompt,
                 output_thumbnail_path=thumbnail_path
             ))
             asset_paths.thumbnail = thumbnail_path
@@ -1051,7 +1063,7 @@ class MediaProducerAgent:
                 paths.append(out)
         return paths
 
-    async def process(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None) -> A2AMessage:
+    async def process(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None, crossfade: Optional[float] = None, pad_after_narration: Optional[float] = None) -> A2AMessage:
         """
         Executes Media Producer workflow:
         1. Reads state.script_data
@@ -1059,7 +1071,8 @@ class MediaProducerAgent:
         3. Updates state.asset_paths
         4. Emits MEDIA_READY A2AMessage to Orchestrator
         """
-        assets = await self.produce_all_media(state, dummy_frames=dummy_frames, renderer=renderer)
+        assets = await self.produce_all_media(state, dummy_frames=dummy_frames, renderer=renderer,
+                                              crossfade=crossfade, pad_after_narration=pad_after_narration)
 
         msg = A2AMessage(
             message_id=f"msg-{uuid.uuid4().hex[:8]}",

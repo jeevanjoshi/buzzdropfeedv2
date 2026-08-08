@@ -64,6 +64,8 @@ from src.schemas.state import (
 )
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.agents.orchestrator import OrchestratorAgent
+from src.engine.opportunity_score import compute_opportunity
+from src.engine.rag_retriever import _is_social_source
 
 
 def _msg(sender: AgentRole, target: AgentRole, intent: AgentIntent, payload=None) -> A2AMessage:
@@ -401,6 +403,49 @@ def test_negative_quality_gate_fails():
     raise AssertionError("expected RuntimeError when a quality gate fails")
 
 
+def test_unit_opportunity_score():
+    """compute_opportunity: monotonic, log-tamed, 0 on no data, no div-by-zero."""
+    # no measured views -> 0 (unknown); 0 competitors -> treated as 1 competitor
+    assert compute_opportunity(0.0, 0) == 0.0
+    assert compute_opportunity(0.0, 3) == 0.0
+    assert compute_opportunity(5000.0, 0) > 0.8
+    # monotonic: more views-per-competitor -> >= score
+    lo = compute_opportunity(1000.0, 10)
+    hi = compute_opportunity(2000.0, 10)
+    assert hi > lo
+    # more competitors (same views) -> lower or equal score
+    assert compute_opportunity(1000.0, 2) >= compute_opportunity(1000.0, 8)
+    # bounded to [0, 1]
+    for v in (100.0, 1e6, 1e9):
+        assert 0.0 <= compute_opportunity(v, 1) <= 1.0
+    # all-equal views-per-competitor -> score must exceed the 0.5 floor
+    # (views-per-competitor >= 1.0 requires avg_views/about-count ratio ~1; check shape only)
+    assert compute_opportunity(100.0, 1) > 0.5
+    print("✓ UNIT: opportunity score is monotonic, bounded, and safe on edges")
+
+
+def test_unit_social_exclusion():
+    """_is_social_source: social URLs/titles flagged, genuine news kept."""
+    # URL domain match
+    assert _is_social_source("https://www.reddit.com/r/wallstreetbets/comments/x")
+    assert _is_social_source("https://twitter.com/elonmusk/status/1")
+    assert _is_social_source("https://medium.com/@analyst/bitcoin-2026")
+    assert _is_social_source("https://www.youtube.com/watch?v=abc")
+    # bare source/title markers (no URL)
+    assert _is_social_source("", "r/wallstreetbets pumps X")
+    assert _is_social_source("", "X post from @elonmusk says...")
+    assert _is_social_source("", "Reddit thread on Nvidia")
+    assert _is_social_source("", "u/quanttrader shares his take")
+    # genuine news domains / prose NOT flagged
+    assert not _is_social_source("https://www.reuters.com/technology/nvidia")
+    assert not _is_social_source("https://techcrunch.com/2026/08/ai-chip")
+    assert not _is_social_source("", "Reuters reports Nvidia shipments rose")
+    assert not _is_social_source("", "The report cited hedge funds and analysts")
+    # sneaky: an email address must NOT trip the handle matcher
+    assert not _is_social_source("", "contact support@reuters.com for details")
+    print("✓ UNIT: social sources excluded, genuine news retained (incl. email non-match)")
+
+
 if __name__ == "__main__":
     tests = [
         ("POSITIVE full pipeline publishes", test_positive_full_pipeline_publishes),
@@ -412,6 +457,8 @@ if __name__ == "__main__":
         ("NEGATIVE observer hard reject", test_negative_observer_hard_reject_persists),
         ("NEGATIVE media production fails", test_negative_media_production_fails),
         ("NEGATIVE quality gate fails", test_negative_quality_gate_fails),
+        ("UNIT opportunity score", test_unit_opportunity_score),
+        ("UNIT social exclusion", test_unit_social_exclusion),
     ]
     failures = 0
     for name, fn in tests:
