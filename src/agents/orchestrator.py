@@ -18,6 +18,7 @@ from src.engine.channel_phase_manager import channel_phase_manager, get_ypp_prog
 from src.engine.rag_retriever import rag_retriever
 from src.engine.logger import logger
 from src.engine.tracer import tracer
+from src.engine.run_budget import run_budget
 
 
 class OrchestratorAgent:
@@ -95,6 +96,8 @@ class OrchestratorAgent:
 
         state.region = region  # persist so downstream agents (e.g. media producer) know the market region
 
+        budget_status = "success"
+
         # ── Load Channel Phase (GROWTH / REVENUE / SCALE) ──────────────────
         channel_stats = channel_phase_manager.get_channel_stats()
         state.channel_stats = channel_stats
@@ -117,6 +120,9 @@ class OrchestratorAgent:
                 pipeline_id=p_id, component="CHANNEL_PHASE"
             )
         tracer.record_step(state, "INITIALIZATION")
+
+        # Begin per-run budget tracking (reset counters for this pipeline_id).
+        run_budget.start(p_id)
 
         try:
             # 1. Fact Retrieval & Topic Selection (phase-aware TOPSIS)
@@ -223,6 +229,7 @@ class OrchestratorAgent:
                 if not state.verified_facts:
                     logger.warning("PHASE_1B_RAG_QUALITY", "verified_facts is empty despite RAG gate passing.", pipeline_id=p_id, component="RAG_RETRIEVER")
                 tracer.record_step(state, "RAG_QUALITY_PASSED")
+                run_budget.set_stage("RAG_QUALITY_PASSED")
 
             # 2. Story Script Generation
             if not state.script_data or state.execution_stage == "SCRIPT_REVISION_REQUIRED":
@@ -349,6 +356,7 @@ class OrchestratorAgent:
 
                 logger.info("PHASE_2_OBSERVER_AUDIT", "Observer Audit & Quality Gates Passed 100%! Script approved.", pipeline_id=p_id, component="OBSERVER")
                 tracer.record_step(state, "SCRIPT_APPROVED", message=msg_obs)
+                run_budget.set_stage("SCRIPT_APPROVED")
 
                 # Export individual script JSON and Markdown files for easy debugging
                 script_json_path = os.path.join(self.logs_dir, f"script_{p_id}.json")
@@ -395,6 +403,7 @@ class OrchestratorAgent:
 
                 logger.info("PHASE_3_MEDIA_PRODUCTION", f"Media Production Complete! Video: {state.asset_paths.final_video}", pipeline_id=p_id, component="MEDIA_PRODUCER")
                 tracer.record_step(state, "MEDIA_READY", message=msg_media)
+                run_budget.set_stage("MEDIA_READY")
             else:
                 logger.info("PHASE_3_MEDIA_PRODUCTION", f"Resuming: Using existing final video: {state.asset_paths.final_video}", pipeline_id=p_id, component="MEDIA_PRODUCER")
 
@@ -471,6 +480,7 @@ class OrchestratorAgent:
             logger.info("PHASE_3B_QUALITY_GATES", "Gate 7 Render Integrity passed (black/frozen frames, audio silence/peak, measured-duration check).", pipeline_id=p_id, component="QUALITY_VERIFIER")
 
             tracer.record_step(state, "QUALITY_GATES_PASSED")
+            run_budget.set_stage("QUALITY_GATES_PASSED")
 
             # 5. YouTube Publishing
             if publish:
@@ -479,12 +489,15 @@ class OrchestratorAgent:
 
                 logger.info("PHASE_4_YOUTUBE_PUBLISHING", f"Pipeline Run Completed Successfully! Video ID: {state.upload_metadata.video_id}", pipeline_id=p_id, component="PUBLISHER")
                 tracer.record_step(state, "PUBLISHED_SUCCESS", message=msg_pub)
+                run_budget.set_stage("PUBLISHED_SUCCESS")
             else:
                 logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Skipping YouTube Publishing step as requested (pipeline run till upload complete).", pipeline_id=p_id, component="ORCHESTRATOR")
                 state.execution_stage = "QUALITY_VERIFIED"
                 tracer.record_step(state, "PIPELINE_COMPLETE_TILL_UPLOAD")
+                run_budget.set_stage("QUALITY_VERIFIED")
 
         except Exception as e:
+            budget_status = "failed"
             # Determine actionable Fix Hint based on exception message
             err_str = str(e).lower()
             fix_hint = "Inspect error stack trace in logs/csvg_execution.log"
@@ -508,5 +521,27 @@ class OrchestratorAgent:
             )
             tracer.record_step(state, "PIPELINE_FAILED", status="ERROR", error_details={"error": str(e), "fix_hint": fix_hint})
             raise e
+
+        finally:
+            # Persist the per-run budget ledger + rolling aggregate regardless of outcome.
+            try:
+                _t = run_budget.totals()
+                budget_stage = getattr(state, "execution_stage", "")
+                budget_stage = budget_status if budget_status == "failed" else budget_stage
+                rec = run_budget.save(
+                    pipeline_id=p_id,
+                    status=budget_status,
+                    stage=budget_stage,
+                    extra={"topic": state.selected_topic.headline if state.selected_topic else None,
+                           "video_id": state.upload_metadata.video_id if state.upload_metadata else None},
+                )
+                logger.info(
+                    "BUDGET",
+                    f"Run {p_id} :: est ${_t['est_usd']:.4f} | {_t['yt_units']} YT units | "
+                    f"categories={','.join(_t['categories'])} | persisted={rec is not None and rec.get('pipeline_id') == p_id}",
+                    pipeline_id=p_id, component="RUN_BUDGET",
+                )
+            except Exception:
+                pass
 
         return state

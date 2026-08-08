@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+from src.engine.run_budget import run_budget
 
 load_dotenv()
 
@@ -250,6 +251,7 @@ def grounded_research(
             print(f"[GroundedSearch] facet call failed: {str(e)[:200]}")
             continue
 
+        run_budget.record_grounding()
         raw_text = getattr(resp, "text", "") or ""
         texts.append(raw_text)
         gm = None

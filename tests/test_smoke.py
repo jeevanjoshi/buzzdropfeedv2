@@ -32,6 +32,7 @@ Run standalone (from repo root):
 import os
 import sys
 import copy
+import json
 import asyncio
 import datetime
 import tempfile
@@ -66,6 +67,7 @@ from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
 from src.agents.orchestrator import OrchestratorAgent
 from src.engine.opportunity_score import compute_opportunity
 from src.engine.rag_retriever import _is_social_source
+from src.engine.run_budget import run_budget
 
 
 def _msg(sender: AgentRole, target: AgentRole, intent: AgentIntent, payload=None) -> A2AMessage:
@@ -446,6 +448,45 @@ def test_unit_social_exclusion():
     print("✓ UNIT: social sources excluded, genuine news retained (incl. email non-match)")
 
 
+def test_unit_run_budget():
+    """RunBudget: accrues USD + YT units per category, no-op when inactive, persists."""
+    import src.engine.run_budget as rb_mod
+    d = tempfile.mkdtemp(prefix="csvg_budget_")
+    rb_mod.BUDGET_LOGS_DIR = d
+    rb_mod.AGGREGATE_FILE = os.path.join(d, "run_budget.json")
+
+    run_budget.start("run-budget-test")
+    run_budget.record_llm()
+    run_budget.record_search("tavily")
+    run_budget.record_visual()
+    run_budget.record_grounding()
+    run_budget.record_yt("search")       # 100 units
+    run_budget.record_yt("upload")       # 1600 units
+    run_budget.record_yt("videos_batch") # 1 unit
+    run_budget.record_yt("channels")     # 1 unit
+
+    t = run_budget.totals()
+    # LLM($.01) + search($.002) + visual($.003) + grounding($.005) = 0.02
+    assert abs(t["est_usd"] - 0.0200) < 1e-6, t
+    assert t["yt_units"] == 100 + 1600 + 1 + 1, t
+    assert "llm" in t["categories"] and "youtube" in t["categories"]
+
+    rec = run_budget.save("run-budget-test", status="success", stage="PUBLISHED_SUCCESS")
+    assert rec is not None and rec["totals"]["yt_units"] == 1702
+    assert os.path.exists(os.path.join(d, "run_budget_run-budget-test.json"))
+    agg = json.load(open(os.path.join(d, "run_budget.json"), encoding="utf-8"))
+    assert "run-budget-test" in agg
+    assert agg["run-budget-test"]["totals"]["yt_units"] == 1702
+
+    # no-op when not active: recording must not change any counter
+    prev = run_budget._calls.get("llm", 0)
+    run_budget._active = False
+    run_budget.record_llm()
+    run_budget._active = True
+    assert run_budget._calls.get("llm", 0) == prev, "inactive recording must be a no-op"
+    print("✓ UNIT: run budget accrues USD + YT units and persists per-run + aggregate")
+
+
 if __name__ == "__main__":
     tests = [
         ("POSITIVE full pipeline publishes", test_positive_full_pipeline_publishes),
@@ -459,6 +500,7 @@ if __name__ == "__main__":
         ("NEGATIVE quality gate fails", test_negative_quality_gate_fails),
         ("UNIT opportunity score", test_unit_opportunity_score),
         ("UNIT social exclusion", test_unit_social_exclusion),
+        ("UNIT run budget", test_unit_run_budget),
     ]
     failures = 0
     for name, fn in tests:

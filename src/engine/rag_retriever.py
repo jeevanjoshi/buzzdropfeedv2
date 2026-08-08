@@ -8,6 +8,7 @@ import time
 import datetime as _dt
 from typing import Dict, Any, List, Tuple, Set
 from src.schemas.state import TopicCandidate, VerifiedFact
+from src.engine.run_budget import run_budget
 
 # ── RAG Corpus Sufficiency Gate thresholds ─────────────────────────────
 # A 15-shot / 10-15 min script needs ~1,500+ narration words grounded in a
@@ -390,6 +391,7 @@ class RAGTopicRetriever:
                     desc = a.get("description", "")
                     if desc and len(desc) > 30 and not _is_social_source(a.get("url", ""), title, desc):
                         results.append({"title": title, "snippet": desc, "url": a.get("url", "")})
+                run_budget.record_search("newsapi")
         except Exception as e:
             print(f"[RAGRetriever] NewsAPI Warning: {e}")
         return results
@@ -439,6 +441,7 @@ class RAGTopicRetriever:
                 timeout=12,
             )
             data = resp.json()
+            run_budget.record_search("tavily")
             return [
                 {"title": r.get("title", ""), "snippet": r.get("content", ""), "url": r.get("url", "")}
                 for r in data.get("results", [])
@@ -466,6 +469,7 @@ class RAGTopicRetriever:
             )
             data = resp.json()
             items = data.get("data", []) if isinstance(data, dict) else []
+            run_budget.record_search("firecrawl")
             out = []
             for it in items:
                 desc = it.get("description") or (it.get("metadata", {}) or {}).get("description", "")

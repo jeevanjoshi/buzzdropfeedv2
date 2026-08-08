@@ -2,6 +2,7 @@ import os
 import requests
 from typing import List, Dict, Any, Optional
 from src.schemas.state import VerifiedFact, TopicCandidate
+from src.engine.run_budget import run_budget
 
 
 # Social/community platforms excluded from the RAG fact corpus (Exa results).
@@ -138,6 +139,7 @@ class ExternalAPIManager:
         try:
             res = requests.post("https://api.exa.ai/search", headers=headers, json=payload, timeout=6)
             if res.status_code == 200:
+                run_budget.record_search("exa")
                 results = res.json().get("results", [])
                 facts = []
                 for idx, r in enumerate(results):

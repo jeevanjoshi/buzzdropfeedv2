@@ -4,6 +4,7 @@ import datetime
 import threading
 from typing import Optional, Dict, Any, List
 from src.engine.logger import logger
+from src.engine.run_budget import run_budget
 
 # Niche -> broad seed keyword used ONCE per niche per refresh to discover a pool
 # of competitor video IDs. This keeps search.list usage low (the scarce quota),
@@ -178,6 +179,7 @@ class YouTubeTopicDemand:
                     maxResults=max_results, order="viewCount",
                     relevanceLanguage="en", safeSearch="none",
                 ).execute()
+                run_budget.record_yt("search")
                 return [
                     it["id"]["videoId"]
                     for it in resp.get("items", [])
@@ -207,6 +209,7 @@ class YouTubeTopicDemand:
                 vids = client.videos().list(
                     part="statistics,snippet", id=",".join(ids[:MAX_POOL_IDS])
                 ).execute()
+                run_budget.record_yt("videos_batch")
                 return self._demand_from_items(vids.get("items", []), max_videos)
             except Exception as e:
                 msg = str(e).lower()

@@ -14,6 +14,7 @@ from mcp_servers.media_cloud.server import (
     PlaywrightSVGRequest, ChartRequest, GIFRequest
 )
 from src.engine.media_budget import media_budget
+from src.engine.run_budget import run_budget
 from src.agents.story_designer import extract_numeric_chart_spec
 
 # Paid (fal/Replicate Flux) is reserved for these "hero" shots + the thumbnail.
@@ -703,6 +704,7 @@ class MediaProducerAgent:
                 else:
                     use_paid = media_budget.charge_paid_image()
                     if use_paid:
+                        run_budget.record_visual()
                         try:
                             await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
                         except Exception as e:

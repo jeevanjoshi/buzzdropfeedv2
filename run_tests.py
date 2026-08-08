@@ -24,6 +24,7 @@ from tests.test_smoke import (
     test_negative_quality_gate_fails,
     test_unit_opportunity_score,
     test_unit_social_exclusion,
+    test_unit_run_budget,
 )
 
 CASES = [
@@ -38,6 +39,7 @@ CASES = [
     ("NEGATIVE quality gate fails", test_negative_quality_gate_fails),
     ("UNIT opportunity score", test_unit_opportunity_score),
     ("UNIT social exclusion", test_unit_social_exclusion),
+    ("UNIT run budget", test_unit_run_budget),
 ]
 
 

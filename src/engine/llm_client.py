@@ -5,6 +5,7 @@ import requests
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from src.engine.logger import logger
+from src.engine.run_budget import run_budget
 
 load_dotenv()
 
@@ -263,7 +264,12 @@ class LLMClient:
 
         # Execute according to user preference
         if preferred_provider == "cloud":
-            return try_cloud_api() or try_local_llama_cpp()
+            result = try_cloud_api() or try_local_llama_cpp()
         else:
             # Default: try local llama.cpp first, fallback to cloud
-            return try_local_llama_cpp() or try_cloud_api()
+            result = try_local_llama_cpp() or try_cloud_api()
+
+        # A real (paid/local) LLM response was produced — bill it to the run budget.
+        if result is not None:
+            run_budget.record_llm()
+        return result
