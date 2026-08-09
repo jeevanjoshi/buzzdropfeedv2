@@ -46,8 +46,14 @@ HEALTH_SCIENCE_FEEDS = [
     "https://www.sciencedaily.com/rss/top.xml",
 ]
 
+# Slot 4 — History & Documentary ($6-14 CPM, evergreen, fact-checkable record)
+HISTORY_FEEDS = [
+    "https://www.smithsonianmag.com/rss/latest_articles/",
+    "https://www.historyextra.com/feed/",
+]
+
 # Combined pool for "all" region (replaces old India+Global mix)
-ALL_HIGH_RPM_FEEDS = TECH_AI_FEEDS + FINANCE_FEEDS + BUSINESS_FEEDS + HEALTH_SCIENCE_FEEDS
+ALL_HIGH_RPM_FEEDS = TECH_AI_FEEDS + FINANCE_FEEDS + BUSINESS_FEEDS + HEALTH_SCIENCE_FEEDS + HISTORY_FEEDS
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMOTIONAL / LISTICLE / AFFILIATE CONTENT BLOCK
@@ -108,7 +114,7 @@ TECH_SIGNALS = [
     "artificial intelligence", " ai ", "machine learning", "llm", "gpt",
     "gpu", "chip", "semiconductor", "robot", "automation", "saas",
     "software", "startup", "tech", "quantum", "cloud", "cybersecurity",
-    "space", "satellite", "isro", "nasa", "biotech", "deeptech",
+    "biotech", "deeptech",
 ]
 BUSINESS_SIGNALS = [
     "entrepreneur", "ceo", "founder", "acquisition", "merger", "layoff",
@@ -116,15 +122,44 @@ BUSINESS_SIGNALS = [
     "amazon", "google", "apple", "microsoft", "meta", "tesla",
 ]
 HEALTH_SIGNALS = [
-    "health", "medical", "drug", "pharma", "hospital", "disease",
-    "cancer", "vaccine", "biotech", "wellness", "mental health",
-    "nutrition", "fitness", "longevity", "fda", "clinical trial",
+    "wellness", "fitness", "longevity", "nutrition", "mental health",
+    "sleep", "meditation", "yoga", "lifestyle", "habit",
 ]
-LEGAL_SIGNALS = [
-    "lawsuit", "lawsuit filed", "court", "supreme court", "judge", "verdict",
-    "prosecution", "indictment", "legal", "attorney", "lawyer", "law firm",
-    "deal", "regulatory", "compliance", "fine", "penalty", "settlement",
-    "ban", "sanction", "lawsuit over", "sued", "sues",
+# YMYL (Your Money or Your Life) MEDICAL content — never auto-produce unattended.
+# Drug/pharma/vaccine/cancer/treatment claims can't be safely fact-checked by the
+# pipeline's audit and carry demonetization + misinformation liability. Hard-blocked
+# like entertainment content (never enters the candidate pool).
+MEDICAL_LIABILITY_SIGNALS = [
+    "medical", "drug", "pharma", "vaccine", "cancer", "fda", "clinical trial",
+    "hospital", "disease", "treatment", "dose", "prescription", "surgery",
+    "diagnos", "therapy", "medication", "illness", "outbreak", "epidemic",
+    "antibiotic", "chemotherapy", "cure",
+]
+HISTORY_SIGNALS = [
+    "history", "historical", "ancient", "empire", "archaeology", "medieval",
+    "dynasty", "century", "civilization", "artifacts", "pharaoh", "roman",
+    "greek", "revolution", "industrial age", "world war", "cold war",
+    "viking", "renaissance", "colony", "independence", "battle of",
+    "heritage", "archaeologist", "excavation", "documentary",
+]
+FINANCE_EDU_SIGNALS = [
+    "compound interest", "how does", "how to invest", "index funds explained",
+    "401k", "ira", "retirement", "budgeting", "credit score", "debt",
+    "savings", "dollar cost averaging", "net worth", "inflation explained",
+    "explained", "for beginners", "financial literacy", "stocks explained",
+    "etf explained", "assets", "liabilities", "passive income",
+]
+SCIENCE_SIGNALS = [
+    " science ", "scientific", "research", "physics", "chemistry", "biology",
+    "genetics", "neuroscience", "laboratory", "experiment", "discovery",
+    "climate change", "nuclear fusion", "particle", "genome", "microscope",
+    "scientist", "peer review", "breakthrough study",
+]
+SPACE_SIGNALS = [
+    "space", "nasa", "isro", "spacex", "satellite", "rocket", "mars", "moon",
+    "jupiter", "orbit", "astronaut", "cosmos", "galaxy", "telescope",
+    "spacecraft", "space station", "exoplanet", "astronomy", "launch vehicle",
+    "stellar", "nebula", "plasma", "space weather",
 ]
 REAL_ESTATE_SIGNALS = [
     "real estate", "mortgage", "housing", "housing market", "home prices",
@@ -135,10 +170,15 @@ REAL_ESTATE_SIGNALS = [
 # Niche RPM mid-points (USD) used to enrich TopicCandidate
 AUDIENCE_NICHE_MAP = {
     "investor":     ("Personal Finance & Investing",        17.5),
+    # Finance *education* (concepts only — never picks/calls) pays the highest CPM
+    "finance_edu":  ("Personal Finance Education",         18.0),
     "tech":         ("Technology & Artificial Intelligence", 16.0),
     "business":     ("Business & Entrepreneurship",          14.0),
-    "health":       ("Health & Science",                    13.0),
-    "legal":        ("Legal & Law",                         16.0),
+    # "health" = LOW-RPM lifestyle tag (wellness/fitness). Medical YMYL is hard-blocked.
+    "health":       ("Health & Wellness",                    6.5),
+    "science":      ("Science & Innovation",                13.0),
+    "space":        ("Space & Scientific Innovation",       12.0),
+    "history":      ("History & Documentary",                9.0),
     "real_estate":  ("Real Estate",                         14.0),
     "general":      ("Global Trends & Infotainment",          5.5),
     "blocked":      ("Entertainment",                         1.0),
@@ -184,26 +224,37 @@ def resolve_trusted_organization_name(url: str) -> str:
 def classify_audience_type(headline: str, summary: str) -> str:
     """
     Classifies a headline into audience_type for phase-aware RPM routing.
-    Returns: 'investor' | 'tech' | 'business' | 'health' | 'general' | 'blocked'
+    Returns: 'investor' | 'tech' | 'business' | 'health' | 'science' | 'space'
+             | 'history' | 'finance_edu' | 'real_estate' | 'general' | 'blocked'
     """
     text = (headline + " " + summary).lower()
 
-    # Hard block: entertainment/gossip → always rejected
+    # Hard block 1: entertainment/gossip → always rejected
     for pattern in ENTERTAINMENT_BLOCK_PATTERNS:
         if pattern in text:
             return "blocked"
 
+    # Hard block 2: YMYL medical claims → never auto-produced unattended
+    if any(sig in text for sig in MEDICAL_LIABILITY_SIGNALS):
+        return "blocked"
+
     # Signal-based classification (order = RPM priority)
     if any(sig in text for sig in INVESTOR_SIGNALS):
         return "investor"
-    if any(sig in text for sig in LEGAL_SIGNALS):
-        return "legal"
+    if any(sig in text for sig in FINANCE_EDU_SIGNALS):
+        return "finance_edu"
     if any(sig in text for sig in REAL_ESTATE_SIGNALS):
         return "real_estate"
+    if any(sig in text for sig in SPACE_SIGNALS):
+        return "space"
     if any(sig in text for sig in TECH_SIGNALS):
         return "tech"
+    if any(sig in text for sig in HISTORY_SIGNALS):
+        return "history"
     if any(sig in text for sig in BUSINESS_SIGNALS):
         return "business"
+    if any(sig in text for sig in SCIENCE_SIGNALS):
+        return "science"
     if any(sig in text for sig in HEALTH_SIGNALS):
         return "health"
     return "general"

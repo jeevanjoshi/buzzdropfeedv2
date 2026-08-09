@@ -4,19 +4,19 @@ Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPS
 
 ## Commands
 - Activate venv first: `source venv/bin/activate`
-- `--offline` uses canned topic candidates instead of live RSS — it is NOT a full dry-run. It does NOT skip RAG (Tavily/Firecrawl), the LLM (aborts if unavailable), visuals (fal/Replicate), Pi TTS, or publish. Those each need their own flag or a mock: `--dummy-frames` (synthetic visuals, no fal/Replicate), `--till-upload` (no publish). The truly hermetic/no-network path is `tests/test_smoke.py` (stub agents mock LLM/RAG/TTS/visuals/publisher).
+- `--offline` uses canned topic candidates instead of live RSS — it is NOT a full dry-run. It does NOT skip RAG (Tavily/Firecrawl), the LLM (aborts if unavailable), visuals (fal/Replicate), Pi TTS, or publish. Those each need their own flag or a mock: `--dummy-frames` (synthetic visuals, no fal/Replicate), `--till-upload` (no publish). The truly hermetic/no-network path is `tests/test_hermetic_e2e.py` (stub agents mock LLM/RAG/TTS/visuals/publisher).
 - Real run without publishing: `python main.py --global --till-upload` (alias `--no-upload`)
 - Production run (recommended for real publishes): `./run_production.sh` — **runs a pre-flight health check** (`healthcheck.py`: env keys, ffmpeg/ffprobe, LLM availability, Pi audio-edge reachability, YouTube upload quota + competitor-demand budget, RAG fact-source keys, BGM + disk space) and **aborts before launch if any required check fails**; then syncs code to Pi, runs in background, logs to `logs/`, emails result. `--no-detach` blocks; `--skip-health-check` bypasses the gate; optional `--probe-llm`/`--probe-yt` do a real 1-token LLM call and token-refresh `channels.list`. Auto-resumes from latest `logs/state_*.json` checkpoint if a previous run didn't reach `PUBLISHED_SUCCESS`.
 - Resume a specific run: `python main.py --resume <pipeline_id>` (reads `logs/state_<pipeline_id>.json`).
 
 ### Flags (main.py)
-`--offline`, `--india` / `--global` (region), `--till-upload`/`--no-upload`, `--dummy-frames` (synthetic visuals, skips fal/Replicate), `--renderer ffmpeg|moviepy`, `--crossfade <seconds>`, `--tail <seconds>` (video-only hold after each shot's narration, default 1.2; env `CSVG_PAD_AFTER_NARRATION`), `--resume <id>`, `--rag grounded|scraper` (A/B: Google Search grounding research pass vs the 5-scraper RAG path; default = scraper).
+`--offline`, `--india` / `--global` (region), `--till-upload`/`--no-upload`, `--dummy-frames` (synthetic visuals, skips fal/Replicate), `--renderer ffmpeg|moviepy`, `--crossfade <seconds>`, `--tail <seconds>` (video-only hold after each shot's narration, default 1.2; env `CSVG_PAD_AFTER_NARRATION`), `--resume <id>`, `--rag grounded|hybrid|scraper` (A/B: Google Search grounding research pass vs the 5-scraper RAG path, with `hybrid` = grounded core + scraper depth; default = scraper), `--outline-first` (A/B: validate an 18-shot beat outline + per-act narration before falling back to the monolithic generation; env `CSVG_OUTLINE_FIRST=1`).
 - There is NO `--help`; `main.py` scans `sys.argv` (no argparse) so unknown flags (incl. `--help`) are silently ignored. Semantic gates are env-only (`USE_SEMANTIC_GATES=1`), not a CLI flag.
 
 ### Tests
-- Suite runner: `python run_tests.py` (custom wrapper, not pytest) imports and runs the single smoke module.
-- The ONLY test file is `tests/test_smoke.py` — a fully HERMETIC end-to-end smoke test covering POSITIVE / NEGATIVE / EDGE cases across the whole orchestrator (topic -> RAG -> script -> observer -> media -> gates -> publisher). It runs with **NO live/network calls, NO Raspberry Pi interaction, and NO media generation** (stub agents + controlled monkeypatching of module singletons). Safe to run without env/services and without `.env`.
-- Run it: `python run_tests.py` or `python tests/test_smoke.py`. Both are `py_compile`-clean.
+- Suite runner: `python run_tests.py` (custom wrapper, not pytest) imports and runs the single hermetic E2E module.
+- The ONLY test file is `tests/test_hermetic_e2e.py` — a fully HERMETIC, self-sufficient end-to-end test of the **real** orchestrator with the **real** StoryDesigner + Observer agents (only genuinely-external boundaries are stubbed: RAG scrapers, channel stats, YouTube publish, TTS/visual/ffmpeg gates, and a scripted FakeLLM as `LLMClient`). It covers the happy path through publish, the surgical per-shot revision loop (state_hash enforcement, non-target shots bit-identical), stale-REVISE rejection, the outline-first path, and per-agent model routing. **No network, no Pi, no media generation, no `.env`** — a failure is a real regression, never a flaky mock. It self-boots its own `sys.path` so it runs from any CWD.
+- Run it: `python run_tests.py` or `python tests/test_hermetic_e2e.py`. Both are `py_compile`-clean.
 - Lint/format: ruff is used informally (only `.ruff_cache/` exists, no committed config, no CI). No enforced lint/formatter.
 
 ## Env & secrets
@@ -25,8 +25,12 @@ Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPS
 - LLM default provider config lives in `.env` (`PREFERRED_LLM_PROVIDER`, `LLM_MODEL`, keys).
 - Semantic-gate env (see section below): `USE_SEMANTIC_GATES=1`, `ALLOW_SOFT_APPROVAL=1`, `HF_HOME`/`TRANSFORMERS_CACHE` -> repo-local `.hf_cache/`. Heavy ML deps live in `requirements-master.txt` (master ONLY, never the Pi; the Pi keeps TF-IDF fallback).
 
+## Narrow tool-topic synthesis (fact_retriever stage 1b)
+- `src/engine/tool_topic_synthesizer.py` + `fact_retriever.py`: after RSS ingestion, an LLM pass over the day's fresh corpus proposes narrow, evergreen, search-demand topics RSS news never surfaces — `"[Tool A] vs [Tool B] for [task]"`, `"How to [task] using [AI tool]"`, individual tool deep-dives, enterprise/developer tooling comparisons. Toggle: `TOOL_TOPIC_SYNTHESIS=1` (default on), count `TOOL_TOPIC_MAX` (default 4).
+- Each proposed topic is precision-measured (`precise_topic_demand` on its exact `demand_query`) and passes a STRICT gate (all channel phases): unmeasured ⇒ **culled** (synthetic topics get no RSS "presumption of relevance"), measured-but `< OPPORTUNITY_MIN_SCORE` (0.5) ⇒ **culled**. Kept synthetics enter TOPSIS first (evergreen > news), budget-bounded by `YT_SEARCH_DAILY_BUDGET`.
+
 ## Architecture (where things live)
-- `src/agents/` — sequential A2A agents wired by `orchestrator.py`: `fact_retriever` -> `story_designer` -> `observer` (quality gates + bounded 3-revision loop) -> `media_producer` -> `publisher`. `orchestrator.run_pipeline()` is the single entrypoint.
+- `src/agents/` — sequential A2A agents wired by `orchestrator.py`: `fact_retriever` -> `story_designer` -> `observer` (quality gates + bounded 3-revision **surgical per-shot repair** loop, driving the Observer's `REVISE_SCRIPT` message with state_hash enforcement) -> `media_producer` -> `publisher`. `orchestrator.run_pipeline()` is the single entrypoint.
 - `src/engine/` — stateless/stateful helpers (RAG, TOPSIS, quality_verifier, llm_client, channel_phase_manager, etc.). Random leaf files; no surprises here.
 - `src/schemas/` — pydantic models (`state.py`, `a2a.py`); `GlobalState` is the checkpoint schema.
 - `mcp_servers/` — three standalone FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi), `media_cloud` (fal/flux visuals + ffmpeg, port 8001), `youtube_cloud` (upload/quota, port 8002). Only `audio_edge` has a committed systemd unit (`kokoro_tts.service`, port 8000, Pi); `media_cloud`/`youtube_cloud` run via `uvicorn.run` (no committed unit; `deploy.sh` only restarts `kokoro_tts`). Add new model/http endpoints here, not in `src/engine`.

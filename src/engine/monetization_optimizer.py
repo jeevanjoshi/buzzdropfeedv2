@@ -24,21 +24,24 @@ class MonetizationYieldOptimizer:
     # a fixed percentage of CPM (it includes Premium/memberships), so these are
     # benchmarked net-RPM bands, not a CPM x multiplier.
     #
-    # Finance/Investing highest; Legal and Real Estate also top-tier; enterprise-
-    # AI/Tech and Health mid; consumer entertainment lowest.
+    # Finance/Investing highest; Real Estate and enterprise AI/Tech also top-tier;
+    # Health/Science/Space mid; consumer entertainment lowest.
     NICHE_RPM_MATRIX = {
         "Personal Finance & Investing":           (8.0, 18.0, 13.0),
+        # Finance *education* (concepts only) pays the highest CPM of the group
+        "Personal Finance Education":             (10.0, 22.0, 15.0),
         "Technology & Artificial Intelligence":   (6.0, 14.0, 9.5),
         "Business & Entrepreneurship":            (7.0, 16.0, 11.0),
-        "Health & Science":                       (5.0, 12.0, 8.0),
+        "Health & Wellness":                      (3.0, 8.0, 5.0),
+        "Science & Innovation":                   (5.0, 12.0, 8.0),
+        "Space & Scientific Innovation":          (5.0, 12.0, 8.0),
+        "History & Documentary":                  (4.0, 10.0, 6.5),
         "Global Trends & Infotainment":           (1.5, 5.0, 3.0),
-        "Legal & Law":                            (9.0, 20.0, 14.0),
         "Real Estate":                            (7.0, 18.0, 12.0),
         # Legacy aliases (RAG-derived category names) for safety
         "Global Economics & Finance":             (8.0, 18.0, 13.0),
         "Global Trends & Cultural Infotainment":  (1.5, 5.0, 3.0),
-        "Health & Wellness":                      (5.0, 12.0, 8.0),
-        "Space & Scientific Innovation":          (5.0, 12.0, 8.0),
+        "Health & Science":                       (3.0, 8.0, 5.0),
         "Geopolitics & World Affairs":            (3.0, 9.0, 5.5),
     }
 

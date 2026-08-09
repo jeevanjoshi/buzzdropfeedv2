@@ -96,6 +96,9 @@ def main():
             publish = False
         if "--dummy-frames" in sys.argv or "--dummy-frame" in sys.argv:
             dummy_frames = True
+        if "--outline-first" in sys.argv:
+            os.environ["CSVG_OUTLINE_FIRST"] = "1"
+            print("[main] --outline-first enabled (outline-validated beat narration)")
         if "--renderer" in sys.argv:
             for i, arg in enumerate(sys.argv):
                 if arg == "--renderer" and i + 1 < len(sys.argv):

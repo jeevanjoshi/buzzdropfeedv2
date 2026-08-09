@@ -20,6 +20,7 @@ channel_stats.json
 yt_demand_pools.json
 yt_demand_quota.json
 published_topics.json
+media_budget.json
 # ML model caches (sentence-transformers / torch / HF Hub).
 # Point HF_HOME/TRANSFORMERS_CACHE at .hf_cache/ in .env to keep it repo-local.
 .hf_cache/

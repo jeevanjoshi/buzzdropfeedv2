@@ -3,7 +3,7 @@ import uuid
 import datetime
 from typing import List, Dict, Any, Optional
 from src.schemas.state import GlobalState, TopicCandidate, VerifiedFact, RevenueForecast
-from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
+from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
 from src.engine.rss_ingestion import LiveRSSIngestionEngine
 from src.engine.topic_topsis import TopicTOPSISEngine
 from src.engine.api_ninjas import APINinjasRetriever
@@ -127,6 +127,119 @@ class FactRetrieverAgent:
 
         return [c1, c2], [f1, f2]
 
+    def _synthesize_narrow_topics(
+        self, corpus_headlines: List[str]
+    ) -> List[Dict[str, Any]]:
+        """
+        LLM-propose narrow, evergreen, search-demand topics (tool-vs-tool,
+        how-to, tool deep-dives, enterprise tooling) grounded in the day's RSS
+        corpus. Returns raw ``{headline, summary, keywords, demand_query}`` specs
+        or ``[]`` when synthesis is unavailable/fails (caller decides the gate).
+        """
+        if not corpus_headlines:
+            return []
+        try:
+            from src.engine.tool_topic_synthesizer import synthesize_tool_topics
+            return synthesize_tool_topics(corpus_headlines)
+        except Exception as e:
+            print(f"[FactRetriever] Tool-topic synthesis skipped ({e}); continuing with RSS candidates.")
+            return []
+
+    def _score_synthetic_candidate(self, spec: Dict[str, Any], idx: int) -> TopicCandidate:
+        """
+        Convert an LLM tool-topic spec into a full TopicCandidate with the same
+        phase-aware scoring path the RSS engine uses, so it competes fairly in
+        TOPSIS. ``demand_query`` is retained on the candidate for the caller's
+        precise per-topic demand measurement.
+        """
+        from src.engine.rss_ingestion import (
+            classify_audience_type, AUDIENCE_NICHE_MAP,
+        )
+        headline = (spec.get("headline") or "").strip()
+        summary = (spec.get("summary") or "").strip()
+        demand_query = (spec.get("demand_query") or headline)[:120]
+        keywords = list(spec.get("keywords") or [])
+        if not keywords:
+            import re as _re
+            keywords = [w for w in _re.split(r"\W+", headline.lower()) if w][:8]
+        audience = classify_audience_type(headline, summary)
+        if audience == "blocked":
+            audience = "tech"  # never let a synthesized tool topic be blocked
+        niche_category, _ = AUDIENCE_NICHE_MAP.get(
+            audience, ("Technology & Artificial Intelligence", 16.0))
+
+        # Reuse the RSS scoring helpers so the 7-criteria vector is consistent.
+        r = self.rss_engine
+        rpm = r._classify_niche_rpm(headline, keywords)
+        if rpm < 0.35:  # hard RPM floor, matches RSS ingestion
+            rpm = 0.45  # tool/dev is inherently monetisable; keep candidate viable
+        idi = r._compute_idi(headline)
+        sdi = r._compute_sdi(headline, summary)
+        competing = r._estimate_competing_video_count(keywords, 1)
+
+        return TopicCandidate(
+            candidate_id=f"narrow-synth-{idx:02d}",
+            headline=headline,
+            summary=summary,
+            source_url="",
+            keywords=keywords,
+            tvs_score=r._compute_tvs(keywords, None, 1),
+            rpm_score=rpm,
+            idi_score=idi,
+            sdi_score=sdi,
+            shm_score=1.2,
+            vph_score=1.0,
+            sat_score=r._compute_sat(competing),
+            audience_type=audience,
+            niche_category=niche_category,
+            demand_query=demand_query,
+        )
+
+    def _measure_and_gate_synthetic(
+        self, synth: List[Dict[str, Any]]
+    ) -> List[TopicCandidate]:
+        """
+        STRICT gate for synthesized topics (not news → no presumption of relevance):
+          * Every synthetic candidate MUST be measured with precise_topic_demand on
+            its exact narrow query. Unmeasured (None / API / quota fall-through) ⇒
+            CULLED — a narrow topic with no measurable competitor demand is a bad bet.
+          * Measured but below the OPPORTUNITY_MIN_SCORE floor ⇒ CULLED (same floor
+            the RSS opportunity hard gate enforces, applied to ALL phases here).
+          * Measured opportunity updates the candidate's vph/avg-views for TOPSIS.
+        Only measured, floor-clearing candidates are returned.
+        """
+        if not synth:
+            return []
+        kept: List[TopicCandidate] = []
+        for idx, spec in enumerate(synth, start=1):
+            try:
+                cand = self._score_synthetic_candidate(spec, idx)
+            except Exception as e:
+                print(f"[FactRetriever] Synthetic candidate skipped ({e}).")
+                continue
+            demand_query = getattr(cand, "demand_query", "") or cand.headline[:120]
+            demand = None
+            try:
+                demand = youtube_topic_demand.precise_topic_demand(demand_query)
+            except Exception:
+                demand = None
+            if not (demand and demand.get("competitor_30d_avg_views")):
+                print(f"[FactRetriever] Synthetic topic CULLED (unmeasured demand): '{cand.headline[:80]}'")
+                continue
+            count = float(demand.get("video_count") or 0)
+            avg_views = float(demand["competitor_30d_avg_views"])
+            cand.competitor_30d_avg_views = avg_views
+            cand.competing_video_count = count
+            cand.opportunity_score = compute_opportunity(avg_views, count)
+            if cand.opportunity_score < OPPORTUNITY_MIN_SCORE:
+                print(f"[FactRetriever] Synthetic topic CULLED (opportunity {cand.opportunity_score:.2f} < {OPPORTUNITY_MIN_SCORE}): '{cand.headline[:80]}'")
+                continue
+            # vph proxy ON measured views/hr so TOPSIS VPH reflects real velocity.
+            vph_raw = float(demand.get("views_per_hour") or 0)
+            cand.vph_score = round(max(0.5, min(3.0, vph_raw / 250.0)), 4)
+            kept.append(cand)
+        return kept
+
     def _apply_precise_shortlist(self, ranked: List[TopicCandidate]) -> List[TopicCandidate]:
         """Re-order the TOPSIS top-3 by precise per-topic opportunity.
 
@@ -174,6 +287,21 @@ class FactRetrieverAgent:
 
         if not candidates:
             raise ValueError("No topic candidates available for selection.")
+
+        # Narrow tool-topic synthesis (LLM, grounded in the day's RSS corpus).
+        # Adds evergreen, search-demand topics RSS news never surfaces, then a
+        # STRICT per-candidate demand gate: unmeasured synthetic = culled, and
+        # measured-but-below-floor = culled (all-channel-phases). Toggle via
+        # TOOL_TOPIC_SYNTHESIS=0 (env). Never crashes the run on LLM failure.
+        if os.getenv("TOOL_TOPIC_SYNTHESIS", "1").strip().lower() not in ("0", "false"):
+            try:
+                synth_specs = self._synthesize_narrow_topics([c.headline for c in candidates])
+                synth_kept = self._measure_and_gate_synthetic(synth_specs)
+                if synth_kept:
+                    print(f"[FactRetriever] {len(synth_specs)} synthesized tool topics → {len(synth_kept)} passed strict demand gate.")
+                    candidates = list(synth_kept) + candidates
+            except Exception as e:
+                print(f"[FactRetriever] Tool-topic synthesis pass failed ({e}); using RSS candidates only.")
 
         # Pre-TOPSIS opportunity hard gate (REVENUE/SCALE only, measured only).
         # A topic with a MEASURED but low views-per-competitor opportunity is a
@@ -286,6 +414,7 @@ class FactRetrieverAgent:
                 "revenue_forecast_usd": rev["total_expected_revenue_usd"],
                 "audience_type": getattr(winner, "audience_type", "general"),
             },
+            state_hash=compute_state_hash(state),
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
         return msg

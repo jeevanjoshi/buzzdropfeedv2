@@ -26,12 +26,13 @@ Options:
   --rag <MODE>           Research mode: grounded|hybrid|scraper (Default: 'scraper')
   --renderer <ENGINE>    Renderer: ffmpeg|moviepy (Default: 'ffmpeg')
   --crossfade <SEC>      Crossfade duration in seconds (float)
+  --tail <SEC>           Video-only hold after each shot's narration (float, default 1.2)
   --resume               Auto-resume the latest unfinished checkpoint
   --skip-health-check    Skip the pre-flight health gate (LLM/YT/Pi) — not recommended
   -h, --help             Display this help menu and exit
 
 Notes:
-  Only --no-detach, --resume, --renderer, --crossfade, and --rag survive
+  Only --no-detach, --resume, --renderer, --crossfade, --tail, and --rag survive
   the detach. Use --no-detach to keep flags like --till-upload or --offline.
 
 Examples:
@@ -99,6 +100,7 @@ fi
 RAG_ARG=""
 RENDERER_ARG=""
 CROSSFADE_ARG=""
+TAIL_ARG=""
 if [[ "$*" == *"--rag"* ]]; then
     for ((i=1; i<=$#; i++)); do
         if [[ "${!i}" == "--rag" ]]; then
@@ -117,6 +119,13 @@ if [[ "$*" == *"--crossfade"* ]]; then
     for ((i=1; i<=$#; i++)); do
         if [[ "${!i}" == "--crossfade" ]]; then
             j=$((i+1)); CROSSFADE_ARG="--crossfade ${!j}"; break
+        fi
+    done
+fi
+if [[ "$*" == *"--tail"* ]]; then
+    for ((i=1; i<=$#; i++)); do
+        if [[ "${!i}" == "--tail" ]]; then
+            j=$((i+1)); TAIL_ARG="--tail ${!j}"; break
         fi
     done
 fi
@@ -222,11 +231,11 @@ if [ "${1:-}" != "--no-detach" ]; then
     fi
 
     echo "[LAUNCH] Launching CSVG Production Pipeline in the background..."
-    # Launch itself with --no-detach in the background, forwarding resume + renderer + crossfade + rag.
+    # Launch itself with --no-detach in the background, forwarding resume + renderer + crossfade + tail + rag.
     # `setsid` fully detaches the child from this shell's session/controlling terminal so a closed
     # SSH/tmux session can NEVER kill it mid/finish (the cause of "pipeline published but no final
     # exit-code line and no email" — the child was reaped before its post-run steps).
-    setsid nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${RAG_ARG} \
+    setsid nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${TAIL_ARG} ${RAG_ARG} \
         < /dev/null > /dev/null 2>&1 &
     PID=$!
     echo "[SUCCESS] Pipeline successfully spawned in background (PID: ${PID})."

@@ -132,9 +132,12 @@ COPY_SEMANTIC_HARD_THRESHOLD = 0.94
 
 HIGH_RPM_TAXONOMY = {
     "finance_global": ["fed", "interest", "rate", "inflation", "bonds", "stocks", "sec", "treasury", "market", "portfolio", "wall street", "banking", "economy", "recession", "wealth"],
+    "finance_edu": ["compound interest", "401k", "ira", "retirement", "budget", "credit score", "debt", "savings", "net worth", "index fund", "dollar cost averaging", "financial literacy", "how to invest", "explained", "for beginners", "passive income"],
     "tech_global": ["semiconductor", "ai", "nvidia", "chips", "cloud", "data center", "apple", "microsoft", "google", "meta", "crypto", "tsmc", "quantum", "software", "saas"],
     "finance_tech_india": ["rbi", "nifty", "sensex", "sebi", "startup", "unicorn", "tata", "reliance", "adani", "infosys", "tcs", "gdp", "upi", "fii", "dii", "ipo", "paytm", "zerodha"],
-    "legal_law": ["lawsuit", "court", "supreme court", "judge", "verdict", "prosecution", "indictment", "settlement", "regulatory", "compliance", "fine", "penalty", "attorney", "lawyer", "sued"],
+    "science_innovation": ["science", "scientific", "research", "physics", "chemistry", "biology", "genetics", "neuroscience", "laboratory", "experiment", "discovery", "climate change", "nuclear fusion", "particle", "genome", "peer review", "breakthrough study"],
+    "space_exploration": ["space", "nasa", "isro", "spacex", "satellite", "rocket", "mars", "moon", "orbit", "astronaut", "cosmos", "galaxy", "telescope", "spacecraft", "exoplanet", "astronomy", "nebula", "plasma"],
+    "history_documentary": ["history", "historical", "ancient", "empire", "archaeology", "medieval", "dynasty", "civilization", "artifacts", "pharaoh", "roman", "greek", "revolution", "world war", "cold war", "viking", "renaissance", "heritage", "documentary"],
     "real_estate": ["real estate", "mortgage", "housing", "home prices", "property", "rental", "homeowners", "construction", "foreclosure", "realtor"],
 }
 

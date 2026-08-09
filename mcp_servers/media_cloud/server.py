@@ -281,10 +281,18 @@ async def render_playwright_svg_animation(req: PlaywrightSVGRequest):
         except Exception:
             generate_synthetic_png(chart_png, title=req.title)
 
-        # Convert frame to zooming MP4 motion video clip
+        # Convert frame to zooming MP4 motion video clip. Zoom spread across the
+        # full duration (d = total frames, rate to target on the last frame) —
+        # the old fixed d=125 reset every 5s causing a visible repeat on
+        # long ticker shots. 1.06 max keeps the count/ticker legible.
+        dur_frames = max(int(req.duration * 25), 25)
+        z_target = 1.06
+        z_step = (z_target - 1.0) / dur_frames
         cmd = [
             "ffmpeg", "-y", "-loop", "1", "-i", chart_png,
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.0015,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=125:s=1920x1080",
+            "-vf", ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+                    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+                    f"zoompan=z='min(zoom+{z_step:.6f},{z_target})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={dur_frames}:s=1920x1080,fps=25,format=yuv420p"),
             "-t", str(req.duration), "-c:v", "libx264", "-pix_fmt", "yuv420p",
             req.output_mp4_path
         ]
@@ -526,10 +534,20 @@ async def generate_dynamic_chart(req: ChartRequest):
             plt.savefig(chart_png, bbox_inches='tight', facecolor=fig.get_facecolor())
             plt.close(fig)
 
-            # Convert chart PNG to 16:9 zooming MP4 clip
+            # Convert chart PNG to 16:9 zooming MP4 clip. The zoom is spread
+            # across the ENTIRE shot (d = full duration frames, rate computed so
+            # the target is reached only on the last frame) — the old fixed
+            # d=125 capped the zoom after 5s and snapped back to 1.0, causing a
+            # visible repeat/jitter on data-chart shots. A gentle 1.06 max keeps
+            # axis labels/annotations legible while the chart still reads as alive.
+            dur_frames = max(int(req.duration * 25), 25)
+            z_target = 1.06
+            z_step = (z_target - 1.0) / dur_frames
             cmd = [
                 "ffmpeg", "-y", "-loop", "1", "-i", chart_png,
-                "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,zoompan=z='min(zoom+0.001,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=125:s=1920x1080",
+                "-vf", ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+                        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+                        f"zoompan=z='min(zoom+{z_step:.6f},{z_target})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={dur_frames}:s=1920x1080,fps=25,format=yuv420p"),
                 "-t", str(req.duration), "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 req.output_mp4_path
             ]

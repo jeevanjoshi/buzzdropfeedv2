@@ -2,7 +2,7 @@ import uuid
 import datetime
 from typing import Dict, Any, Optional
 from src.schemas.state import GlobalState, UploadMetadata
-from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
+from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
 from mcp_servers.youtube_cloud.server import check_quota_available, upload_youtube_resumable, QuotaCheckRequest, UploadRequest
 from src.engine.run_budget import run_budget
 
@@ -93,6 +93,7 @@ class PublisherAgent:
                 "youtube_url": f"https://www.youtube.com/watch?v={meta.video_id}",
                 "synthetic_content": True
             },
+            state_hash=compute_state_hash(state),
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
         return msg

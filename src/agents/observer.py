@@ -3,7 +3,7 @@ import datetime
 import re
 from typing import List, Dict, Any, Tuple
 from src.schemas.state import GlobalState, ScriptData, VerifiedFact
-from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
+from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
 from src.engine.monetization_optimizer import monetization_optimizer
 from src.engine.channel_phase_manager import channel_phase_manager
 from src.engine.text_embeddings import semantic_embedder, semantic_max_similarity, semantic_pairwise_similarity, semantic_topic_membership, COPY_SEMANTIC_HARD_THRESHOLD
@@ -34,6 +34,7 @@ _SOFT_VIOLATION_MARKERS = (
     "Source Diversity",
     "visual prompt",
     "narration too long",
+    "Bare acronym",
 )
 
 # Narration must NEVER contain raw scrape/citation junk (markdown links, bare
@@ -51,6 +52,52 @@ _RAW_JUNK_IN_NARR_RE = re.compile(
     r'July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\)\.?',
     re.IGNORECASE,
 )
+
+# Tool-name citation leaks are a HARD abort: narration must never attribute a
+# fact to the retrieval toolchain ("As Firecrawl highlights", "noted to Tavily",
+# "Exa reports", "per Jina"). Only an actual publication passes. This catches
+# the sample-swing where the LLM reads a "[Tool: ...]" bucket tag as the source.
+_TOOL_NAME_IN_NARR_RE = re.compile(
+    r'\b(?:Tavily|Firecrawl|Exa|Jina|DuckDuckGo|DDG)\b',
+    re.IGNORECASE,
+)
+
+# Bare acronyms that must NOT survive in narration: 2-6 all-caps letters as a
+# standalone token. Proper-noun initialisms / well-known names and unit symbols
+# are exempt (see _ACRONYM_ALLOWLIST). Everything else must be spelt out — this
+# is the deterministic gate that makes "no acronyms" independent of LLM sampling
+# (the writer/polish already expand common terms, this catches the residue).
+_ACRONYM_RE = re.compile(r'(?<![A-Za-z0-9])[A-Z]{2,6}(?!\$)(?!%)')
+_ACRONYM_ALLOWLIST = frozenset({
+    "NASA", "IBM", "MIT", "CNN", "BBC", "NBC", "CBS", "ABC", "FOX",
+    "NY", "LA", "NYSE", "NASDAQ", "IMF", "WTO", "ECB", "FOMC",
+    "USD", "EUR", "GBP", "JPY", "INR", "FBI", "CIA", "FCC", "SEC",
+    "WHO", "NATO", "UN", "EU",
+})
+
+
+def _looks_like_tool_citation(sentence: str) -> bool:
+    """True when a narration sentence cites a search tool as the source of a
+    fact (e.g. 'As Firecrawl highlights', 'reported by Tavily'). A bare tool
+    name deep inside a legit technical sentence (rare) still gets flagged by
+    design: tools are never a citable source in a documentary."""
+    sl = (sentence or "").lower()
+    if not _TOOL_NAME_IN_NARR_RE.search(sl):
+        return False
+    # Restrict to the citation frame so we don't misfire on e.g. a proper noun
+    # that happens to contain a tool name deep in the sentence.
+    return any(
+        phrase in sl
+        for phrase in (
+            "as firecrawl", "firecrawl highlights", "firecrawl reports",
+            "firecrawl notes", "by firecrawl", "from firecrawl", "via firecrawl",
+            "as tavily", "tavily highlights", "tavily reports", "tavily notes",
+            "tavily search", "noted to tavily", "reported by tavily", "from tavily",
+            "as exa", "exa reports", "exa notes", "exa search", "reported by exa",
+            "from exa", "as jina", "jina reports", "jina notes", "jina reader",
+            "reported by jina", "as duckduckgo", "duckduckgo reports", "from duckduckgo",
+        )
+    )
 
 
 def is_soft_violation(violation: str) -> bool:
@@ -263,26 +310,41 @@ class ObserverAgent:
                             "Fact Audit"
                         ))
 
-            # 2. Dynamic Temporal Anchor Check — hard-flag a past year not in the corpus,
-            #    and route present-tense past-year sentences to the AI critic (which decides
-            #    historical-vs-current) even when the old year exists in the corpus, so old
-            #    RAG data can't self-excuse being framed as a current event.
-            HISTORICAL_FRAMING = ("back in", "during", "historically", "at the time",
-                                  "the year", "decade", "era", "since", "then-")
+            # 2. Dynamic Temporal Anchor Check — DETERMINISTIC (no critic coin-flip).
+            #    A past year that never appears in the ground-truth corpus is a
+            #    fabricated/outdated anchor -> hard flag. A sentence that NAMES its own
+            #    past year ("in 2023", "a 2023 Christmas dinner", "back in 2025") is
+            #    historically framed BY that date, so it can never read as a
+            #    current-2026 event and is accepted WITHOUT routing to the LLM critic
+            #    (which has repeatedly false-rejected exactly these: e.g. rejecting
+            #    "'5 billion in 2023 to over $4...'" as 'presented as current' even
+            #    though the sentence says "in 2023"). Only a sentence that pairs the
+            #    past-year data with a CURRENT-time word (now/today/this year/as of)
+            #    is a genuine current-placeholder risk and gets routed to the critic.
+            _CURRENT_TIME_WORDS = (" today", "this year", "this month", "currently",
+                                   "current", "as of", " now ", " right now")
             for past_y in past_years:
-                if past_y in narration_lower:
-                    if past_y not in ground_truth_corpus:
-                        flagged_sentences_info.append((
-                            shot.shot_id,
-                            f"Outdated year '{past_y}' in: {shot.narration_text}",
-                            "Temporal Audit"
-                        ))
-                    # Even if in corpus, flag a sentence that cites a past year WITHOUT an
-                    # explicit historical frame -> critic decides if it's current-as-lie.
-                    for _sent in [s.strip() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]:
-                        _sl = _sent.lower()
-                        if past_y in _sl and not any(h in _sl for h in HISTORICAL_FRAMING):
-                            flagged_sentences_info.append((shot.shot_id, _sent, "Temporal Audit"))
+                if past_y not in narration_lower:
+                    continue
+                if past_y not in ground_truth_corpus:
+                    flagged_sentences_info.append((
+                        shot.shot_id,
+                        f"Outdated year '{past_y}' in: {shot.narration_text}",
+                        "Temporal Audit"
+                    ))
+                    continue
+                for _sent in [s.strip() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]:
+                    _sl = _sent.lower()
+                    if past_y not in _sl:
+                        continue
+                    # Self-dated historical framing -> accepted by construction.
+                    if (f"in {past_y}" in _sl or f"during {past_y}" in _sl
+                            or f"since {past_y}" in _sl or f"back in {past_y}" in _sl
+                            or f"{past_y}," in _sl):
+                        continue
+                    # Ambiguous tense: old figure phrased as current -> critic.
+                    if any(c in _sl for c in _CURRENT_TIME_WORDS):
+                        flagged_sentences_info.append((shot.shot_id, _sent, "Temporal Audit"))
 
             # 3. Semantic Sentence Grounding check (checks for qualitative hallucinations)
             if vectorizer:
@@ -372,10 +434,15 @@ class ObserverAgent:
                 3. Only reject ASSERTIONS that are unsupported by, or contradict, the
                    verified facts corpus (e.g. wrong statistics, false names, incorrect
                    dates, fabricated events).
-                4. TEMPORAL RULE: Reject an ASSERTION that presents data from a pre-2026 year
-                   as a CURRENT 2026 event, even if that year appears in the corpus. APPROVE
-                   pre-2026 data that is clearly framed as historical (e.g. 'In 2022...',
-                   'back in', 'historically', 'at the time').
+                4. TEMPORAL RULE: APPROVE pre-2026 data whenever the sentence itself
+                   names the year with a temporal preposition ('in 2023', 'during 2024',
+                   'since 2020', 'back in 2025') or is explicitly dated (e.g. 'a 2023
+                   Christmas dinner'). Such self-dated sentences are historical by
+                   construction and must NEVER be rejected. Only reject an ASSERTION
+                   that presents pre-2026 data as a current {current_year} event when
+                   the sentence uses a CURRENT tense without any year anchoring (e.g.
+                   'this month the industry is $5 billion' where the corpus only dates
+                   it to 2023).
                 5. Return a JSON object with a single key "violations" containing an array
                    of strings. Each string is the EXACT text of a REJECTED assertion followed
                    by the reason it fails. Return an empty array if all flagged claims are
@@ -383,7 +450,7 @@ class ObserverAgent:
                 """
                 system_prompt = "You are a precise, objective facts verification critic. Return valid JSON only."
                 try:
-                    critic_result = llm_client.generate_json(prompt, system_prompt)
+                    critic_result = llm_client.generate_json(prompt, system_prompt, route="critic", thinking="high")
                     if critic_result and "violations" in critic_result:
                         rejected_claims = critic_result["violations"]
                         for violation in rejected_claims:
@@ -431,13 +498,38 @@ class ObserverAgent:
                     f"contains a markdown link, URL, dateline, or 'Retrieved' tail "
                     f"(leaked {_m.group(0)[:60]!r}). Scrub before publish."
                 )
+            for _sent in re.split(r'[.!?]', _shot.narration_text or ""):
+                if _looks_like_tool_citation(_sent):
+                    violations.append(
+                        f"RAG tool-name citation leak in Shot #{_shot.shot_id} narration "
+                        f"attributes a fact to the retrieval toolchain, not a publication "
+                        f"(leaked {_sent.strip()[:90]!r}). Cite the actual source instead."
+                    )
+            # ── Gate: no bare unexplained acronyms in narration (HARD) ───────
+            # Documentary narration must ship ZERO shorthand initialisms — each must
+            # be spelt out to the contextually-appropriate full term. Only proper-
+            # noun initialisms (NASA, IBM, NYSE, CNN, …) and unit symbols (USD,
+            # %, °C) may remain. Deterministic: the acronym gate cannot be swung
+            # by LLM sampling, it just reads the all-caps tokens.
+            for _tok in _ACRONYM_RE.findall(_shot.narration_text or ""):
+                if _tok in _ACRONYM_ALLOWLIST:
+                    continue
+                violations.append(
+                    f"Bare acronym '{_tok}' in Shot #{_shot.shot_id} narration — "
+                    f"spell it out to its most appropriate full term for the sentence "
+                    f"context (e.g. '{_tok}' should be expressed as the full phrase). "
+                    f"Only proper-noun initialisms may remain."
+                )
 
         # ── Gate 0: Audience Type Gate ──────────────────────────────────────
-        # Hard-block entertainment/gossip regardless of other scores
+        # Hard-block entertainment/gossip + YMYL medical content regardless of
+        # other scores (neither is safe to auto-produce unattended).
         if topic and getattr(topic, "audience_type", "") == "blocked":
             violations.append(
-                f"Audience Gate FAIL: Topic audience_type='blocked' (entertainment/gossip). "
-                f"RPM ~$1 — hard blocked. Select a Tech/Finance/Health topic instead."
+                f"Audience Gate FAIL: Topic audience_type='blocked' "
+                f"(entertainment/gossip or YMYL medical). "
+                f"Highly demo/gamma Rx — hard blocked. "
+                f"Select a Tech/Finance/Science/Space/History/Business topic instead."
             )
             return False, violations  # Early exit — no point checking further
 
@@ -701,6 +793,7 @@ class ObserverAgent:
                     "fact_audit": "PASSED",
                     "quality_score": observer_quality_score(state.script_data)
                 },
+                state_hash=compute_state_hash(state),
                 timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
             )
         else:
@@ -717,5 +810,6 @@ class ObserverAgent:
                     "fact_audit": "FAILED" if any("Fact Audit" in v or "Temporal Audit" in v for v in violations) else "PASSED",
                     "quality_score": observer_quality_score(state.script_data)
                 },
+                state_hash=compute_state_hash(state),
                 timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
             )

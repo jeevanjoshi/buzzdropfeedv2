@@ -405,12 +405,16 @@ def build_grounded_knowledge_pack(
 
 def _category_guess(headline: str, summary: str, keywords: Optional[List[str]]) -> str:
     combined = f"{headline} {summary} {' '.join(keywords or [])}".lower()
+    if any(w in combined for w in ["compound interest", "401k", "ira", "retirement", "budgeting", "credit score", "financial literacy", "how to invest", "index fund"]):
+        return "Personal Finance Education"
+    if any(w in combined for w in ["history", "ancient", "empire", "archaeology", "medieval", "civilization", "pharaoh", "roman", "viking", "renaissance", "world war"]):
+        return "History & Documentary"
+    if any(w in combined for w in ["space", "nasa", "planet", "rocket", "star", "physics", "science"]):
+        return "Space & Scientific Innovation"
     if any(w in combined for w in ["ai", "chatgpt", "software", "tech", "chip", "nvidia", "cloud", "seo", "app"]):
         return "Technology & Artificial Intelligence"
     if any(w in combined for w in ["fed", "market", "stock", "trading", "crypto", "bank", "inflation", "revenue", "dollar"]):
         return "Global Economics & Finance"
-    if any(w in combined for w in ["space", "nasa", "planet", "rocket", "star", "physics", "science"]):
-        return "Space & Scientific Innovation"
     if any(w in combined for w in ["war", "election", "policy", "country", "president", "government"]):
         return "Geopolitics & World Affairs"
     return "Global Trends & Cultural Infotainment"

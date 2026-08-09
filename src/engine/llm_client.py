@@ -2,7 +2,7 @@ import os
 import json
 import time
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 from src.engine.logger import logger
 from src.engine.run_budget import run_budget
@@ -33,6 +33,38 @@ class LLMClient:
         self.model = model
         self.llama_cpp_url = (llama_cpp_url or os.getenv("LLAMA_CPP_URL", "http://localhost:8080")).rstrip("/")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+
+    # Per-role model routing (Point 4). Each route may pin a cheaper/faster model
+    # for mechanical rewrites ("repair") or a stronger one for verification
+    # ("critic"). Routes fall back to LLM_MODEL when unset. Env keys:
+    #   LLM_ROUTE_GENERATE / LLM_ROUTE_POLISH / LLM_ROUTE_REPAIR / LLM_ROUTE_CRITIC
+    @staticmethod
+    def _route_model(route: Optional[str]) -> Optional[str]:
+        if not route:
+            return None
+        key = "LLM_ROUTE_" + (route or "").upper().strip()
+        if not key.endswith("_GENERATE") and not key.endswith("_POLISH") and not key.endswith("_REPAIR") and not key.endswith("_CRITIC"):
+            return None
+        return os.getenv(key)
+
+    def _model_chain(self, model: Optional[str] = None, route: Optional[str] = None) -> List[str]:
+        """route-pinned -> primary -> fallback1 -> fallback2, deduped, non-empty.
+        A per-role route pin (LLM_ROUTE_*) takes precedence over the primary
+        model so cheap/capable models can be selected per task."""
+        routed = self._route_model(route)
+        chain = [routed, model or self.model,
+                 os.getenv("LLM_FALLBACK_MODEL") or "deepseek/deepseek-v4-flash-0731",
+                 os.getenv("LLM_FALLBACK_MODEL2")]
+        seen = set()
+        out = []
+        for m in chain:
+            if not m:
+                continue
+            m = m.strip()
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out
 
     def is_llama_cpp_available(self) -> bool:
         """
@@ -87,10 +119,14 @@ class LLMClient:
                 print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. No curly braces match found.")
         return None
 
-    def generate_json(self, prompt: str, system_prompt: str = "") -> Optional[Dict[str, Any]]:
+    def generate_json(self, prompt: str, system_prompt: str = "",
+                      route: Optional[str] = None, thinking: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Dispatches prompt based on PREFERRED_LLM_PROVIDER (defaults to 'local').
         Fallback chain: llama.cpp -> Cloud OpenRouter.
+        route: per-role model pinning (Point 4) — see LLM_ROUTE_* env keys.
+        thinking: "low"|"medium"|"high" — gated reasoning effort for models that
+        support OpenRouter `reasoning` (e.g. "critic" route). No-op otherwise.
         """
         preferred_provider = os.getenv("PREFERRED_LLM_PROVIDER", "local").lower()
 
@@ -158,16 +194,10 @@ class LLMClient:
                 "HTTP-Referer": "https://github.com/buzzdropfeedv2",
                 "X-Title": "CSVG Autonomous Pipeline"
             }
-            # Model fallback chain: primary -> LLM_FALLBACK_MODEL -> LLM_FALLBACK_MODEL2.
-            # Default fallback is a cheap DeepSeek v4 flash (different provider from Google).
-            models = []
-            for m in [
-                self.model,
-                os.getenv("LLM_FALLBACK_MODEL") or "deepseek/deepseek-v4-flash-0731",
-                os.getenv("LLM_FALLBACK_MODEL2"),
-            ]:
-                if m and m not in models:
-                    models.append(m)
+            # Model routing: primary -> route-pinned -> LLM_FALLBACK_MODEL ->
+            # LLM_FALLBACK_MODEL2 (Point 4). Default fallback is a cheap DeepSeek
+            # v4 flash (different provider from Google).
+            models = self._model_chain(self.model, route=route)
 
             transient_status = {408, 429, 500, 502, 503, 504}
             for model in models:
@@ -181,6 +211,12 @@ class LLMClient:
                     "temperature": 0.7,
                     "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "8192"))
                 }
+                # Gated reasoning knob: only applies to models that honour OpenRouter
+                # `reasoning` (gemini-*-thinking, deepseek-reasoner…). Env-gated so
+                # no model behaviour changes unless explicitly requested.
+                effort = os.getenv("LLM_THINKING_EFFORT", "").strip() or (thinking if thinking in ("low", "medium", "high") else "")
+                if effort:
+                    payload["reasoning"] = {"effort": effort}
                 for retry_idx in range(3):  # client-level transient retry
                     backoff = 2 * (retry_idx + 1)
                     t0 = time.time()

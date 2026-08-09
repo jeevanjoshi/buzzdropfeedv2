@@ -9,6 +9,8 @@ from faster_whisper import WhisperModel
 from src.engine.llm_client import LLMClient
 from src.engine.external_apis import ExternalAPIManager
 
+_REPO_MEDIA_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + "/logs/media"
+
 class YouTubeVideoVerifier:
     """
     Automated YouTube Video Sync, Coherence, and RAG-based Relevance Audit Tool.
@@ -22,6 +24,27 @@ class YouTubeVideoVerifier:
     def __init__(self, model_name: str = "google/gemini-2.5-flash"):
         self.llm_client = LLMClient(model=model_name)
         self.api_manager = ExternalAPIManager()
+
+    def _latest_local_final_video(self) -> str:
+        """Resolve the most recently rendered execution-correlated final master.
+        Since media_producer now writes into logs/media/<pipeline_id>/ with a
+        per-run filename, find the newest final_video_*.mp4 there; fall back to
+        the legacy shared /tmp path for older flows."""
+        legacy = "/tmp/csvg_media/final_video_1080p.mp4"
+        import glob
+        candidates = glob.glob(os.path.join(_REPO_MEDIA_DIR, "**", "final_video_*.mp4"), recursive=True)
+        if candidates:
+            return max(candidates, key=os.path.getmtime)
+        return legacy
+
+    def _latest_local_master_subs(self) -> str:
+        """Resolve the newest execution-correlated master_subtitles.ass."""
+        legacy = "/tmp/csvg_media/master_subtitles.ass"
+        import glob
+        candidates = glob.glob(os.path.join(_REPO_MEDIA_DIR, "**", "master_subtitles.ass"), recursive=True)
+        if candidates:
+            return max(candidates, key=os.path.getmtime)
+        return legacy
         
     def extract_video_id(self, url_or_id: str) -> str:
         """Extracts the 11-character YouTube video ID."""
@@ -422,7 +445,7 @@ Return the response as a valid JSON object matching this schema:
         except Exception as e:
             print(f"[Verifier] Failed to retrieve captions from YouTube: {e}")
             # Fallback to local subtitle file if private video
-            local_ass = "/tmp/csvg_media/master_subtitles.ass"
+            local_ass = self._latest_local_master_subs()
             if os.path.exists(local_ass):
                 print(f"[Verifier] Falling back to local master subtitle file: {local_ass}")
                 subtitles = self.parse_ass(local_ass)
@@ -439,15 +462,17 @@ Return the response as a valid JSON object matching this schema:
         # 2. Download and transcribe audio to find actual spoken word timings
         sync_issues = []
         try:
-            local_video = "/tmp/csvg_media/final_video_1080p.mp4"
-            if is_private and os.path.exists(local_video):
+            # Resolve the latest execution-correlated final master (falls back to
+            # the legacy shared /tmp path for backward compatibility).
+            local_video = self._latest_local_final_video()
+            if is_private and local_video and os.path.exists(local_video):
                 print(f"[Verifier] Video is private. Bypassing yt-dlp download, using local file: {local_video}")
                 audio_path = local_video
             else:
                 try:
                     audio_path = self.download_audio(video_id)
                 except Exception as dl_err:
-                    if os.path.exists(local_video):
+                    if local_video and os.path.exists(local_video):
                         print(f"[Verifier] yt-dlp download failed ({dl_err}). Falling back to local file: {local_video}")
                         audio_path = local_video
                     else:

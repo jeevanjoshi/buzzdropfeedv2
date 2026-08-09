@@ -1,11 +1,12 @@
 import json
+import os
 import uuid
 import time
 import datetime
 import re
 from typing import List, Dict, Any, Optional
-from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact, SEOMetadata, VisualType
-from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
+from src.schemas.state import GlobalState, ScriptData, ShotData, ShotBeat, TopicCandidate, VerifiedFact, SEOMetadata, VisualType
+from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
 from src.engine.llm_client import LLMClient
 from src.engine.rag_retriever import rag_retriever
 from src.engine.bertopic_engine import bertopic_engine
@@ -22,9 +23,14 @@ LLM_MAX_ATTEMPTS = 3
 
 
 # Matches search-tool citation tags anywhere in a narration/snippet, e.g.
-# "[Tavily: ...]", "[Wikipedia: ...]", "[Exa: title | Reuters]:", "[DDG: ...]".
+# "[Tavily: ...]", "[Wikipedia: ...]", "[Exa: title | Reuters]:", "[DDG: ...]"
+# — AND, after rag_retriever started labelling buckets with the actual
+# publication ("[Fortune: ...]", "[Reuters: ...]"), any genuine publisher-tag
+# whose bracketed prefix ends in ": ". Both are retrieval metadata, never prose,
+# so they are stripped so narration can't leak "[Firecrawl:" or "[Fortune:".
 _TOOL_TAG_RE = re.compile(
-    r'\[(?:Tavily|Wikipedia|Exa|NewsAPI|Firecrawl|DDG|DuckDuckGo)\s*:[^\]]*\]\s*:?',
+    r'\[(?:Tavily|Wikipedia|Exa|NewsAPI|Firecrawl|DDG|DuckDuckGo)\s*:[^\]]*\]\s*:?'
+    r'|\[[A-Z][A-Za-z0-9 .&\'’,-]+\s*:\s*[^\]]{1,200}\]\s*:?',
     re.IGNORECASE,
 )
 _ELLIPSIS_RE = re.compile(r'\s*\[\.\.\.\]\s*')
@@ -145,6 +151,71 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
 # so no single static-image shot is held for a full minute. Keeps total >= 10-min
 # hard floor (Observer runtime gate) because the shot count rises in tandem.
 MAX_SHOT_WORDS = 115
+
+# Deterministic acronym expansion: the documentary narration must NOT contain
+# unexplained acronyms/initialisms (they read as jargon and trip the Observer's
+# "no bare acronyms" gate). This offline pass expands the common shortforms to
+# their canonical full terms so the writer's output is stable regardless of what
+# the LLM sampling returns. Ambiguous/proper-noun initialisms (NASA, IBM, NYSE,
+# "US" used as a currency prefix "US$") are LEFT ALONE — context decides those.
+_ACRONYM_EXPANSIONS = {
+    "AI": "artificial intelligence",
+    "AGI": "artificial general intelligence",
+    "US": "United States",
+    "USA": "United States",
+    "UK": "United Kingdom",
+    "EU": "European Union",
+    "UN": "United Nations",
+    "GDP": "gross domestic product",
+    "ROI": "return on investment",
+    "CEO": "chief executive officer",
+    "CFO": "chief financial officer",
+    "CTO": "chief technology officer",
+    "IPO": "initial public offering",
+    "API": "application programming interface",
+    "SaaS": "software as a service",
+    "ML": "machine learning",
+    "LLM": "large language model",
+    "GPU": "graphics processing unit",
+    "CPU": "central processing unit",
+    "EV": "electric vehicle",
+    "AR": "augmented reality",
+    "VR": "virtual reality",
+    "YOY": "year over year",
+    "YoY": "year over year",
+    "R&D": "research and development",
+    "AI-ML": "artificial intelligence and machine learning",
+}
+# Proper-noun initialisms / unit symbols that must NOT be force-expanded (they
+# are legitimate names or symbols, not jargon). Context decides these.
+_ACRONYM_PROPER_NOUNS = frozenset({
+    "NASA", "IBM", "MIT", "CNN", "BBC", "NBC", "CBS", "NYSE", "NASDAQ",
+    "IMF", "WTO", "ECB", "FOMC", "USD", "EUR", "GBP", "JPY", "INR",
+    "NYSE", "FBI", "CIA", "FCC", "SEC", "WHO", "NATO",
+})
+# 5G, 4G, etc. are telecom abbreviations, not acronyms — leave the digits alone.
+
+_ACRONYM_RE = re.compile(r'(?<![A-Za-z0-9])[A-Z]{2,6}(?![A-Za-z0-9])')
+
+
+def _expand_acronyms(text: str, mapping: Optional[Dict[str, str]] = None) -> str:
+    """Deterministically expand known shorthand acronyms to full terms. Leaves
+    proper-noun initialisms and any token not in the mapping untouched. Word-
+    boundary safe: 'US$5b' is untouched, 'a US startup' -> 'a United States
+    startup'. Never fails, never touches the network."""
+    if not text:
+        return text
+    mapping = mapping or _ACRONYM_EXPANSIONS
+    # Longest-first so 'AI-ML' wins before 'AI' / 'ML' split it.
+    for acro in sorted((k for k in mapping if k in text), key=len, reverse=True):
+        if acro in _ACRONYM_PROPER_NOUNS:
+            continue
+        full = mapping[acro]
+        text = re.sub(
+            r'(?<![A-Za-z0-9\$-])' + re.escape(acro) + r'(?![A-Za-z0-9\$])',
+            full, text
+        )
+    return text
 
 
 def _enforce_narration_ceiling(narr: str, max_words: int = MAX_SHOT_WORDS) -> str:
@@ -679,7 +750,7 @@ class StoryDesignerAgent:
                 You are an investigative documentary director crafting a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
                 CATEGORY: '{category}'
                 DYNAMIC TEMPORAL ANCHOR: Current Date is {current_date_str} ({current_month_year}). Year: {current_year}.
-                TRUSTED SOURCE ATTRIBUTION: Cite diverse actual publications matching the facts from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank).
+                TRUSTED SOURCE ATTRIBUTION: Cite diverse actual publications matching the facts from the RAG pack (e.g. Wired, New York Times, TechCrunch, World Bank, Reuters). Never attribute a news fact to the TERMINOLOGY REFERENCE block / Wikipedia / an encyclopedia — that block is for jargon/acronym definitions only.
             
                 FULL RAG KNOWLEDGE PACK (RETRIEVED DEEP FACTS & CONTEXT):
                 {rag_context_text}
@@ -710,8 +781,9 @@ class StoryDesignerAgent:
                      * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
                      * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
                      * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
-                4. Spoken Attribution: Dynamically cite the specific actual publisher or source from the RAG pack (e.g. Wikipedia, Wired, New York Times, TechCrunch, World Bank) for each fact in a natural, conversational way. Avoid over-attributing everything to a single source.
+                4. Spoken Attribution: Dynamically cite the specific actual publisher or source from the RAG pack (e.g. Wired, New York Times, TechCrunch, World Bank, Reuters) for each fact in a natural, conversational way. Avoid over-attributing everything to a single source. NEVER cite 'Terminology', 'Wikipedia', 'Encyclopedia' or any search tool as the source of a news claim — the TERMINOLOGY REFERENCE block exists ONLY to expand jargon/acronyms, not as a news attribution.
                 5. Strict Temporal Grounding: Frame current developments within {current_month_year}; treat any pre-2026/historical-tagged fact as PAST background only, never as a current event.
+                5b. NO ACRONYMS: Never use acronyms or initialisms in narration. Spell EVERY abbreviation out to its most appropriate full term for the sentence's context the first time it appears (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product', 'IPO' → 'initial public offering', 'ROI' → 'return on investment', 'CEO' → 'chief executive officer'). Proper-noun company/person names that are themselves initialisms (NASA, IBM, CNN, NYSE) may remain. NEVER emit a bare all-caps shorthand.
                 6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
                 7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
                 8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
@@ -725,8 +797,9 @@ class StoryDesignerAgent:
                     "CRITICAL RULES: "
                     "1. STYLISTIC EXCELLENCE (Vox/Netflix Documentary Style): Write in a gripping, cinematic, and narrative-first tone. "
                     "Never write dry summaries or list scraped facts line-by-line. Instead, weave facts into a suspenseful, unfolding human story. "
-                    "2. DIVERSE CITATIONS: Dynamically attribute facts to the actual distinct publishers in the RAG pack (e.g. 'As reported by The New York Times', 'Wired analysis shows', 'Wikipedia records indicate'). Do not attribute everything to a single publisher. "
+                    "2. DIVERSE CITATIONS: Dynamically attribute facts to the actual distinct publishers in the RAG pack (e.g. 'As reported by The New York Times', 'Wired analysis shows', 'Reuters records indicate'). Do not attribute everything to a single publisher. NEVER attribute a fact to 'Wikipedia' or an encyclopedia — the TERMINOLOGY REFERENCE block is definitions-only for expanding jargon/acronyms, not a news source. "
                     "3. CREATIVE ANALOGIES: Translate complex data, metrics, or technical mechanisms into vivid metaphors and simple physical analogies. "
+                    "3b. NO ACRONYMS: Spell out every acronym/initialism to its most contextually-appropriate full term on first mention (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product'). The narration must ship ZERO bare all-caps shorthand; only proper-noun initialisms (NASA, IBM, NYSE, CNN) may remain. "
                      "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
                      "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
                      "6. TEMPORAL GROUNDING: Today is {current_year}. Treat any fact dated before 2026 (e.g. '(historical: YYYY)' tags, or any pre-2026 year) as HISTORICAL/PAST context ONLY. "
@@ -745,7 +818,7 @@ class StoryDesignerAgent:
                         "a single 'shots' key. Do NOT truncate or omit any shot.\n"
                     )
                     prompt += repair_hint
-                llm_result = self.llm_client.generate_json(prompt, system_prompt)
+                llm_result = self.llm_client.generate_json(prompt, system_prompt, route="generate")
 
                 # Parse raw snippets and setup dynamic RAG pool
                 raw_snippets = self.parse_raw_snippets(rag_pack, summary, verified_facts, trusted_org, category, headline, current_month_year)
@@ -910,6 +983,10 @@ class StoryDesignerAgent:
                 "Restructure the sentence (change clause order, split or merge clauses, "
                 "front the context) rather than substituting a few synonyms — synonym-only "
                 "rewrites still read as a copy and fail quality review.\n"
+                "- NO ACRONYMS: Spell every acronym/initialism out to its most appropriate "
+                "full term for the sentence's context (e.g. 'AI' → 'artificial intelligence', "
+                "'US' → 'United States', 'GDP' → 'gross domestic product'). Only proper-noun "
+                "initialisms (NASA, IBM, NYSE, CNN) may remain. Never emit bare all-caps shorthand.\n"
             )
             if copy_notes:
                 prompt += (
@@ -926,7 +1003,8 @@ class StoryDesignerAgent:
             prompt += repair_hint
             try:
                 res = self.llm_client.generate_json(
-                    prompt, "You are a documentary editor. Return valid JSON only."
+                    prompt, "You are a documentary editor. Return valid JSON only.",
+                    route="polish"
                 )
             except Exception:
                 res = None
@@ -975,6 +1053,280 @@ class StoryDesignerAgent:
                 "truncate, omit, or wrap in markdown.\n"
             )
         return None
+
+    def repair_shots(
+        self,
+        script: ScriptData,
+        state: GlobalState,
+        by_shot: Dict[int, List[str]],
+        global_violations: Optional[List[str]] = None,
+        msg_obs: Optional[A2AMessage] = None,
+    ) -> ScriptData:
+        """Surgical per-shot revision. Rewrites ONLY the violating shots using a
+        focused, low-thinking prompt; every non-target shot is carried through
+        bit-identical. This replaces the old full 18-shot re-generation (which
+        re-sampled the whole script and made violations grow 6→13→15).
+
+        Contract mirrors _polish_script (JSON {"shots":[{shot_id, narration}]}),
+        so the full deterministic post-pass chain below runs on each repaired
+        shot: clean -> verbatim-dissolve -> acronyms -> ceiling.
+        """
+        if not by_shot:
+            return script
+        targets = {int(sid) for sid in by_shot}
+        shots_by_id = {s.shot_id: s for s in script.shots}
+        # Reject repairing a stale checkpoint: the REVISE_SCRIPT message carries
+        # the state_hash of the audited draft; a mismatch means something else
+        # mutated state, so refuse rather than patch the wrong text.
+        if msg_obs is not None and msg_obs.state_hash:
+            live_hash = compute_state_hash(state)
+            if msg_obs.state_hash != live_hash:
+                raise RuntimeError(
+                    "repair_shots rejected stale REVISE_SCRIPT (state_hash mismatch); "
+                    "refusing to patch a draft the Observer did not audit."
+                )
+
+        corpus = (state.crawled_content or "") + " " + " ".join(
+            f"{f.headline} {f.summary}" for f in (state.verified_facts or []))
+        corpus_norm = re.sub(r'\s+', ' ', corpus.lower())
+        corpus_sents = [
+            re.sub(r'[^a-z0-9 ]', '', s).strip()
+            for s in re.split(r'[.!?]', corpus_norm)
+            if len(s.strip().split()) >= 12
+        ]
+
+        repair_list = []
+        for sid in sorted(targets):
+            s = shots_by_id.get(sid)
+            if s is None:
+                continue
+            # Neighbour contexts: previous + next narration so the repair never
+            # repeats a neighbouring line or breaks the transition.
+            prev_n = shots_by_id.get(sid - 1)
+            next_n = shots_by_id.get(sid + 1)
+            repair_list.append({
+                "shot_id": s.shot_id,
+                "act_index": s.act_index,
+                "current_narration": s.narration_text,
+                "violations": by_shot[sid],
+                "prev_narration": prev_n.narration_text if prev_n else "",
+                "next_narration": next_n.narration_text if next_n else "",
+            })
+
+        topic = state.selected_topic.headline if state.selected_topic else script.title
+        violations_txt = "\n".join(
+            f"- [{item['shot_id']}] {' | '.join(item['violations'])}"
+            for item in repair_list)
+        global_txt = ("\n".join(f"- {v}" for v in global_violations or []))
+
+        prompt = (
+            "You are a documentary editor repairing specific failing shots of an existing script. "
+            f"TOPIC: {topic}\n"
+            "Rewrite ONLY the listed shots. Do NOT touch any other shot. Preserve every fact, "
+            "number, name, date and the tracked source attribution. Fix these violations\n"
+            f"{violations_txt}\n"
+        )
+        if global_txt:
+            prompt += f"Also address these script-wide issues without changing shot identities:\n{global_txt}\n"
+        prompt += (
+            "For each shot keep narration between 85 and 105 words (max 115). Vary sentence "
+            "lengths; do not repeat the previous or next shot's phrasing or meaning. ANTI-VERBATIM: "
+            "never mirror the source corpus wording — restructure (change clause order, split/merge) "
+            "rather than synonym-substitute. NO ACRONYMS: spell every initialism out unless it is a "
+            f"proper noun (NASA, IBM, NYSE, CNN).\n"
+            f"SHOTS TO REPAIR (with neighbours for continuity):\n{json.dumps(repair_list, ensure_ascii=False)}\n"
+            'Return ONLY a complete JSON object {"shots": [{"shot_id": <int>, "narration_text": "<rewritten>"}]} '
+            "for EVERY shot listed above."
+        )
+
+        res = self.llm_client.generate_json(
+            prompt,
+            system_prompt="You are a precise documentary editor. Return valid JSON only. Rewrite ONLY the listed shots.",
+            route="repair",
+            thinking="low",
+        )
+        narr_by_id = {}
+        if res and isinstance(res.get("shots"), list):
+            for s in res["shots"]:
+                try:
+                    sid = int(s.get("shot_id"))
+                except (TypeError, ValueError):
+                    continue
+                narr = s.get("narration_text") or ""
+                if sid in targets and narr.strip():
+                    narr = _clean_narration(narr)
+                    if corpus_sents and semantic_embedder.available:
+                        narr = self._dissolve_verbatim_copies(narr, corpus_sents)
+                    narr = _expand_acronyms(narr)
+                    narr = _enforce_narration_ceiling(narr)
+                    narr_by_id[sid] = narr
+
+        rebuilt = []
+        for s in script.shots:
+            narr = narr_by_id.get(s.shot_id)
+            if narr is not None:
+                s = s.model_copy(update={
+                    "narration_text": narr,
+                    "duration_estimate": max(42.0, round(len(narr.split()) / 2.2, 1)),
+                })
+            rebuilt.append(s)
+
+        return ScriptData(
+            title=script.title,
+            target_shots=len(rebuilt),
+            shots=rebuilt,
+            estimated_runtime_seconds=round(
+                sum(len(x.narration_text.split()) for x in rebuilt) / 150.0 * 60.0, 1),
+        )
+
+    def generate_outline(self, state: GlobalState) -> Optional[List[ShotBeat]]:
+        """Outline-first A/B path (Point 3). One cheap LLM call produces the 18
+        structural beats (act, beat_summary, facts_to_use, publisher, visual_type)
+        with NO prose. Validated deterministically before any narration is written,
+        so fact-assignment/temporal/source/coverage errors cost ~1 call instead of
+        full prose + MiniLM audit. Returns the validated outline, or None (caller
+        falls back to the monolithic path) on any failure."""
+        if not state.selected_topic or not self.llm_client.is_available():
+            return None
+        headline = state.selected_topic.headline
+        summary = (state.selected_topic.summary or "")
+        keyword_txt = ", ".join(state.selected_topic.keywords[:5])
+        facts_block = "\n".join(
+            f"- {f.headline}: {f.summary}" for f in (state.verified_facts or [])) or "No verified facts."
+        today = datetime.datetime.now(datetime.timezone.utc)
+        current_month_year = today.strftime("%B %Y")
+        prompt = (
+            "You are a documentary story planner. Design a 6-Act, 18-shot YouTube "
+            f"outline for topic: '{headline}'.\n"
+            f"SUMMARY: {summary}\nKEYWORDS: {keyword_txt}\n"
+            f"VERIFIED FACTS:\n{facts_block}\n"
+            "Acts: 1 Hook, 2 History/Origins, 3 Mechanics, 4 Real-World Impact, "
+            "5 Risks & Misconceptions, 6 Future Verdict — exactly 3 shots per act.\n"
+            "Rules:\n"
+            "- beat_summary: what this shot must accomplish (one clause).\n"
+            "- facts_to_use: 1-3 REAL facts above this shot must convey. Never invent.\n"
+            "- publisher: the single publication from the facts to attribute. NEVER a search tool.\n"
+            "- visual_type: standard_image | gif_meme | matplotlib_chart | svg_ticker. "
+            "Use matplotlib_chart ONLY for a shot whose facts carry numbers.\n"
+            "- NO ACRONYMS in beat_summary (spell them out).\n"
+            "Return ONLY JSON: {\"shots\": [{\"shot_id\": 1..18, \"act_index\": 1..6, "
+            "\"beat_summary\": \"...\", \"facts_to_use\": [\"...\"], \"publisher\": \"...\", "
+            "\"visual_type\": \"...\"}]}."
+        )
+        res = self.llm_client.generate_json(prompt, route="generate", thinking="low")
+        if not res or not isinstance(res.get("shots"), list):
+            return None
+        beats = []
+        for item in res["shots"]:
+            try:
+                beats.append(ShotBeat(
+                    shot_id=int(item.get("shot_id")),
+                    act_index=int(item.get("act_index")),
+                    beat_summary=str(item.get("beat_summary") or "").strip(),
+                    facts_to_use=[str(x) for x in (item.get("facts_to_use") or [])],
+                    publisher=str(item.get("publisher") or "").strip(),
+                    visual_type=VisualType(str(item.get("visual_type") or "standard_image")),
+                ))
+            except Exception:
+                continue
+        if len(beats) < 12:
+            return None
+        return self._validate_outline(beats, state)
+
+    def _validate_outline(self, beats: List[ShotBeat], state: GlobalState) -> Optional[List[ShotBeat]]:
+        """Deterministic outline validation. Returns the outline if sound, else
+        best-effort repairs it; returns None if still unsound (caller falls back
+        to the monolithic path so a bad plan never hard-fails the pipeline)."""
+        from collections import Counter
+        errs = []
+        if Counter(b.act_index for b in beats) != {1: 3, 2: 3, 3: 3, 4: 3, 5: 3, 6: 3}:
+            errs.append("act coverage != 3 shots/act")
+        for b in beats:
+            if not b.facts_to_use:
+                errs.append(f"beat {b.shot_id} has no grounded facts")
+            if b.publisher.lower().strip() in ("firecrawl", "tavily", "exa", "newsapi", "ddg", "duckduckgo"):
+                b.publisher = "Unattributed"
+                errs.append(f"beat {b.shot_id} publisher was a tool name (relabelled)")
+            beach = b.beat_summary or ""
+            if beach and re.search(r"\b[A-Z]{2,6}\b", beach):
+                b.beat_summary = _expand_acronyms(beach)
+        pubs = [b.publisher for b in beats if b.publisher]
+        if len(pubs) >= 2 and len(set(pubs)) < 2:
+            errs.append("source diversity: single attribution across all beats")
+        if errs:
+            logger.warning(
+                "SCRIPT_DESIGN",
+                f"Outline validation minor issues (continuing with best-effort repair): {errs}",
+                component="STORY_DESIGNER",
+            )
+        return beats if len(beats) >= 12 else None
+
+    def narrate_from_outline(self, outline: List[ShotBeat], state: GlobalState) -> Optional[ScriptData]:
+        """Narrate shot-per-beat against the validated outline (Point 3). Each act
+        is generated in one focused call with ONLY its beats + facts slices, so the
+        narrator paraphrases the assigned fact instead of copying the whole corpus.
+        Returns a ScriptData (identity + visual fields from the beats), or None."""
+        if not outline or not self.llm_client.is_available():
+            return None
+        acts = sorted({b.act_index for b in outline})
+        all_shots: List[ShotData] = []
+        today = datetime.datetime.now(datetime.timezone.utc)
+        current_month_year = today.strftime("%B %Y")
+        headline = state.selected_topic.headline
+        prev_act_narr = ""
+        for act in acts:
+            act_beats = [b for b in outline if b.act_index == act]
+            beat_json = [b.model_dump(mode="json") for b in act_beats]
+            prompt = (
+                "You are a documentary narrator. Write narration for this act of a "
+                f"6-Act infotainment script. Topic: '{headline}'. Period: {current_month_year}.\n"
+                "For each beat, write the stated fact in YOUR OWN words (85-105 words). "
+                "Paraphrase — never quote the fact verbatim. Cite the beat's publisher "
+                "conversationally ('As reported by X'). NO acronyms unless proper nouns "
+                "(NASA, IBM, NYSE, CNN). DO NOT repeat or paraphrase the previous act's "
+                "opening/closing.\n"
+                f"PREVIOUS ACT's final narration (continuity only, do not repeat):\n{prev_act_narr or '(none)'}\n\n"
+                f"BEATS TO NARRATE:\n{json.dumps(beat_json, ensure_ascii=False)}\n"
+                'Return ONLY JSON {"shots": [{"shot_id": <int>, "narration_text": "...", '
+                '"visual_prompt": "Cinematic 16:9 widescreen ..."}]}.'
+            )
+            res = self.llm_client.generate_json(prompt, route="generate", thinking="low")
+            narr_by_id = {}
+            if res and isinstance(res.get("shots"), list):
+                for s in res["shots"]:
+                    try:
+                        sid = int(s.get("shot_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    narr = _clean_narration(s.get("narration_text") or "")
+                    if narr.strip():
+                        narr = _enforce_narration_ceiling(_expand_acronyms(narr))
+                        narr_by_id[sid] = narr
+            for b in act_beats:
+                narr = narr_by_id.get(b.shot_id) or (b.beat_summary or "").strip()
+                if not narr:
+                    continue
+                visual = "Cinematic 16:9 widescreen, 8k photorealistic, dramatic lighting."
+                if b.visual_type == VisualType.MATPLOTLIB_CHART:
+                    visual = "Cinematic 16:9 widescreen dark-mode data chart cinematic."
+                all_shots.append(ShotData(
+                    shot_id=b.shot_id,
+                    act_index=b.act_index,
+                    narration_text=narr,
+                    visual_prompt=visual,
+                    visual_type=b.visual_type,
+                    duration_estimate=max(42.0, round(len(narr.split()) / 2.2, 1)),
+                ))
+            prev_act_narr = " ".join(s.narration_text for s in all_shots if s.act_index == act)[-600:]
+        if len(all_shots) < 12:
+            return None
+        total_words = sum(len(s.narration_text.split()) for s in all_shots)
+        return ScriptData(
+            title=f"The Hidden Truth Behind {_truncate_at_word(headline, 35)}... ({current_month_year})",
+            target_shots=len(all_shots),
+            shots=all_shots,
+            estimated_runtime_seconds=round(total_words / 150.0 * 60.0, 1),
+        )
 
     def _enforce_script_word_floor(self, script: ScriptData, state: GlobalState) -> ScriptData:
         """
@@ -1069,6 +1421,7 @@ class StoryDesignerAgent:
             result = self.llm_client.generate_json(
                 prompt,
                 "You craft concise, honest high-CTR YouTube titles. Return valid JSON only.",
+                route="generate",
             )
         except Exception:
             result = None
@@ -1137,7 +1490,37 @@ class StoryDesignerAgent:
         if not state.selected_topic:
             raise ValueError("Cannot generate script: state.selected_topic is None")
 
-        script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region, revision_violations=revision_violations, state=state)
+        # Outline-first A/B path (Point 3): validate the 18-shot structure + fact
+        # assignment cheaply BEFORE writing prose, then narrate per act against the
+        # beats. Opt-in via CSVG_OUTLINE_FIRST=1 (mirrors USE_SEMANTIC_GATES).
+        # Falls back silently to the monolithic path when the outline plan fails.
+        if os.getenv("CSVG_OUTLINE_FIRST", "").strip().lower() in ("1", "true", "yes"):
+            outline = self.generate_outline(state)
+            if outline:
+                outline_script = self.narrate_from_outline(outline, state)
+                if outline_script is not None:
+                    logger.info(
+                        "SCRIPT_DESIGN",
+                        "Outline-first path: validated beats -> per-act narration.",
+                        component="STORY_DESIGNER",
+                    )
+                    script = outline_script
+                else:
+                    logger.warning(
+                        "SCRIPT_DESIGN",
+                        "Outline-first narration failed; falling back to monolithic generation.",
+                        component="STORY_DESIGNER",
+                    )
+                    script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region, revision_violations=revision_violations, state=state)
+            else:
+                logger.warning(
+                    "SCRIPT_DESIGN",
+                    "Outline validation failed; falling back to monolithic generation.",
+                    component="STORY_DESIGNER",
+                )
+                script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region, revision_violations=revision_violations, state=state)
+        else:
+            script = self.generate_6act_script(state.selected_topic, state.verified_facts, region=region, revision_violations=revision_violations, state=state)
 
         # Clean RAG corpus sentence list (shared by the LLM polish pass, which is
         # told to restructure any flagged whole-sentence copies, and by the local
@@ -1174,6 +1557,19 @@ class StoryDesignerAgent:
             script.estimated_runtime_seconds = round(
                 sum(len(x.narration_text.split()) for x in script.shots) / 150.0 * 60.0, 1)
 
+        # Deterministic acronym expansion: narration must never ship unexplained
+        # shorthand ("AI", "US", "GDP", "IPO") — expand to the most appropriate
+        # full term based on context. Runs AFTER polish + dissolve so it is the
+        # final authority, regardless of what LLM sampling emitted. Expansion
+        # adds words, so re-enforce the per-shot ceiling so the Observer's
+        # "narration too long" hard gate can't trip.
+        for s in script.shots:
+            s.narration_text = _expand_acronyms(s.narration_text)
+        for s in script.shots:
+            s.narration_text = _enforce_narration_ceiling(s.narration_text)
+        script.estimated_runtime_seconds = round(
+            sum(len(x.narration_text.split()) for x in script.shots) / 150.0 * 60.0, 1)
+
         # Final residual junk scrub (idempotent): the polish pass and word-floor
         # re-padding can re-introduce markdown links / datelines / 'Retrieved'
         # citation tails / profane quoted fragments from raw corpus chunks. This
@@ -1193,7 +1589,7 @@ class StoryDesignerAgent:
         msg = A2AMessage(
             message_id=f"msg-{uuid.uuid4().hex[:8]}",
             sender=AgentRole.STORY_DESIGNER,
-            target=AgentRole.OBSERVER,
+            target=AgentRole.ORCHESTRATOR,
             intent=AgentIntent.GENERATE_SCRIPT,
             payload={
                 "script_title": script.title,
@@ -1204,6 +1600,7 @@ class StoryDesignerAgent:
                 "region": region,
                 "llm_mode": getattr(self, "last_llm_source", "FALLBACK_GROUNDED_TEMPLATE"),
             },
+            state_hash=compute_state_hash(state),
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
         return msg

@@ -105,6 +105,137 @@ def _line_snippet_text(line: str) -> str:
     parts = line.split("]:", 1)
     return parts[1].strip() if len(parts) > 1 else line
 
+
+def _crawler_item_to_dict(item) -> Dict[str, str]:
+    """Normalise one crawler result (a dict OR a VerifiedFact/ad-hoc object)
+    to a canonical {"title", "snippet", "url"} dict so the generic crawl loop
+    can label/format every source uniformly."""
+    if isinstance(item, dict):
+        return {
+            "title": str(item.get("title") or "").strip(),
+            "snippet": str(item.get("snippet") or item.get("content") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+        }
+    title = getattr(item, "headline", None) or getattr(item, "title", "") or ""
+    summary = getattr(item, "summary", None) or getattr(item, "snippet", "") or ""
+    url = getattr(item, "url", "") or ""
+    return {
+        "title": str(title).strip(),
+        "snippet": str(summary).strip(),
+        "url": str(url).strip(),
+    }
+
+
+_ACRONYM_SOURCE = frozenset({"bbc", "cnn", "nyt", "nbc", "abc", "cbs", "ap", "cnbc", "wapo"})
+
+_PUBLICATION_ALIASES = {
+    "apnews": "Associated Press",
+    "reuters": "Reuters",
+    "theguardian": "The Guardian",
+    "guardian": "The Guardian",
+    "nytimes": "The New York Times",
+    "wsj": "The Wall Street Journal",
+    "washingtonpost": "The Washington Post",
+    "wapo": "The Washington Post",
+    "economictimes": "The Economic Times",
+    "indiatimes": "The Economic Times",
+    "timesofindia": "The Times of India",
+    "hindustantimes": "Hindustan Times",
+    "bloomberg": "Bloomberg",
+    "forbes": "Forbes",
+    "fortune": "Fortune",
+    "entrepreneur": "Entrepreneur",
+    "techcrunch": "TechCrunch",
+    "wired": "Wired",
+    "arstechnica": "Ars Technica",
+    "theverge": "The Verge",
+    "verge": "The Verge",
+    "businessinsider": "Business Insider",
+    "barrons": "Barron's",
+    "cnbc": "CNBC",
+    "nbcnews": "NBC News",
+    "abcnews": "ABC News",
+    "cbsnews": "CBS News",
+    "bbc": "BBC",
+    "cnn": "CNN",
+    "statista": "Statista",
+    "wikipedia": "Wikipedia",
+    "mint": "Mint",
+    "livemint": "Mint",
+    "moneycontrol": "Moneycontrol",
+    "yahoo": "Yahoo Finance",
+}
+
+
+# ── RAG CRAWLER REGISTRY ─────────────────────────────────────────────────────
+# Every web-data source the RAG pack queries, declared ONCE here. Adding a new
+# crawler = write one `search_xxx_facts(query, max_results)` method that returns
+# a list of dicts {"title", "snippet", "url"} (or VerifiedFact-like objects),
+# then add a single entry to this registry. The generic crawl loop applies the
+# earlier production fixes automatically, so a new crawler can NEVER regress them:
+#   * `kind="news"`        -> bucket labelled with the REAL publisher derived
+#                             from the URL (_source_label), never the tool name.
+#   * `kind="terminology"` -> bucket labelled `[Terminology: ...]` (dictionary /
+#                             encyclopedia definitions for jargon/acronyms only,
+#                             never allowed to source a news claim).
+#   * Each entry's items still flow through the shared promo/social/dedup/
+#     on-topic/recent-historical filters below.
+# Tuple: (key, fallback_label, kind, max_results, fetch_method_name)
+_RAG_CRAWLERS = (
+    ("exa",       "Exa",       "news",        3, "fetch_exa_news"),
+    ("newsapi",   "NewsAPI",   "news",        2, "search_newsapi_facts"),
+    ("wikipedia", "Wikipedia", "terminology", 2, "search_wikipedia_facts"),
+    ("tavily",    "Tavily",    "news",        3, "search_tavily_facts"),
+    ("firecrawl", "Firecrawl", "news",        3, "search_firecrawl_facts"),
+)
+
+
+# Search-tool names that must NEVER surface as RAG bucket labels. Firecrawl,
+# Tavily, Exa, NewsAPI etc. are retrieval transport, not publications: if a
+# result URL can't be resolved to a real publisher, the bucket is labelled
+# UNATTRIBUTED so the story LLM has no tool name to echo into narration
+# ("according to insights from Firecrawl" class of leak).
+_TOOL_SOURCE_NAMES = frozenset({
+    "firecrawl", "tavily", "exa", "newsapi", "ddg", "duckduckgo", "wikipedia",
+})
+
+
+def _source_label(url: str, fallback: str = "") -> str:
+    """Derive a human-readable publication name from a result URL, e.g.
+    'https://fortune.com/2026/...' -> 'Fortune', 'https://www.entrepreneur.com/'
+    -> 'Entrepreneur'. RAG buckets are labelled with THIS (the actual publisher),
+    never with the search-tool name, so the story LLM cites 'Fortune' instead of
+    'Firecrawl'/'Tavily'/'Exa'. Return ``fallback`` when no URL is available."""
+    if not url:
+        return fallback
+    try:
+        netloc = urllib.parse.urlparse(url).netloc.lower()
+    except Exception:
+        return fallback
+    netloc = (netloc or "").split(":")[0]
+    for prefix in ("www.", "m.", "mobile.", "blog."):
+        if netloc.startswith(prefix):
+            netloc = netloc[len(prefix):]
+    labels = [p for p in netloc.split(".") if p]
+    if not labels:
+        return fallback
+    # Drop a ccTLD whose predecessor is a generic TLD slot (e.g. .co.uk, .com.au),
+    # then the remaining TLD; the label right before the TLD is the publisher.
+    if len(labels) >= 3 and labels[-1] in (
+        "uk", "au", "ca", "in", "nz", "za", "ie", "sg", "my", "co", "jp", "de", "fr"
+    ) and labels[-2] in ("co", "com", "org", "net", "gov", "ac", "edu"):
+        labels = labels[:-2]
+    if len(labels) >= 2:
+        labels = labels[:-1]
+    name = labels[-1] if labels else ""
+    name = re.sub(r"[^a-z0-9 ]", " ", name).strip()
+    name = re.sub(r"\s+", " ", name)
+    if name in _PUBLICATION_ALIASES:
+        return _PUBLICATION_ALIASES[name]
+    if name in _ACRONYM_SOURCE:
+        return name.upper()
+    return name.title() if name else fallback
+
 _YEAR_RE = re.compile(r'\b(20[0-2]\d)\b')
 _current_year_val = None
 
@@ -371,6 +502,23 @@ class RAGTopicRetriever:
 
         return results
 
+    def fetch_exa_news(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
+        """
+        Wrapper for the Exa semantic-search crawler so it matches the
+        search_*_facts() contract (returns {title, snippet, url} dicts). Exa
+        returns VerifiedFact objects via the external manager; normalise them
+        here so the generic crawl loop can label/format every source uniformly.
+        """
+        from src.engine.external_apis import external_api_manager
+        try:
+            return [
+                _crawler_item_to_dict(f)
+                for f in external_api_manager.fetch_exa_semantic_facts(query)
+            ]
+        except Exception as e:
+            print(f"[RAGRetriever] Exa query failed: {e}")
+            return []
+
     def search_newsapi_facts(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
         """
         Executes a NewsAPI query to retrieve structured global news snippets.
@@ -474,7 +622,12 @@ class RAGTopicRetriever:
             for it in items:
                 desc = it.get("description") or (it.get("metadata", {}) or {}).get("description", "")
                 title = it.get("title", "")
-                meta_url = (it.get("metadata", {}) or {}).get("url", "")
+                # Firecrawl /v1/search returns the canonical `url` at the TOP
+                # level; some responses nest it under metadata.url. Reading only
+                # metadata.url meant EVERY Firecrawl result was labelled
+                # '[Firecrawl: ...]' (empty url -> _source_label fallback) and
+                # the story LLM then recited the tool name as a citation.
+                meta_url = it.get("url") or (it.get("metadata", {}) or {}).get("url", "")
                 if desc and len(str(desc)) > 30 and not _is_social_source(meta_url, title, str(desc)):
                     out.append({"title": title, "snippet": str(desc), "url": meta_url})
             return out
@@ -689,9 +842,15 @@ class RAGTopicRetriever:
                 if src not in ("Verified Reports", "Verified Market Reports"):
                     on_topic_source_names.add(src)
             else:
-                m2 = re.search(r"^• \[([^\]]+)\]", line)
+                # '[Publisher: title]' -> the publisher label is everything before
+                # the ': title'. Terminology/encyclopedia buckets are definitions
+                # only (NOT news sources) and must not count toward source
+                # diversity, exactly as Wikipedia is no longer a news crawler.
+                m2 = re.search(r"^• \[([^\]\:]+)(?::[^\]]*)?\]", line)
                 if m2:
-                    on_topic_source_names.add(m2.group(1).strip())
+                    src = m2.group(1).strip()
+                    if src.lower() not in ("terminology", "encyclopedia", "wikipedia"):
+                        on_topic_source_names.add(src)
 
         total_corpus_words = sum(len(l.split()) for l in fact_lines)
 
@@ -836,65 +995,39 @@ class RAGTopicRetriever:
         retrieved_facts = []
         all_text_corpus = summary + " " + ground_truth_block
 
-        from src.engine.external_apis import external_api_manager
-
+        # Generic crawler loop: every source in _RAG_CRAWLERS is fetched,
+        # normalised, labelled, and appended with the same rules. A new crawler
+        # only needs its fetch method + one registry entry — it automatically
+        # inherits real-publisher labelling (news) vs terminology labelling,
+        # the promo/social/dedup filters, recency tagging, and on-topic ranking.
         for q in search_queries:
-            has_api_data = False
-            
-            # 1. Fetch from Exa AI (Neural Search)
-            try:
-                facts = external_api_manager.fetch_exa_semantic_facts(q)
-                if facts:
-                    for f in facts:
-                        retrieved_facts.append(f"• [Exa: {f.headline}]: {f.summary}")
-                        all_text_corpus += " " + f.summary
-                    has_api_data = True
-            except Exception as e:
-                print(f"[RAGRetriever] Exa query failed: {e}")
-
-            # 2. Fetch from NewsAPI (Global News)
-            try:
-                items = self.search_newsapi_facts(q, max_results=2)
-                if items:
-                    for item in items:
-                        retrieved_facts.append(f"• [NewsAPI: {item['title']}]: {item['snippet']}")
-                        all_text_corpus += " " + item['snippet']
-                    has_api_data = True
-            except Exception as e:
-                print(f"[RAGRetriever] NewsAPI query failed: {e}")
-
-            # 3. Fetch from Wikipedia (Academic Grounding)
-            try:
-                items = self.search_wikipedia_facts(q, max_results=2)
-                if items:
-                    for item in items:
-                        retrieved_facts.append(f"• [Wikipedia: {item['title']}]: {item['snippet']}")
-                        all_text_corpus += " " + item['snippet']
-                    has_api_data = True
-            except Exception as e:
-                print(f"[RAGRetriever] Wikipedia query failed: {e}")
-
-            # 4. Fetch from Tavily (clean AI/RAG search, ad-free)
-            try:
-                items = self.search_tavily_facts(q, max_results=3)
-                if items:
-                    for item in items:
-                        retrieved_facts.append(f"• [Tavily: {item['title']}]: {item['snippet']}")
-                        all_text_corpus += " " + item['snippet']
-                    has_api_data = True
-            except Exception as e:
-                print(f"[RAGRetriever] Tavily query failed: {e}")
-
-            # 5. Fetch from Firecrawl (clean crawl API, page-level snippets)
-            try:
-                items = self.search_firecrawl_facts(q, max_results=3)
-                if items:
-                    for item in items:
-                        retrieved_facts.append(f"• [Firecrawl: {item['title']}]: {item['snippet']}")
-                        all_text_corpus += " " + item['snippet']
-                    has_api_data = True
-            except Exception as e:
-                print(f"[RAGRetriever] Firecrawl query failed: {e}")
+            for key, label, kind, max_results, fn_name in _RAG_CRAWLERS:
+                try:
+                    raw = getattr(self, fn_name)(q, max_results) if max_results else getattr(self, fn_name)(q)
+                except Exception as e:
+                    print(f"[RAGRetriever] {label} query failed: {e}")
+                    continue
+                for item in raw or []:
+                    it = _crawler_item_to_dict(item)
+                    if not it["snippet"]:
+                        continue
+                    if kind == "terminology":
+                        bucket = f"[Terminology: {it['title'] or label}]"
+                    else:
+                        src = _source_label(it["url"], label) or label
+                        # Never let the retrieval tool itself become the source
+                        # label. If the URL couldn't be resolved to a real
+                        # publisher, keep the fact but mark it unattributed so
+                        # the story LLM can't echo 'Firecrawl'/'Tavily' into the
+                        # narration as a citation (previously fed raw tool tags
+                        # into `full_rag_context_text`, re-poisoning every
+                        # revision of the script and hard-aborting the Observer).
+                        if (src or "").lower().strip() in _TOOL_SOURCE_NAMES:
+                            src = "Unattributed"
+                        bucket = f"[{src}: {it['title'] or 'report'}]"
+                    line = f"• {bucket}: {it['snippet']}"
+                    retrieved_facts.append(line)
+                    all_text_corpus += " " + it["snippet"]
 
             # NOTE: DuckDuckGo HTML scraping removed — ad-heavy markup corrupts RAG.
 
@@ -1066,6 +1199,10 @@ class RAGTopicRetriever:
                 f"SUMMARY: {summary}\n\n"
                 f"TRUMORGPT VERIFICATION: {fact_msg} (Confidence: {confidence})\n\n"
                 f"VERIFIED GROUND TRUTH FACTS:\n{ground_truth_block}\n\n"
+                f"TERMINOLOGY REFERENCE (definitions only — from a dictionary/encyclopedia, "
+                f"NOT a news source; use ONLY to expand jargon or acronyms in the narration, "
+                f"never to source a news claim):\n"
+                f"{'\\n'.join(l for l in rag_retrieved_block.splitlines() if l.startswith('• [Terminology')) or 'No terminology entries.'}\n\n"
                 f"STORY TELLING RULE — CURRENT vs HISTORICAL:\n"
                 f"Today is {_current_year()}. Treat any source tagged '(historical: YYYY)' as "
                 f"PAST CONTEXT ONLY. Never present older-dated data as a development happening "

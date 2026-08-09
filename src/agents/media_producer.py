@@ -5,7 +5,7 @@ import datetime
 import asyncio
 from typing import Dict, Any, Optional, List, Tuple
 from src.schemas.state import GlobalState, ScriptData, AssetPaths, VisualType
-from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent
+from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
 from mcp_servers.audio_edge.server import synthesize_tts, align_subtitles_whisper, sanitize_tts_text, TTSRequest, WhisperRequest
 from mcp_servers.media_cloud.server import (
     generate_flux_image, apply_ken_burns_motion, assemble_ffmpeg_timeline,
@@ -21,6 +21,38 @@ from src.agents.story_designer import extract_numeric_chart_spec
 # All other standard-image shots use FREE assets (Pixabay/synthetic) to stay
 # within the monthly AI image budget (media_budget, ~INR 2000 / month).
 PREMIUM_SHOT_IDS = {1, 8, 12, 15}
+
+# ── Persistent visual cache (fal/Replicate images) ──────────────────────────
+# fal-generated images are the only paid per-shot asset, and they are perfectly
+# reproducible: the SAME enriched visual_prompt always yields a fit hero image.
+# Cache every paid generation keyed on a sha256 of the prompt so re-renders
+# (proofing, narration-only fixes) reuse the already-paid fal image instead of
+# spending again. Store under the repo `logs/visual_cache/` (repo-local,
+# gitignored) so it survives reboots, unlike `/tmp/csvg_media`. Disable with
+# CSVG_VISUAL_CACHE=0.
+_VISUAL_CACHE_ENABLED = os.getenv("CSVG_VISUAL_CACHE", "1").strip().lower() not in ("0", "false", "no")
+import hashlib as _hashlib
+
+
+def _repo_root() -> str:
+    """repo root = <src>/agents/media_producer.py -> up 3 dirs."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _visual_cache_dir() -> str:
+    return os.path.join(_repo_root(), "logs", "visual_cache")
+
+
+def _visual_cache_key(prompt: str) -> str:
+    return _hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()[:24]
+
+
+# Per-run output artifacts are correlated to the pipeline execution id so the
+# rendered master video maps back to the run that produced it (the old fixed
+# "final_video_1080p.mp4" collided across runs and was wiped with /tmp). Set
+# CSVG_ARCHIVE_FINAL=1 to also copy {final mp4, thumbnail} into
+# logs/final_videos/<pipeline_id>/ so masters survive /tmp cleanup.
+_ARCHIVE_FINAL = os.getenv("CSVG_ARCHIVE_FINAL", "0").strip().lower() in ("1", "true", "yes")
 
 # Sync-quality knobs: the final timeline is driven by the MEASURED narration
 # audio duration, not the script-time words/2.2 estimate. A trailing hold gives a
@@ -401,6 +433,20 @@ class MediaProducerAgent:
         if not script:
             raise ValueError("Media production failed: state.script_data is None")
 
+        # ══ Execution-correlated media output ═══════════════════════════════
+        # Every run writes into its OWN subdirectory keyed by the pipeline id so
+        # artifacts (PNGs / WAVs / MP4s / final master / thumbnail) never collide
+        # across runs and can be mapped back to the execution that produced them.
+        # Fall back to the classic shared storage dir when no pipeline id exists
+        # (smoke tests / synthetic runs), preserving old behaviour.
+        exec_id = (getattr(state, "pipeline_id", "") or "").strip()
+        if exec_id:
+            self.storage_dir = os.path.join(_repo_root(), "logs", "media", exec_id)
+            os.makedirs(self.storage_dir, exist_ok=True)
+        else:
+            os.makedirs(self.storage_dir, exist_ok=True)
+        os.makedirs(_visual_cache_dir(), exist_ok=True)
+
         asset_paths = AssetPaths()
         asset_paths.storage_dir = self.storage_dir
 
@@ -698,23 +744,44 @@ class MediaProducerAgent:
             # free stock (Pixabay/Pexels) is used only on a Flux failure or when the AI
             # budget is exhausted. Cost is ~$0.05/run for 16 imgs, well under the cap.
             if not is_specialized:
-                if dummy_frames:
-                    from mcp_servers.media_cloud.server import generate_synthetic_png
-                    generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
-                else:
-                    use_paid = media_budget.charge_paid_image()
-                    if use_paid:
-                        run_budget.record_visual()
-                        try:
-                            await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
-                        except Exception as e:
-                            print(f"Warning: Visual Generation Error on shot {shot.shot_id}: {e}. Falling back to free assets.")
+                # ── Visual cache: reuse an already-paid fal/Replicate image for
+                # the SAME enriched prompt, so re-renders / narration-only fixes
+                # never spend fal again. Cache is keyed on the exact prompt the
+                # image engine sees (enriched = base prompt + act + shot id).
+                found_cache = False
+                if _VISUAL_CACHE_ENABLED:
+                    _ck = _visual_cache_key(visual_prompt)
+                    _cp = os.path.join(_visual_cache_dir(), f"{_ck}.png")
+                    if os.path.exists(_cp) and os.path.getsize(_cp) > 5000:
+                        import shutil as _sh
+                        _sh.copy2(_cp, img_path)
+                        print(f"[MediaProducer] Visual cache HIT {shot_key} (prompt {_ck[:10]}): reused paid image → {img_path}")
+                        found_cache = True
+                if not found_cache:
+                    if dummy_frames:
+                        from mcp_servers.media_cloud.server import generate_synthetic_png
+                        generate_synthetic_png(img_path, title=f"SHOT {shot.shot_id}: {raw_visual_prompt[:40]}")
+                    else:
+                        use_paid = media_budget.charge_paid_image()
+                        if use_paid:
+                            run_budget.record_visual()
+                            try:
+                                await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
+                                # Persist the paid image for later reuse.
+                                if _VISUAL_CACHE_ENABLED and os.path.exists(img_path) and os.path.getsize(img_path) > 5000:
+                                    _ck = _visual_cache_key(visual_prompt)
+                                    _cp = os.path.join(_visual_cache_dir(), f"{_ck}.png")
+                                    import shutil as _sh2
+                                    _sh2.copy2(img_path, _cp)
+                                    print(f"[MediaProducer] Visual cache STORE {shot_key} (prompt {_ck[:10]}) → {_cp}")
+                            except Exception as e:
+                                print(f"Warning: Visual Generation Error on shot {shot.shot_id}: {e}. Falling back to free assets.")
+                                if _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path, anchors=topic_anchors):
+                                    is_specialized = True
+                        else:
+                            print(f"[MediaProducer] AI budget saved/exhausted; free asset for shot {shot.shot_id}.")
                             if _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path, anchors=topic_anchors):
                                 is_specialized = True
-                    else:
-                        print(f"[MediaProducer] AI budget saved/exhausted; free asset for shot {shot.shot_id}.")
-                        if _generate_free_visual(shot, raw_visual_prompt, img_path, mp4_path, anchors=topic_anchors):
-                            is_specialized = True
 
                 # Outro static text overlay if this is the final shot in the script
                 is_last_shot = (shot.shot_id == len(script.shots))
@@ -821,8 +888,10 @@ class MediaProducerAgent:
         merge_ass_subtitle_files(ass_paths, shot_durs, master_sub_path, crossfade=crossfade)
         print(f"[MediaProducer] Master subtitle offsets (measured {', crossfade='+str(crossfade)+'s' if crossfade>0 else ''}, seconds): {[round(t, 2) for t in shot_durs]}")
 
-        # Assemble Final Timeline
-        final_video_path = os.path.join(self.storage_dir, "final_video_1080p.mp4")
+        # Assemble Final Timeline — filename correlated to the execution so a
+        # given master always maps back to the run that produced it.
+        exec_suffix = (getattr(state, "pipeline_id", "") or "csgv").strip() or "csgv"
+        final_video_path = os.path.join(self.storage_dir, f"final_video_{exec_suffix}.mp4")
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         bgm_source_path = os.path.join(project_root, "resources", "bgm.mp3")
         bgm_final_path = os.path.join(self.storage_dir, "bgm.mp3")
@@ -869,7 +938,7 @@ class MediaProducerAgent:
         # Generate dynamic widescreen high-CTR Thumbnail (uses the CTR-optimized brief
         # for the text, and the hero shot's theme-matched visual prompt for the art so
         # the background matches the story's subject instead of the raw CTR text).
-        thumbnail_path = os.path.join(self.storage_dir, "thumbnail.png")
+        thumbnail_path = os.path.join(self.storage_dir, f"thumbnail_{exec_suffix}.png")
         try:
             from mcp_servers.media_cloud.server import ThumbnailRequest, generate_thumbnail
             brief = (
@@ -891,6 +960,21 @@ class MediaProducerAgent:
             print(f"Warning: Thumbnail generation failed: {thumb_err}")
 
         asset_paths.final_video = final_video_path
+
+        # Optional long-term archive: copy final mp4 + thumbnail into
+        # logs/final_videos/<exec_id>/ so masters survive /tmp cleanup and
+        # correlate to the run. Gitignored (logs/).
+        if _ARCHIVE_FINAL and os.path.exists(final_video_path):
+            try:
+                _archive_dir = os.path.join(_repo_root(), "logs", "final_videos", exec_suffix)
+                os.makedirs(_archive_dir, exist_ok=True)
+                import shutil as _sh_arch
+                _sh_arch.copy2(final_video_path, os.path.join(_archive_dir, "final_video.mp4"))
+                if os.path.exists(thumbnail_path):
+                    _sh_arch.copy2(thumbnail_path, os.path.join(_archive_dir, "thumbnail.png"))
+                print(f"[MediaProducer] Archived final artifacts → {_archive_dir}")
+            except Exception as arch_err:
+                print(f"Warning: Final archive copy failed: {arch_err}")
 
         # Generate vertical Shorts clips (free ffmpeg) to drive growth toward YPP
         try:
@@ -1087,6 +1171,7 @@ class MediaProducerAgent:
                 "audio_shot_count": len(assets.audio),
                 "visual_shot_count": len(assets.visuals)
             },
+            state_hash=compute_state_hash(state),
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
         return msg

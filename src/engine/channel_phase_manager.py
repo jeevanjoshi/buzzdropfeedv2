@@ -47,7 +47,7 @@ SLOT_NICHE_MAP = {
     0: {"niche": "Technology & Artificial Intelligence", "audience_type": "tech"},
     1: {"niche": "Personal Finance & Investing",         "audience_type": "investor"},
     2: {"niche": "Business & Entrepreneurship",          "audience_type": "business"},
-    3: {"niche": "Health & Science",                     "audience_type": "health"},
+    3: {"niche": "Space & Scientific Innovation",        "audience_type": "space"},
 }
 
 

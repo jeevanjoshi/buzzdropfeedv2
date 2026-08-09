@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import uuid
 import copy
@@ -19,6 +20,24 @@ from src.engine.rag_retriever import rag_retriever
 from src.engine.logger import logger
 from src.engine.tracer import tracer
 from src.engine.run_budget import run_budget
+
+
+# Violation strings embed "Shot #N" deterministically (observer.py). Split a
+# violation list into per-shot buckets + global (shot-agnostic) violations so the
+# revision loop can repair ONLY the failing shots (Point 2 surgical revision).
+_RE_SHOT_ID = re.compile(r"Shot #(\d+)")
+
+
+def _bucket_violations(violations: List[str]) -> Tuple[Dict[int, List[str]], List[str]]:
+    by_shot: Dict[int, List[str]] = {}
+    global_v: List[str] = []
+    for v in violations or []:
+        m = _RE_SHOT_ID.search(v or "")
+        if m:
+            by_shot.setdefault(int(m.group(1)), []).append(v)
+        else:
+            global_v.append(v)
+    return by_shot, global_v
 
 
 class OrchestratorAgent:
@@ -281,16 +300,20 @@ class OrchestratorAgent:
                     )
                     tracer.record_step(state, "SCRIPT_REVISION_REQUIRED", message=msg_obs, status="WARNING")
 
-                    # Bounded revision loop: retry StoryDesigner with corrective feedback
-                    # up to MAX_REVISIONS times before giving up. Each round re-audits and
-                    # re-checks quality so genuinely stubborn drafts don't abort the run
-                    # after a single retry, while still bounding wasted LLM spend.
+                    # Bounded revision loop: repair ONLY the violating shots via
+                    # the Observer's REVISE_SCRIPT message (Point 2/5). Surgical,
+                    # never full re-generation: non-failing shots stay bit-identical,
+                    # so the violation count converges instead of growing (6→13→15).
+                    # Early-exits when hard violations don't strictly decrease
+                    # (that means the corpus/instructions are the problem, not the
+                    # draft), bounding wasted LLM spend.
                     MAX_REVISIONS = 3
                     revision_ok = False
                     last_violations: List[str] = []
                     last_quality_error: Optional[str] = None
                     best_script = None
-                    best_script_score = -1.0
+                    best_script_key = (10**9, -1.0)  # (hard_count, -quality_score)
+                    prev_hard: Optional[int] = None
                     for attempt in range(1, MAX_REVISIONS + 1):
                         violations = []
                         if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
@@ -303,12 +326,35 @@ class OrchestratorAgent:
                             f"Revision attempt {attempt}/{MAX_REVISIONS} with {len(violations)} violation(s).",
                             pipeline_id=p_id, component="OBSERVER"
                         )
-                        msg_script = self.story_designer.process(state, revision_violations=violations)
-                        # Keep the highest-scoring draft across revisions (revisions can
-                        # fix one nit but regress elsewhere; score = paraphrase diversity).
+                        by_shot, global_v = _bucket_violations(violations)
+                        # Dispatch the REVISE_SCRIPT message for real: the fix is
+                        # driven by the Observer's message (with state_hash) rather
+                        # than a second ad-hoc generation path.
+                        if by_shot:
+                            repaired = self.story_designer.repair_shots(
+                                state.script_data, state, by_shot, global_v, msg_obs=msg_obs
+                            )
+                            if repaired is not None:
+                                state.script_data = repaired
+                        elif global_v:
+                            # Only script-wide issues remain (no shot-specific nits):
+                            # the existing fact-preserving polish pass repairs prose
+                            # across shots without touching identities.
+                            _topic = state.selected_topic
+                            polished = self.story_designer._polish_script(
+                                state.script_data,
+                                _topic.headline if _topic else state.script_data.title,
+                                getattr(_topic, "niche_category", "") if _topic else "",
+                            )
+                            if polished is not None:
+                                state.script_data = polished
+                        # Keep the BEST draft: fewest hard violations, then highest
+                        # paraphrase-diversity (was diversity-only).
+                        hard_now = [v for v in violations if not is_soft_violation(v)]
                         _draft_score = observer_quality_score(state.script_data)
-                        if _draft_score > best_script_score:
-                            best_script_score = _draft_score
+                        _cur_key = (len(hard_now), -_draft_score)
+                        if _cur_key < best_script_key:
+                            best_script_key = _cur_key
                             best_script = copy.deepcopy(state.script_data)
                         msg_obs = self.observer.process(state)
                         quality_pass, quality_error = run_script_quality_checks()
@@ -319,6 +365,19 @@ class OrchestratorAgent:
                         if msg_obs.intent != AgentIntent.REVISE_SCRIPT and quality_pass:
                             revision_ok = True
                             break
+
+                        # Early exit: a straight/rising hard-violation count across
+                        # attempts means the draft genuinely can't improve (corpus
+                        # poison, contradictory instructions) — stop burning calls.
+                        if prev_hard is not None and len(hard_now) >= prev_hard:
+                            logger.warning(
+                                "PHASE_2_OBSERVER_AUDIT",
+                                f"Hard violations non-decreasing ({prev_hard} -> {len(hard_now)}); "
+                                f"aborting revision loop after {attempt} attempt(s).",
+                                pipeline_id=p_id, component="OBSERVER"
+                            )
+                            break
+                        prev_hard = len(hard_now)
 
                     if not revision_ok:
                         # Soft approval: if the only remaining Observer violations are
@@ -337,7 +396,7 @@ class OrchestratorAgent:
                             logger.warning(
                                 "PHASE_2_OBSERVER_AUDIT",
                                 f"Soft approval: {len(remaining)} style-only violation(s) after {MAX_REVISIONS} "
-                                f"revisions; accepting best-scored draft (score {best_script_score:.3f}). "
+                                f"revisions; accepting best draft (hard={best_script_key[0]}, score {-best_script_key[1]:.3f}). "
                                 f"Remaining: {remaining}",
                                 pipeline_id=p_id, component="OBSERVER"
                             )

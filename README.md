@@ -64,7 +64,7 @@ The pipeline was hardened, made quota-resilient, and revenue-optimized across al
 - **Real scoring** — TVS from feed recency + cross-feed coverage; SDI from real sentiment.
 - **Real competitor demand** via YouTube Data API niche video-ID pools + batch stats (3-key rotation + daily quota budget).
 - **Net-RPM recalibrated** to Q2 2026 US/UK/CA/AU benchmarks + locale & seasonal multipliers.
-- **High-value niches routed:** Finance, Enterprise-AI/Tech, Health, **Legal**, **Real Estate** (high-RPM preferred even in GROWTH).
+- **High-value niches routed:** Enterprise-AI/Tech, **Finance**, **Finance-Education** (concepts only, highest CPM), **Science**, **Space**, **History**, and **Real Estate** (high-RPM preferred even in GROWTH). Legal niche removed; Health demoted to a low-RPM wellness/lifestyle tag. **YMYL medical content** (drugs, vaccines, cancer, FDA, clinical trials) is **hard-blocked** — never auto-produced unattended.
 
 ### Budget & Monetization
 - **AI budget guard** (~₹2000/mo images): paid Flux limited to hero shots, free assets elsewhere, all-or-nothing economy switch.
@@ -150,7 +150,7 @@ The system skips low-CPM entertainment/gossip feeds and routes exclusively to hi
 | **V1** | Personal Finance & Investing | **$10–$25** | 07:00 IST | US night / UK & EU morning |
 | **V2** | Technology & Artificial Intelligence | **$10–$22** | 12:00 IST | US East morning |
 | **V3** | Business & Entrepreneurship | **$8–$20** | 16:00 IST | US West morning |
-| **V4** | Health & Future Science | **$8–$18** | 20:00 IST | US Primetime |
+| **V4** | Space & Scientific Innovation | **$8–$18** | 20:00 IST | US Primetime |
 
 ### Revenue Calculation Formula
 
@@ -217,6 +217,9 @@ Core configuration lives in `.env` (gitignored). Keys used by the pipeline:
 | `FAL_KEY` / `REPLICATE_API_TOKEN` | Image generation (Fal primary, Replicate fallback) |
 | `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` / `NEWSAPI_KEY` / `EXA_API_KEY` | RAG retrieval sources |
 | `AUDIO_EDGE_URL` | Edge TTS service endpoint |
+| `TOOL_TOPIC_SYNTHESIS` | Enable narrow tool-topic synthesis (default `1`; `0` disables) |
+| `TOOL_TOPIC_MAX` | Max LLM-synthesized tool topics per run (default 4) |
+| `OPPORTUNITY_MIN_SCORE` | Views-per-competitor hard gate floor (default 0.5) — synthetic tool topics below it are culled |
 
 ---
 
@@ -253,9 +256,11 @@ python3 main.py --global
 # Offline Dry-Run Mode (Uses local synthetic media generators for zero-cost testing)
 python3 main.py --offline
 
-# Run full automated test suite (single hermetic smoke test)
+# Run the single hermetic end-to-end test (real orchestrator, real StoryDesigner
+# + Observer, FakeLLM + boundary stubs only)
 python3 run_tests.py
-#   -> tests/test_smoke.py: POSITIVE/NEGATIVE/EDGE end-to-end pipeline cases.
+#   -> tests/test_hermetic_e2e.py: happy path through publish, surgical per-shot
+#      revision (state_hash), stale-REVISE rejection, outline-first, routing.
 #      No live/network calls, no Raspberry Pi interaction, no media generation.
 #      Safe to run without .env or any services.
 ```
@@ -276,8 +281,18 @@ python3 run_tests.py
 | `--dummy-frames` / `--dummy-frame` | Synthetic visuals, skips fal/Replicate | `python3 main.py --global --dummy-frames` |
 | `--renderer` | `ffmpeg` (default) or `moviepy` | `python3 main.py --global --renderer moviepy` |
 | `--crossfade` | Crossfade seconds (float) | `python3 main.py --global --crossfade 1.0` |
+| `--tail` | Video-only hold after each shot's narration, seconds (float, default 1.2 from `CSVG_PAD_AFTER_NARRATION`; 0 = cut on narration end) | `python3 main.py --global --tail 1.5` |
 | `--resume` | Resume from a checkpoint `logs/state_<id>.json` | `python3 main.py --resume csvg-exec-20260805-185905` |
 | `--rag` | **A/B switch:** `grounded` uses the Google Search grounding research pass; anything else uses the 5-scraper RAG path | `python3 main.py --global --rag grounded` |
+
+> **Narrow tool-topic synthesis (default on, `TOOL_TOPIC_SYNTHESIS=1`):** after RSS
+> ingestion an LLM pass proposes evergreen, search-demand topics news never
+> surfaces — `"[Tool A] vs [Tool B] for [task]"`, `"How to [task] using [AI tool]"`,
+> individual tool deep-dives, enterprise/developer tooling comparisons (`TOOL_TOPIC_MAX`,
+> default 4). Each proposal is precision-measured on its exact `demand_query`
+> (`precise_topic_demand`); a synthetic topic that is **unmeasured** or measures
+> below `OPPORTUNITY_MIN_SCORE` (0.5) is **culled** (no RSS "presumption of
+> relevance") — only measured, floor-clearing synthetics enter TOPSIS.
 
 #### `run_production.sh` flags
 
@@ -290,10 +305,11 @@ python3 run_tests.py
 | `--rag` | Same A/B switch as `main.py` (survives the detach) | `./run_production.sh --rag grounded` |
 | `--renderer` | Survives the detach | `./run_production.sh --renderer moviepy` |
 | `--crossfade` | Survives the detach | `./run_production.sh --crossfade 1.0` |
+| `--tail` | Survives the detach | `./run_production.sh --tail 1.5` |
 | `--resume` | **Not user-passed** — auto from latest `logs/state_*.json` when it did not reach `PUBLISHED_SUCCESS` (y/N, 30s default N) | *(auto via prompt)* |
 
 > ⚠️ In detaching mode `run_production.sh` only forwards
-> `--no-detach --resume --renderer --crossfade --rag` to the pipeline. Flags such
+> `--no-detach --resume --renderer --crossfade --tail --rag` to the pipeline. Flags such
 > as `--till-upload`, `--offline`, `--india`, or `--dummy-frames` are **dropped**
 > unless you use `--no-detach`. Example:
 > `./run_production.sh --no-detach --rag grounded --till-upload`.

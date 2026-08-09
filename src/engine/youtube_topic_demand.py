@@ -12,12 +12,14 @@ from src.engine.run_budget import run_budget
 # stats (VideoBatchGetStats metric).
 _NICHE_SEED = {
     "Personal Finance & Investing": "investing personal finance stock market news",
+    "Personal Finance Education": "personal finance education how to invest explained",
     "Global Economics & Finance": "global economy finance markets news",
     "Technology & Artificial Intelligence": "artificial intelligence technology companies news",
     "Business & Entrepreneurship": "business startups entrepreneurship news",
     "Health & Science": "health science research news",
-    "Health & Wellness": "health wellness fitness news",
-    "Legal & Law": "legal law court cases news",
+    "Health & Wellness": "wellness fitness lifestyle news",
+    "Science & Innovation": "science innovation research news",
+    "History & Documentary": "history documentary ancient civilizations explained",
     "Real Estate": "real estate housing market news",
     "Space & Scientific Innovation": "space exploration nasa science news",
     "Geopolitics & World Affairs": "geopolitics world affairs international news",

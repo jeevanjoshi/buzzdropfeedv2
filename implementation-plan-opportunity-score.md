@@ -75,7 +75,7 @@ At rag_retriever.py:847, run the built `retrieved_facts` lines through `_is_soci
 
 ### C4. Verify
 - Hermetic unit test: fake search result with `reddit.com` URL, a bare "r/wallstreetbets" title, `medium.com/@x`, and a genuine news domain → assert social excluded, news kept.
-- `python run_tests.py` + `python tests/test_smoke.py`; live `--rag scraper` and `--rag hybrid`/`--rag grounded` runs to confirm corpus carries no social sources.
+- `python run_tests.py` (single hermetic E2E: `tests/test_hermetic_e2e.py`); live `--rag scraper` and `--rag hybrid`/`--rag grounded` runs to confirm corpus carries no social sources.
 
 ## D. Doc rewrite — `ai-youtube-2000usd-plan.md`
 - Drop **ElevenLabs** (§4.10, §5) → free Kokoro TTS on Pi (`audio_edge`).

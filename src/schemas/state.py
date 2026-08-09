@@ -35,7 +35,7 @@ class RevenueForecast(BaseModel):
     midroll_multiplier: float = 0.0
     base_ad_revenue_usd: float = 0.0
     total_expected_revenue_usd: float = 0.0
-    audience_type: str = ""    # "investor" | "tech" | "health" | "business" | "blocked"
+    audience_type: str = ""    # "investor" | "finance_edu" | "tech" | "business" | "health" | "science" | "space" | "history" | "blocked"
     niche_category: str = ""
 
 
@@ -66,7 +66,7 @@ class TopicCandidate(BaseModel):
     sat_score: float = Field(..., description="Market Saturation Penalty")
     topsis_score: Optional[float] = Field(None, description="TOPSIS Relative Closeness Score (C_i*)")
     # Phase-aware audience classification added by RSS ingestion layer
-    audience_type: str = Field(default="general", description="investor|tech|health|business|blocked")
+    audience_type: str = Field(default="general", description="investor|finance_edu|tech|business|health|science|space|history|real_estate|general|blocked")
     niche_category: str = Field(default="Technology & Artificial Intelligence", description="High-RPM niche label")
     # Real competitor view-demand data (YouTube Data API) when measured, else 0 (unknown)
     competitor_30d_avg_views: float = Field(default=0.0, description="Avg competitor 30-day views for this topic (0 = not measured)")
@@ -74,6 +74,9 @@ class TopicCandidate(BaseModel):
     # A log-tamed [0, 1] measure of how much attention each competing video claims. 0 = not measured.
     competing_video_count: float = Field(default=0.0, description="Estimated # of competing videos on this topic (0 = not measured)")
     opportunity_score: float = Field(default=0.0, description="Views-per-competitor opportunity = competitor_30d_avg_views / max(1, competing_video_count)")
+    # Narrow query used to measure precise per-candidate demand (LLM-synthesized
+    # tool topics carry the exact search phrase; RSS candidates leave it empty).
+    demand_query: str = Field(default="", description="Exact narrow YouTube search phrase for precise demand measurement")
 
 
 from enum import Enum
@@ -83,6 +86,19 @@ class VisualType(str, Enum):
     GIF_MEME = "gif_meme"                  # Reaction meme search from GIPHY/Tenor
     MATPLOTLIB_CHART = "matplotlib_chart"  # Dynamic dark-mode line/bar chart
     SVG_TICKER = "svg_ticker"              # Glowing stock ticker/counter
+
+
+class ShotBeat(BaseModel):
+    """Structural outline node for the 'outline-first' A/B path (Point 3).
+    Validated deterministically BEFORE any prose is generated, so fact/temporal/
+    source/coverage errors are caught cheaply instead of after full prose + audit."""
+    shot_id: int
+    act_index: int = Field(..., ge=1, le=6, description="Act 1 to 6")
+    beat_summary: str = Field(..., description="What this shot must accomplish")
+    facts_to_use: List[str] = Field(default_factory=list, description="Fact text/id slices the shot must convey")
+    publisher: str = Field(default="", description="The publication to attribute (never a tool name)")
+    visual_type: VisualType = Field(default=VisualType.STANDARD_IMAGE)
+    chart_notes: Optional[str] = Field(default=None, description="Chart spec notes for stat shots")
 
 class ShotData(BaseModel):
     shot_id: int
