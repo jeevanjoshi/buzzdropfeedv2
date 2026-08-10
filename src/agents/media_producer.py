@@ -81,6 +81,155 @@ def _has_numeric_claim(narration: str, min_matches: int = 2) -> bool:
     return bool(narration) and len(_NUMERIC_CLAIM_RE.findall(narration)) >= min_matches
 
 
+# ── Company-aware ticker resolution ──────────────────────────────────────────
+# Live stock tickers/charts must show the ACTUAL company the story is about, not
+# a generic index fallback. ``_pick_symbol`` scans the topic's keywords, headline
+# and summary against these brand aliases before falling back to the default.
+_COMPANY_TICKER_MAP = {
+    "meta": "META", "facebook": "META", "instagram": "META", "whatsapp": "META", "zuckerberg": "META",
+    "google": "GOOGL", "alphabet": "GOOGL",
+    "microsoft": "MSFT", "nadella": "MSFT", "windows": "MSFT", "copilot": "MSFT",
+    "apple": "AAPL", "iphone": "AAPL", "tim cook": "AAPL",
+    "amazon": "AMZN", "bezos": "AMZN", "aws": "AMZN",
+    "netflix": "NFLX",
+    "nvidia": "NVDA", "jensen huang": "NVDA",
+    "amd": "AMD", "intel": "INTC",
+    "tesla": "TSLA", "spacex": "TSLA",
+    "byd": "BYDDY",
+    "reliance": "RELIANCE.NS", "mukesh ambani": "RELIANCE.NS",
+    "tata motors": "TTM", "tata": "TTM",
+    "infosys": "INFY", "wipro": "WIPRO.NS", "tcs": "TCS.NS",
+    "hdfc": "HDFCBANK.NS", "htdfc": "HDFCBANK.NS", "icici": "ICICIBANK.NS",
+    "sbi": "SBIN.NS", "state bank of india": "SBIN.NS",
+}
+
+# Famous NON-public companies: a stock ticker/chart for these should NOT fall
+# back to a real index quote (the numbers would be meaningless/wrong). Renders
+# are expected to use narration-grounded figures instead.
+_PRIVATE_COMPANIES = {
+    "openai", "anthropic", "deepmind", "xai", "spacex", "stripe",
+    "databricks", "sambanova", "mistral", "sierra", "globe",
+}
+
+# Human-readable company names for clean on-screen ticker/chart titles (never
+# the raw cinematic prompt).
+_TICKER_COMPANY_NAMES = {
+    "META": "META PLATFORMS", "GOOGL": "ALPHABET", "MSFT": "MICROSOFT",
+    "AAPL": "APPLE", "AMZN": "AMAZON", "NFLX": "NETFLIX", "NVDA": "NVIDIA",
+    "AMD": "ADVANCED MICRO DEVICES", "INTC": "INTEL", "TSLA": "TESLA",
+    "BYDDY": "BYD", "RELIANCE.NS": "RELIANCE", "TTM": "TATA MOTORS",
+    "INFY": "INFOSYS", "WIPRO.NS": "WIPRO", "TCS.NS": "TATA CONSULTANCY",
+    "HDFCBANK.NS": "HDFC BANK", "ICICIBANK.NS": "ICICI BANK", "SBIN.NS": "SBI",
+}
+
+
+def _market_snapshot_title(symbol: str, narration: str = "") -> str:
+    """Short, on-theme on-screen title for a live quote ticker/chart."""
+    name = _TICKER_COMPANY_NAMES.get((symbol or "").upper(), (symbol or "MARKET").upper())
+    tag = "PRE-MARKET" if narration and "premarket" in narration.lower() else "MARKET WATCH"
+    return f"{symbol.upper()} • {name} • {tag}"
+
+
+def _extract_thumbnail_subject(headline: str) -> str:
+    """Reduce a topic headline to a short subject phrase for the thumbnail art,
+    e.g. 'Meta launches Muse Glimmer model as Zuckerberg champions AI' ->
+    'Meta Muse Glimmer'. Returns '' when nothing usable is found."""
+    if not headline:
+        return ""
+    low = headline.lower()
+    for pivot in (
+        " unveils ", " announces ", " launches ", " reveals ", " introduces ",
+        " releases ", " says ", " reports ", " hits ", " claims ", " as ",
+        " reaches ", " breaks ", " to ",
+    ):
+        idx = low.find(pivot)
+        if idx > 0:
+            left = headline[:idx].strip()
+            rest = headline[idx + len(pivot):]
+            m = re.match(r"([A-Z][\w'&.]*(?: [A-Z][\w'&.]*){0,3})", rest)
+            product = m.group(1) if m else ""
+            subject = f"{left} {product}".strip()
+            if len(subject) > 48:
+                subject = subject[:48].rsplit(" ", 1)[0]
+            return subject
+    m = re.match(r"([A-Z][\w'&.]*(?: [A-Z][\w'&.]*){0,2})", headline)
+    return m.group(1) if m else ""
+
+
+def _build_thumbnail_scene(state) -> str:
+    """Topic-grounded thumbnail scene: the story's subject fused into the hero
+    shot's art direction so the thumbnail is actually about the video's niche
+    (company + product) instead of a generic stock scene."""
+    hero_prompt = ""
+    if state.script_data and state.script_data.shots:
+        hero_prompt = state.script_data.shots[0].visual_prompt or ""
+    subject = _extract_thumbnail_subject(
+        getattr(state.selected_topic, "headline", "") if state.selected_topic else ""
+    )
+    if not subject:
+        return hero_prompt
+    base = re.sub(
+        r"^\s*(cinematic\s+(?:16:9\s+)?(?:widescreen\s+)?(?:shot\s*:\s*)?|cinematic\s+shot\s*:\s*)",
+        "", hero_prompt, flags=re.I,
+    )
+    base = re.sub(r"\.\s*$", "", base.strip())
+    return (
+        f"A dramatic cinematic 16:9 scene of {subject}: {base}. "
+        f"Center the imagery completely on {subject}, monumental product-shot " 
+        f"realism, glowing dramatic rim lighting against a deep dark background, "
+        f"ultra high contrast, precious-metal accents.")
+
+
+def _resolve_ticker(topic) -> Optional[str]:
+    """Return a ticker symbol when the topic is clearly about a known public
+    company, else None. Scans keywords, headline and summary."""
+    if not topic:
+        return None
+    kw_vals = [str(k).lower() for k in (getattr(topic, "keywords", None) or [])]
+    head = str(getattr(topic, "headline", "") or "").lower()
+    summ = str(getattr(topic, "summary", "") or "").lower()
+    for alias, ticker in _COMPANY_TICKER_MAP.items():
+        key = alias.lower()
+        if key in head or key in summ or any(key in k for k in kw_vals):
+            return ticker
+    return None
+
+
+_WORD_NUMS = {
+    "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0, "five": 5.0,
+    "six": 6.0, "seven": 7.0, "eight": 8.0, "nine": 9.0, "ten": 10.0,
+    "eleven": 11.0, "twelve": 12.0, "fifteen": 15.0, "twenty": 20.0,
+    "twenty-five": 25.0, "thirty": 30.0, "fifty": 50.0, "hundred": 100.0,
+}
+
+
+def _extract_percent_move(narration: str) -> Optional[float]:
+    """Best-effort pull of a signed move (%) from a narration snippet so fallback
+    tickers agree with the script. Handles numeric ('-10%', '+1.2%') and
+    spelled-out moves ('one percent uptick' -> +1.0, 'ten percent decline' ->
+    -10.0). Prefers the FIRST move mentioned (the premarket one, etc)."""
+    if not narration:
+        return None
+    low = narration.lower()
+    _DOWNS = re.compile(r"\b(dropped|declined|drop|decline|declining|down|fell|fallen|falls|fall|plunged|plunge|plunging|slumped|slump|slumping|lost|loss|lose|sold|sank|sink|slid|slide|slipped|crash|crashing|tumbled|tumble|tumbling|sell-off|selloff)\b")
+    m = re.search(r"([+-]?(?:\d+(?:\.\d+)?))\s*%", low)
+    if m:
+        sign = -1.0 if _DOWNS.search(low[max(0, m.start() - 42):m.start()]) else 1.0
+        return sign * float(m.group(1))
+    m = re.search(r"([+-]?(?:\d+(?:\.\d+)?))\s*percent\b", low)
+    if m:
+        sign = -1.0 if _DOWNS.search(low[max(0, m.start() - 42):m.start()]) else 1.0
+        return sign * float(m.group(1))
+    _NUM_WORDS_ALT = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|twenty-five|thirty|fifty|hundred"
+    for m in re.finditer(rf"((?:[a-z0-9'&., -]{{0,16}}?)\b({_NUM_WORDS_ALT})\s*percent)", low):
+        context = m.group(1)
+        n = _WORD_NUMS[m.group(2)]
+        if _DOWNS.search(context):
+            return -n
+        return n
+    return None
+
+
 def _probe_duration(path: str) -> Optional[float]:
     """
     Returns the exact media duration (seconds) of an audio/video file using
@@ -381,46 +530,79 @@ class MediaProducerAgent:
         os.makedirs(self.storage_dir, exist_ok=True)
         # Cache the live market quote per topic so we fetch it once, not per shot.
         self._quote_cache: Dict[str, dict] = {}
-        self._quote_symbol: Optional[str] = None
 
     def _pick_symbol(self, state) -> str:
-        """Pick a ticker symbol for live data visuals (ticker/chart)."""
+        """Pick a ticker symbol for live data visuals (ticker/chart).
+
+        Resolution order:
+        1. An explicit ticker already present in the topic keywords (e.g. "META").
+        2. A known public company mentioned in keywords/headline/summary
+           (e.g. "zuckerberg"/"meta" -> META, "nvidia" -> NVDA).
+        3. Region default (RELIANCE.NS for india, SPY otherwise) for general/index
+           stories where no specific company is involved.
+        """
         kws = getattr(state.selected_topic, "keywords", None) if state.selected_topic else None
         for kw in (kws or []):
             if re.fullmatch(r"[A-Z]{1,5}(\.NS)?", kw or ""):
                 return kw
+        resolved = _resolve_ticker(state.selected_topic)
+        if resolved:
+            return resolved
+        # Famous NON-public company (OpenAI, Anthropic, ...) -> no live exchange
+        # quote exists; mark it so the renderers show narration-grounded moves.
+        topic = state.selected_topic
+        if topic:
+            low_head = str(getattr(topic, "headline", "") or "").lower()
+            low_summ = str(getattr(topic, "summary", "") or "").lower()
+            low_kws = [str(k).lower() for k in (kws or [])]
+            for alias in _PRIVATE_COMPANIES:
+                if alias in low_head or alias in low_summ or any(alias in k for k in low_kws):
+                    return alias.upper()
         region = getattr(state, "region", "all") or "all"
         return "RELIANCE.NS" if region == "india" else "SPY"
 
-    async def _get_market_quote(self, state) -> Dict[str, Any]:
+    async def _get_market_quote(self, state, narration: Optional[str] = None) -> Dict[str, Any]:
         """
         Fetches a live stock quote (Alpha Vantage) for the chosen symbol to feed
         the chart/ticker visuals with real numbers. Cached per pipeline run.
-        Returns numeric {symbol, price, change_pct}; falls back gracefully on error.
+        Returns {symbol, price, change, grounded}: ``price``/``change`` are the
+        real quote when available; when the fetch fails the values are derived
+        from the narration's own stated move (never a fabricated fixed number).
         """
         symbol = self._pick_symbol(state)
         if symbol in self._quote_cache:
             return self._quote_cache[symbol]
-        res = {"symbol": symbol, "price": "$125.40", "change": "+3.45%"}
-        try:
-            from src.engine.external_apis import ExternalAPIManager
-            res = await asyncio.to_thread(ExternalAPIManager().fetch_alpha_vantage_stock_quote, symbol)
-        except Exception as e:
-            print(f"[MediaProducer] Market quote fetch failed ({e}); using fallback numbers.")
-        price_raw = re.sub(r"[^\d.]", "", res.get("price", "0") or "0")
-        change_raw = re.sub(r"[^\d.+-]", "", res.get("change", "0") or "0")
-        try:
-            price = float(price_raw)
-        except ValueError:
-            price = 125.40
-        try:
-            change = float(change_raw)
-        except ValueError:
-            change = 3.45
-        symbol_out = res.get("symbol", symbol) or symbol
-        self._quote_symbol = symbol_out
-        self._quote_cache[symbol] = {"symbol": symbol_out, "price": price, "change": change}
-        return self._quote_cache[symbol]
+        res: Optional[Dict[str, Any]] = None
+        if symbol.lower() not in _PRIVATE_COMPANIES:
+            try:
+                from src.engine.external_apis import ExternalAPIManager
+                res = await asyncio.to_thread(ExternalAPIManager().fetch_alpha_vantage_stock_quote, symbol)
+            except Exception as e:
+                print(f"[MediaProducer] Market quote fetch failed ({e}); using narration-grounded fallback.")
+        if res and (res.get("price") or "").strip() and (res.get("change") or "").strip():
+            price_raw = re.sub(r"[^\d.]", "", res.get("price", "0") or "0")
+            change_raw = re.sub(r"[^\d.+-]", "", res.get("change", "0") or "0")
+            try:
+                price = float(price_raw)
+                change = float(change_raw)
+            except ValueError:
+                price, change = None, None
+            if price is not None and change is not None:
+                symbol_out = res.get("symbol", symbol) or symbol
+                quote = {"symbol": symbol_out, "price": price, "change": change, "grounded": True}
+                self._quote_cache[symbol] = quote
+                return quote
+        # No trustworthy live quote: ground the move on the script itself so the
+        # visual never contradicts the narration ("one percent uptick" -> +1.0).
+        move = _extract_percent_move(narration or "")
+        quote = {
+            "symbol": symbol,
+            "price": None,
+            "change": move,
+            "grounded": False,
+        }
+        self._quote_cache[symbol] = quote
+        return quote
 
     async def produce_all_media(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None, crossfade: Optional[float] = None, pad_after_narration: Optional[float] = None) -> AssetPaths:
         """
@@ -642,7 +824,9 @@ class MediaProducerAgent:
                     else:
                         # No grounded spec -> fall back to the live-market trend chart
                         # (5-point deterministic series ending at the real quote).
-                        quote = await self._get_market_quote(state)
+                        quote = await self._get_market_quote(state, clean_narration)
+                        if not quote.get("grounded") or not quote.get("price"):
+                            raise ValueError(f"No real market quote for {quote['symbol']} (un-grounded move only)")
                         currency = "₹" if str(quote["symbol"]).endswith(".NS") else "$"
                         price, change = quote["price"], quote["change"]
                         start = price / (1 + change / 100.0)
@@ -650,7 +834,7 @@ class MediaProducerAgent:
                         values = [round(start + span * (i / 4.0), 2) for i in range(5)]
                         labels = ["-4w", "-3w", "-2w", "-1w", "Now"]
                         await generate_dynamic_chart(ChartRequest(
-                            title=f"{chart_title} • {quote['symbol']}",
+                            title=_market_snapshot_title(quote["symbol"], clean_narration),
                             labels=labels,
                             values=values,
                             unit_symbol=currency,
@@ -686,14 +870,13 @@ class MediaProducerAgent:
 
             # Check 2: Dynamic Stock/Data Chart segment
             elif v_type == VisualType.MATPLOTLIB_CHART or "[chart:" in prompt_lower or "stock chart" in prompt_lower or "market graph" in prompt_lower:
-                chart_title = raw_visual_prompt
                 match = re.search(r'\[chart:\s*([^\]]+)\]', prompt_lower)
-                if match:
-                    chart_title = match.group(1).strip()
-                
-                print(f"Processing AI dynamic data chart segment for {shot_key} (Title: '{chart_title}')")
+                _explicit_label = match.group(1).strip() if match else ""
+                print(f"Processing AI dynamic data chart segment for {shot_key} (Label: '{_explicit_label or 'market'}')")
                 try:
-                    quote = await self._get_market_quote(state)
+                    quote = await self._get_market_quote(state, clean_narration)
+                    if not quote.get("grounded") or not quote.get("price"):
+                        raise ValueError(f"No real market quote for {quote['symbol']} (un-grounded move only)")
                     currency = "₹" if str(quote["symbol"]).endswith(".NS") else "$"
                     # Build a deterministic 5-point trend ending at the LIVE price so the
                     # chart reflects the actual daily move (no canned static numbers).
@@ -703,7 +886,7 @@ class MediaProducerAgent:
                     values = [round(start + span * (i / 4.0), 2) for i in range(5)]
                     labels = ["-4w", "-3w", "-2w", "-1w", "Now"]
                     await generate_dynamic_chart(ChartRequest(
-                        title=f"{chart_title} • {quote['symbol']}",
+                        title=_explicit_label or _market_snapshot_title(quote["symbol"], clean_narration),
                         labels=labels,
                         values=values,
                         unit_symbol=currency,
@@ -716,20 +899,34 @@ class MediaProducerAgent:
 
             # Check 3: SVG Animation Counter/Ticker segment
             elif v_type == VisualType.SVG_TICKER or "[svg:" in prompt_lower or re.search(r'\bticker\b', prompt_lower) or re.search(r'\bcounter\b', prompt_lower):
-                svg_title = raw_visual_prompt
                 match = re.search(r'\[svg:\s*([^\]]+)\]', prompt_lower)
-                if match:
-                    svg_title = match.group(1).strip()
+                _explicit_label = match.group(1).strip() if match else ""
 
-                print(f"Processing AI animated Playwright SVG ticker segment for {shot_key} (Title: '{svg_title}')")
+                print(f"Processing AI animated Playwright SVG ticker segment for {shot_key} (Label: '{_explicit_label or 'market'}')")
                 try:
-                    quote = await self._get_market_quote(state)
+                    quote = await self._get_market_quote(state, clean_narration)
                     currency = "₹" if str(quote["symbol"]).endswith(".NS") else "$"
-                    headline_val = f"{currency}{quote['price']:,.2f}"
-                    sub_text = f"{quote['change']:+.2f}% Today"
+                    if _explicit_label:
+                        title = _explicit_label[:48]
+                    elif quote.get("grounded") and quote.get("price"):
+                        title = _market_snapshot_title(quote["symbol"], clean_narration)
+                    else:
+                        title = f"{quote['symbol']} • MARKET SNAPSHOT"
+                    if quote.get("grounded") and quote.get("price") is not None:
+                        headline_val = f"{currency}{quote['price']:,.2f}"
+                        change = quote.get("change") or 0.0
+                        sub_text = f"{change:+.2f}% Today"
+                    elif quote.get("change") is not None:
+                        # No live quote -> show the narration's own stated move so the
+                        # visual never contradicts the script (never a fake price).
+                        move = quote["change"]
+                        headline_val = f"{move:+.1f}%"
+                        sub_text = "PRE-MARKET MOVE" if "premarket" in clean_narration.lower() else "MARKET MOVE"
+                    else:
+                        raise ValueError("No grounded quote and no narration move for SVG ticker")
                     await render_playwright_svg_animation(PlaywrightSVGRequest(
                         chart_type="stock_ticker",
-                        title=f"{svg_title} • {quote['symbol']}",
+                        title=title,
                         headline_val=headline_val,
                         sub_text=sub_text,
                         duration=shot_timeline_dur,
@@ -951,12 +1148,13 @@ class MediaProducerAgent:
                 if state.seo_metadata and state.seo_metadata.thumbnail_brief
                 else (state.selected_topic.headline if state.selected_topic else "Market Shift")
             )
-            hero_prompt = None
-            if state.script_data and state.script_data.shots:
-                hero_prompt = state.script_data.shots[0].visual_prompt
+            # Topic-grounded scene: fuses the video's subject (company/product)
+            # into the hero shot's art direction so the thumbnail matches the
+            # niche instead of shipping a generic stock scene.
+            thumb_scene = self._build_thumbnail_scene(state)
             await generate_thumbnail(ThumbnailRequest(
                 headline_text=brief,
-                visual_prompt=hero_prompt,
+                visual_prompt=thumb_scene,
                 output_thumbnail_path=thumbnail_path
             ))
             asset_paths.thumbnail = thumbnail_path

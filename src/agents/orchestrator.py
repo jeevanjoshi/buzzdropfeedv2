@@ -141,6 +141,21 @@ class OrchestratorAgent:
                 f"| Est. days to YPP: {progress['estimated_days_to_ypp']}",
                 pipeline_id=p_id, component="CHANNEL_PHASE"
             )
+            # Near-YPP alert: when either milestone is ~80%+ to unlock, the operator
+            # should verify the YPP application/privacy defaults — the revenue gate
+            # goes live the moment YPP is unlocked.
+            NEAR_YPP_PCT = 80.0
+            if progress["subs_progress_pct"] >= NEAR_YPP_PCT or progress["watch_hours_progress_pct"] >= NEAR_YPP_PCT:
+                logger.warning(
+                    "INITIALIZATION",
+                    f"NEAR-YPP: subs {progress['subs_progress_pct']:.0f}% "
+                    f"({progress['subs_remaining']} remaining) and/or watch-hours "
+                    f"{progress['watch_hours_progress_pct']:.0f}% "
+                    f"({progress['watch_hours_remaining']} hrs remaining). "
+                    f"Post-YPP the per-video revenue gate (${channel_phase_manager.REVENUE_GATE_MIN_USD:.2f}) "
+                    f"and opportunity gate become binding.",
+                    pipeline_id=p_id, component="CHANNEL_PHASE"
+                )
         tracer.record_step(state, "INITIALIZATION")
 
         # Begin per-run budget tracking (reset counters for this pipeline_id).
@@ -161,6 +176,13 @@ class OrchestratorAgent:
                     pipeline_id=p_id, component="FACT_RETRIEVER",
                     extra_data={"topsis_score": state.selected_topic.topsis_score, "headline": state.selected_topic.headline}
                 )
+                if state.region_market:
+                    logger.info(
+                        "PHASE_1_TOPIC_SELECTION",
+                        f"Dynamic region -> market={state.region_market} l2={state.region} ({state.region_reason})",
+                        pipeline_id=p_id, component="FACT_RETRIEVER",
+                        extra_data={"region_market": state.region_market, "region": state.region, "region_reason": state.region_reason}
+                    )
                 tracer.record_step(state, "TOPIC_SELECTED", message=msg_topic)
             else:
                 logger.info("PHASE_1_TOPIC_SELECTION", f"Resuming: Using existing selected topic: '{state.selected_topic.headline}'", pipeline_id=p_id, component="FACT_RETRIEVER")
@@ -260,7 +282,7 @@ class OrchestratorAgent:
                     logger.info("PHASE_2_SCRIPT_DESIGN", f"Found unapproved/failed script from a previous run (Stage: {state.execution_stage}). Clearing and re-generating...", pipeline_id=p_id, component="STORY_DESIGNER")
                     state.script_data = None
                 logger.info("PHASE_2_SCRIPT_DESIGN", "Generating 10-15 Min 6-Act dramatic arc narrative script...", pipeline_id=p_id, component="STORY_DESIGNER")
-                msg_script = self.story_designer.process(state)
+                msg_script = self.story_designer.process(state, region=state.region)
                 
                 if not state.script_data:
                     raise RuntimeError("Script generation failed.")

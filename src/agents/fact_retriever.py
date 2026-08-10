@@ -49,7 +49,7 @@ class FactRetrieverAgent:
             candidates, facts = self.rss_engine.fetch_all_feeds(region=region)
             if candidates and facts:
                 # 1. Enrich with World Bank Macro Economic Indicators (GDP & Inflation)
-                country_code = "IND" if region == "india" else "USA"
+                country_code = self._wb_country_code(region)
                 wb_data = external_api_manager.fetch_world_bank_gdp_inflation(country_code=country_code)
                 facts.append(VerifiedFact(
                     source_id="wb-macro-01",
@@ -269,6 +269,16 @@ class FactRetrieverAgent:
         top.sort(key=lambda x: x.opportunity_score, reverse=True)
         return top + rest
 
+    def _wb_country_code(self, region: str) -> str:
+        """Map a region/market label to a World Bank ISO3 code for the macro
+        enrichment fact. Understands the region_intelligence market codes too."""
+        _MARKET_ISO = {
+            "us": "USA", "uk": "GBR", "ca": "CAN", "au": "AUS", "eu": "DEU",
+            "india": "IND", "in": "IND", "global": "USA", "all": "USA",
+        }
+        r = (region or "all").lower().strip()
+        return _MARKET_ISO.get(r, "USA")
+
     def process(self, state: GlobalState, use_live_rss: bool = True, region: str = "all",
                 channel_phase: str = "REVENUE",
                 exclude_headlines: Optional[List[str]] = None) -> A2AMessage:
@@ -302,6 +312,75 @@ class FactRetrieverAgent:
                     candidates = list(synth_kept) + candidates
             except Exception as e:
                 print(f"[FactRetriever] Tool-topic synthesis pass failed ({e}); using RSS candidates only.")
+
+        # ── Documentary / investigative storability gate ─────────────────────
+        # Direct news (announcements, press releases, price ticks, results) that
+        # our automation CANNOT turn into a 6-act documentary is NEVER considered
+        # for ranking. Deterministic verdict + optional LLM cross-check (which may
+        # only cull near-boundary topics, never resurrect culled ones). Evergreen
+        # synthesized tool topics pass through by design. If EVERYTHING is culled
+        # -> SHIP BEST-WITH-WARNING: the highest documentary-scoring survivor is
+        # retained with a loud log line (the RAG-sufficiency gate still protects
+        # factual depth downstream, and the channel stays alive on thin days).
+        from src.engine.documentary_potential import (
+            gate_candidates, refine_with_llm, score_documentary_potential,
+        )
+        kept, culled = gate_candidates(candidates)
+        for cand, audit in culled:
+            print(f"[FactRetriever] CULLED (direct news, no doc potential): '{cand.headline[:90]}' ({audit['reason']})")
+        if not kept:
+            fallback_winner = max(candidates, key=lambda c: score_documentary_potential(c)["score"]) if candidates else None
+            if fallback_winner is None:
+                raise ValueError("No topic candidates survive after the documentary storability gate.")
+            print(f"[FactRetriever] WARNING: ALL {len(candidates)} candidates failed the documentary storability gate. "
+                  f"Shipping best-with-warning: '{fallback_winner.headline[:90]}'")
+            kept = [fallback_winner]
+        else:
+            llm_culls = refine_with_llm(kept)
+            if llm_culls:
+                kept = [c for c in kept if c.candidate_id not in llm_culls]
+                if not kept:
+                    kept = [max(candidates, key=lambda c: score_documentary_potential(c)["score"])]
+                print(f"[FactRetriever] LLM cross-check culled {len(llm_culls)} near-boundary direct-news topics.")
+        candidates = kept
+
+        # ── Dynamic region decision (ad-revenue-weighted, decided HERE) ─────
+        # region=="all" (the DEFAULT) means the market is selected from the
+        # day/time window + topic affinity + per-market RPM + events, then flows
+        # to every downstream stage. A CLI --global/--india pins it (fixed mode).
+        dynamic_region = (region or "all").strip().lower() in ("all", "auto", "dynamic")
+        projected_publish_min = None
+        region_intel = None
+        region_profiles: Dict[str, Any] = {}
+        if dynamic_region:
+            try:
+                from src.engine import region_intelligence as region_intel
+                now = datetime.datetime.now(datetime.timezone.utc)
+                projected_publish_min = now.hour * 60 + now.minute + region_intel.DEFAULT_RUNTIME_MIN
+                for c in candidates:
+                    try:
+                        region_profiles[c.candidate_id] = region_intel.candidate_region_profile(
+                            c, projected_publish_min)
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"[FactRetriever] Region intelligence unavailable ({e}); defaulting to global.")
+                dynamic_region = False
+
+        # Populate the revenue-led TOPSIS 8th criterion: every candidate carries
+        # its best-market expected ad revenue (dynamic) or the fixed-region
+        # forecast, so ranking itself is regional-ad-revenue weighted.
+        for c in candidates:
+            if dynamic_region and c.candidate_id in region_profiles:
+                c.regional_revenue_usd = round(
+                    region_profiles[c.candidate_id]["region_revenue_usd"], 2)
+            else:
+                try:
+                    revx = monetization_optimizer.calculate_revenue_yield(
+                        c, estimated_runtime_mins=13.0, region=region)
+                    c.regional_revenue_usd = round(float(revx["total_expected_revenue_usd"]), 2)
+                except Exception:
+                    c.regional_revenue_usd = 0.0
 
         # Pre-TOPSIS opportunity hard gate (REVENUE/SCALE only, measured only).
         # A topic with a MEASURED but low views-per-competitor opportunity is a
@@ -351,8 +430,20 @@ class FactRetrieverAgent:
         has_specialized = any(
             getattr(c, "audience_type", "") not in ("general", "blocked") for c in ranked_candidates
         )
+
+        # ── Winner selection (gates) ──────────────────────────────────────────────
+        # The dynamic region decision was already made pre-TOPSIS (region_profiles)
+        # and TOPSIS was already ranked with the revenue-led 8th criterion. Here we
+        # only enforce the audience/niche/revenue/competitor gates, then pick the
+        # winner (in dynamic mode: the band candidate with the best revenue-led
+        # region score — the TOPSIS band keeps the ranking phase-aware).
         winner = None
-        for cand in ranked_candidates:
+        winner_market = "us"
+        winner_region_score = -1.0
+        region_band = max(1, int(round(len(ranked_candidates) * 0.5)))
+        ranked_slice = ranked_candidates[:region_band] if dynamic_region else ranked_candidates
+
+        for rank_idx, cand in enumerate(ranked_slice):
             # 1. Audience Gate (block 'blocked' categories like gossip/entertainment)
             if getattr(cand, "audience_type", "") == "blocked":
                 continue
@@ -360,10 +451,19 @@ class FactRetrieverAgent:
             # 1b. Prefer high-RPM niches over generic 'general' content when available
             if has_specialized and getattr(cand, "audience_type", "") == "general":
                 continue
-            
-            # 2. Revenue Gate (in REVENUE / SCALE phases, expected revenue must be >= MIN)
+
+            # 1c. Region score for this candidate (precomputed in region_profiles)
+            cand_market = None
+            region_score = 0.0
+            if dynamic_region and cand.candidate_id in region_profiles:
+                cand_market = region_profiles[cand.candidate_id]["market"]
+                region_score = region_profiles[cand.candidate_id]["score"]
+
+            # 2. Revenue Gate (in REVENUE / SCALE phases, expected revenue must be >= MIN).
+            #    Evaluated against the market THIS candidate would be targeted at.
+            gate_region = cand_market if cand_market else region
             if channel_phase in ("REVENUE", "SCALE"):
-                rev = monetization_optimizer.calculate_revenue_yield(cand, estimated_runtime_mins=13.0, region=region)
+                rev = monetization_optimizer.calculate_revenue_yield(cand, estimated_runtime_mins=13.0, region=gate_region)
                 from src.engine.channel_phase_manager import channel_phase_manager
                 if rev["total_expected_revenue_usd"] < channel_phase_manager.REVENUE_GATE_MIN_USD:
                     continue
@@ -377,14 +477,40 @@ class FactRetrieverAgent:
                     )
                     if not gate["passes_revenue_gate"]:
                         continue
-            winner = cand
-            break
+
+            if dynamic_region:
+                if region_score > winner_region_score:
+                    winner, winner_market, winner_region_score = cand, cand_market or "us", region_score
+            else:
+                winner = cand
+                break
 
         if not winner:
             winner = ranked_candidates[0]
 
-        # Compute revenue forecast for the winning topic
-        rev = monetization_optimizer.calculate_revenue_yield(winner, estimated_runtime_mins=13.0, region=region)
+        # Persist the decided region so media producer / story designer / revenue
+        # forecast all target the SAME market.
+        eff_region = region
+        l2_region = "global"
+        region_reason = f"fixed CLI region '{region}'" if not dynamic_region else None
+        if dynamic_region and winner.candidate_id in region_profiles:
+            prof = region_profiles[winner.candidate_id]
+            eff_region = prof["market"]
+            l2_region = prof["l2_region"]
+            region_reason = (
+                f"dynamic:{prof['market']} (published ~{projected_publish_min // 60}:{projected_publish_min % 60:02d} UTC, "
+                f"rev=${prof['region_revenue_usd']:.2f}, {prof['reason']})"
+            )
+            state.region = l2_region
+            state.region_market = prof["market"]
+            state.region_reason = region_reason
+            print(f"[FactRetriever] DYNAMIC REGION -> market={prof['market']} l2={l2_region} ({region_reason})")
+        else:
+            state.region_market = l2_region if l2_region != "global" else eff_region
+            state.region_reason = region_reason or ""
+
+        # Compute revenue forecast for the winning topic (exact market RPM)
+        rev = monetization_optimizer.calculate_revenue_yield(winner, estimated_runtime_mins=13.0, region=eff_region)
         state.revenue_forecast = RevenueForecast(
             predicted_views=rev["predicted_views"],
             estimated_rpm_usd=rev["estimated_rpm_usd"],
@@ -409,9 +535,12 @@ class FactRetrieverAgent:
                 "selected_candidate": winner.model_dump(),
                 "topsis_score": winner.topsis_score,
                 "verified_fact_count": len(facts),
-                "region": region,
+                "region": state.region,
+                "region_market": state.region_market,
+                "region_reason": state.region_reason,
                 "channel_phase": channel_phase,
                 "revenue_forecast_usd": rev["total_expected_revenue_usd"],
+                "regional_revenue_usd": winner.regional_revenue_usd,
                 "audience_type": getattr(winner, "audience_type", "general"),
             },
             state_hash=compute_state_hash(state),

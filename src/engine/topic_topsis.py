@@ -4,18 +4,23 @@ from src.schemas.state import TopicCandidate
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase-aware TOPSIS weight vectors [TVS, RPM, IDI, SDI, SHM, VPH, SAT]
+# Phase-aware TOPSIS weight vectors [TVS, RPM, IDI, SDI, SHM, VPH, SAT, REGION_REV]
 # ─────────────────────────────────────────────────────────────────────────────
-# GROWTH  : Prioritise IDI (novelty/searchability) + TVS (trending velocity).
-#           RPM weight is minimal — ads not yet enabled, focus is watch-time.
-TOPSIS_WEIGHTS_GROWTH  = [0.30, 0.05, 0.30, 0.10, 0.15, 0.05, 0.05]
+# REGION_REV (index 7) = expected ad revenue for the candidate's best region
+# (``candidate.regional_revenue_usd``). Per the converged plan, "ad revenue in
+# the region has the HIGHEST weight" in the MONETISED phases:
+#   REVENUE/SCALE : index 7 holds the single largest weight.
+#   GROWTH        : DISCOVERY-LED — TVS (trend) + IDI (novelty) lead for
+#                   watch-time/subscriber growth, and regional revenue is
+#                   secondary (a pre-YPP channel earns $0 in ads; unlocking YPP
+#                   is the real bottleneck on the path to $2,000/month).
+TOPSIS_WEIGHTS_GROWTH  = [0.25, 0.05, 0.25, 0.10, 0.10, 0.05, 0.05, 0.15]
 
-# REVENUE : RPM is the primary revenue ceiling — given the highest single weight.
-#           TVS remains important for organic reach; IDI ensures freshness.
-TOPSIS_WEIGHTS_REVENUE = [0.22, 0.30, 0.18, 0.05, 0.12, 0.08, 0.05]
+# REVENUE : REGION_REV leads; niche RPM (market ceiling) is the next-strongest.
+TOPSIS_WEIGHTS_REVENUE = [0.14, 0.20, 0.12, 0.05, 0.08, 0.08, 0.05, 0.28]
 
-# SCALE   : Balanced — sustain RPM while maintaining reach for brand partnerships.
-TOPSIS_WEIGHTS_SCALE   = [0.20, 0.28, 0.20, 0.05, 0.15, 0.07, 0.05]
+# SCALE   : Balanced-but-revenue-led — REGION_REV highest, RPM next.
+TOPSIS_WEIGHTS_SCALE   = [0.15, 0.18, 0.12, 0.05, 0.10, 0.07, 0.05, 0.28]
 
 
 def rank_topics_topsis(
@@ -27,14 +32,15 @@ def rank_topics_topsis(
     Ranks candidate topics using TOPSIS (Technique for Order Preference by Similarity
     to Ideal Solution) with phase-aware weights.
 
-    Criteria (7 columns):
+    Criteria (8 columns):
     1. TVS (Trend Velocity)            — Benefit (+)
-    2. RPM (Advertiser Similarity)     — Benefit (+)  <- 30% in REVENUE phase
+    2. RPM (Advertiser Similarity)     — Benefit (+)  <- market ceiling
     3. IDI (Semantic Novelty)          — Benefit (+)
     4. SDI (Sentiment Disruption)      — Benefit (+)
     5. SHM (Social Media Hype)         — Benefit (+)
     6. VPH (YouTube Views-per-Hour)    — Benefit (+)
     7. SAT (Market Saturation Penalty) — Cost   (-)
+    8. REGION_REV (Regional ad revenue)— Benefit (+)  <- HIGHEST single weight
     """
     if not candidates:
         return []
@@ -53,9 +59,9 @@ def rank_topics_topsis(
             weights = TOPSIS_WEIGHTS_GROWTH
 
     m = len(candidates)
-    n = 7  # Criteria count
+    n = 8  # Criteria count
 
-    # Construct Decision Matrix X (m x 7)
+    # Construct Decision Matrix X (m x 8)
     X = np.zeros((m, n), dtype=float)
     for idx, c in enumerate(candidates):
         X[idx, 0] = c.tvs_score
@@ -65,6 +71,7 @@ def rank_topics_topsis(
         X[idx, 4] = getattr(c, "shm_score", 1.0)
         X[idx, 5] = getattr(c, "vph_score", 1.0)
         X[idx, 6] = c.sat_score
+        X[idx, 7] = max(0.0, float(getattr(c, "regional_revenue_usd", 0.0) or 0.0))
 
     # Step 1: Normalize Matrix R
     col_norms = np.sqrt(np.sum(X ** 2, axis=0))
@@ -77,15 +84,16 @@ def rank_topics_topsis(
     V = R * w
 
     # Step 3: Determine Ideal (A+) and Anti-Ideal (A-) Solutions
-    # Columns 0..5 are Benefit (+); Column 6 is Cost (-)
+    # Columns 0..5 and 7 are Benefit (+); Column 6 (SAT) is Cost (-)
     A_plus  = np.zeros(n, dtype=float)
     A_minus = np.zeros(n, dtype=float)
 
-    for j in range(6):  # Benefit criteria
+    for j in range(n):
+        if j == 6:                  # SAT = cost criterion: best is lowest
+            continue
         A_plus[j]  = np.max(V[:, j])
         A_minus[j] = np.min(V[:, j])
 
-    # Cost criterion (Saturation): best = lowest SAT
     A_plus[6]  = np.min(V[:, 6])
     A_minus[6] = np.max(V[:, 6])
 

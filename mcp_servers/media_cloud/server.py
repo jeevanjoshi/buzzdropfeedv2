@@ -468,11 +468,47 @@ async def generate_thumbnail(req: ThumbnailRequest):
                             color, thick, cv2.LINE_AA)
 
             y_start = 260 if len(lines) > 1 else 340
-            for idx, line in enumerate(lines):
-                _draw_outlined(line, (60, y_start + (idx * 90)), 1.4, (0, 235, 255))
-
             sub_y = y_start + (len(lines) * 90) + 10
-            _draw_outlined(sub_text, (60, sub_y), 1.1, (255, 255, 255))
+
+            # ── Deterministic text contrast (right-first-time) ────────────────
+            # A single fixed light-yellow fill loses contrast on bright scenes
+            # (e.g. the ostrich video's golden-sand background ≈ same tone as the
+            # text). Instead: draw an adaptive dark pedestal behind the text zone
+            # and pick fill/outline colors from the MEASURED local luminance, so
+            # light text works on dark and dark text works on bright, regardless
+            # of what the AI painted.
+            _pad = 30
+            _box_y0 = max(0, y_start - _pad)
+            # Text block ends below the last line / subtitle.
+            _box_end = sub_y + 55
+            _region = img[_box_y0:_box_end, 60:1260]
+            mean_lum = float(cv2.mean(cv2.cvtColor(_region, cv2.COLOR_BGR2GRAY))[0]) if _region.size else 128.0
+            _is_bright = mean_lum > 150.0
+
+            # Soft dark scrim so text ALWAYS has a pedestal (alpha scales only
+            # mildly; enough to guarantee separation without crushing the art).
+            _ped = np.zeros_like(_region)
+            cv2.rectangle(_ped, (0, 0), (_region.shape[1] - 1, _region.shape[0] - 1), (0, 0, 0), -1)
+            _alpha = 0.30 if _is_bright else 0.18
+            np.copyto(_region, cv2.addWeighted(_region, 1.0 - _alpha, _ped, _alpha, 0))
+
+            # On a bright region use DARK bold text with a white outline; on a
+            # dark region use LIGHT text with a black outline.
+            if _is_bright:
+                _fill, _outline = (10, 10, 20), (255, 255, 255)
+            else:
+                _fill, _outline = (0, 235, 255), (0, 0, 0)
+
+            def _draw_outlined(text, pos, scale, thick=4, outline_thick=8):
+                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                            _outline, outline_thick, cv2.LINE_AA)
+                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                            _fill, thick, cv2.LINE_AA)
+
+            for idx, line in enumerate(lines):
+                _draw_outlined(line, (60, y_start + (idx * 90)), 1.4)
+
+            _draw_outlined(sub_text, (60, sub_y), 1.1)
 
             cv2.imwrite(req.output_thumbnail_path, img)
             return {"status": "success", "engine": "high_ctr_thumbnail", "path": req.output_thumbnail_path}

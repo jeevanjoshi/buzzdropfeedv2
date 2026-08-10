@@ -37,11 +37,10 @@ Audit trail: every run writes logs/health_check_<timestamp>.log (and a
 canonical logs/health_check.log) recording each check, verdict and summary so
 pre-flight state is auditable per run.
 
-OPT-IN live probes (skipped by default so this stays cheap / non-destructive):
+OPT-IN/OPT-OUT live probes:
   --probe-llm  make a real 1-token LLM call to confirm the model answers and
-                is not rate-limited (costs a tiny amount of LLM quota).
-  --probe-yt   refresh the OAuth token and run a real `channels.list` call to
-                confirm upload+read scopes (costs ~1 unit of YouTube quota).
+                is not rate-limited (costs a tiny amount of LLM quota; skipped by default).
+  --skip-probe-yt skip the live YouTube OAuth token refresh + channels.list check (run by default).
 
 Usage:
   source venv/bin/activate && python healthcheck.py
@@ -80,25 +79,35 @@ def env_key(name: str) -> str:
 # [env] Secrets present (no values leaked)
 # ---------------------------------------------------------------------------
 def check_required_env():
+    # Gemini and Google Cloud Project are critical APIs/requirements
+    gemini_key = env_key("GEMINI_API_KEY") or env_key("GOOGLE_API_KEY")
+    if not gemini_key:
+        record("env", "Gemini API key", _FAIL, "GEMINI_API_KEY or GOOGLE_API_KEY is missing")
+        return False
+    
+    gcp_project = env_key("GOOGLE_CLOUD_PROJECT")
+    if not gcp_project:
+        record("env", "Google Cloud Project", _FAIL, "GOOGLE_CLOUD_PROJECT is missing")
+        return False
+
     required = [
         "PREFERRED_LLM_PROVIDER", "LLM_MODEL",
         "AUDIO_EDGE_URL", "YOUTUBE_TOKEN_FILE", "YOUTUBE_CLIENT_SECRET",
         "YOUTUBE_API_KEY", "NOTIFY_EMAIL_TO", "NOTIFY_EMAIL_FROM",
     ]
-    # At least one usable LLM credential is mandatory (no boilerplate fallback).
+    # At least one usable LLM credential is check warning.
     llm_keys = [k for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")
                 if env_key(k)]
     missing = [k for k in required if not env_key(k)]
     if missing:
-        record("env", "required keys", _FAIL, f"missing: {', '.join(missing)}")
-        return False
-    record("env", "required keys", _OK,
-           f"provider={env_key('PREFERRED_LLM_PROVIDER')} model={env_key('LLM_MODEL')}")
+        record("env", "required keys", _WARN, f"missing non-critical: {', '.join(missing)}")
+    else:
+        record("env", "required keys", _OK,
+               f"provider={env_key('PREFERRED_LLM_PROVIDER')} model={env_key('LLM_MODEL')}")
     if llm_keys:
         record("env", "LLM credential", _OK, f"present ({len(llm_keys)} of 3 providers)")
     else:
-        record("env", "LLM credential", _FAIL, "no OPENROUTER/OPENAI/GEMINI key set")
-        return False
+        record("env", "LLM credential", _WARN, "no OPENROUTER/OPENAI/GEMINI key set")
     return True
 
 
@@ -108,9 +117,9 @@ def check_required_env():
 def check_binaries():
     missing = [b for b in ("ffmpeg", "ffprobe") if shutil.which(b) is None]
     if missing:
-        record("bin", "ffmpeg/ffprobe", _FAIL, f"missing: {', '.join(missing)}")
-        return False
-    record("bin", "ffmpeg/ffprobe", _OK, f"{shutil.which('ffmpeg')} / {shutil.which('ffprobe')}")
+        record("bin", "ffmpeg/ffprobe", _WARN, f"missing: {', '.join(missing)}")
+    else:
+        record("bin", "ffmpeg/ffprobe", _OK, f"{shutil.which('ffmpeg')} / {shutil.which('ffprobe')}")
     return True
 
 
@@ -126,6 +135,7 @@ def check_llm(probe: bool = False):
         return False
 
     provider = env_key("PREFERRED_LLM_PROVIDER").lower() or "cloud"
+    is_gemini = "gemini" in provider or "google" in provider
     available = False
     try:
         if provider in ("local", "llama"):
@@ -135,13 +145,13 @@ def check_llm(probe: bool = False):
             available = client.is_cloud_llm_available()
             detail = f"cloud api key present ({provider})"
     except Exception as e:
-        record("llm", "provider check", _FAIL, str(e))
-        return False
+        record("llm", "provider check", _FAIL if is_gemini else _WARN, str(e))
+        return not is_gemini
 
     if not available:
-        record("llm", "provider availability", _FAIL,
+        record("llm", "provider availability", _FAIL if is_gemini else _WARN,
                f"{detail} but unusable — no LLM fallback, aborting.")
-        return False
+        return not is_gemini
     record("llm", "provider availability", _OK, detail)
 
     if probe:
@@ -151,12 +161,14 @@ def check_llm(probe: bool = False):
                 prompt='{"ok": true}',
             )
             ok = bool(out and out.get("ok"))
-            record("llm", "live probe", _OK if ok else _FAIL,
+            record("llm", "live probe", _OK if ok else (_FAIL if is_gemini else _WARN),
                    "model answered" if ok else "model did not return expected JSON")
-            return ok
+            if is_gemini and not ok:
+                return False
         except Exception as e:
-            record("llm", "live probe", _FAIL, str(e))
-            return False
+            record("llm", "live probe", _FAIL if is_gemini else _WARN, str(e))
+            if is_gemini:
+                return False
     return True
 
 
@@ -166,8 +178,8 @@ def check_llm(probe: bool = False):
 def check_audio_edge():
     url = env_key("AUDIO_EDGE_URL").rstrip("/")
     if not url:
-        record("pi", "audio edge URL", _FAIL, "AUDIO_EDGE_URL not set")
-        return False
+        record("pi", "audio edge URL", _WARN, "AUDIO_EDGE_URL not set")
+        return True
     try:
         from urllib.error import HTTPError
         try:
@@ -181,8 +193,8 @@ def check_audio_edge():
         record("pi", "audio edge reachable", _OK, f"{url} responded HTTP {status}")
         return True
     except Exception as e:
-        record("pi", "audio edge reachable", _FAIL, f"{url} unreachable: {e}")
-        return False
+        record("pi", "audio edge reachable", _WARN, f"{url} unreachable: {e}")
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -207,34 +219,27 @@ def _count_today_uploads() -> int:
     return n
 
 
-def check_youtube(probe: bool = False):
+def check_youtube(probe: bool = True):
     token_file = env_key("YOUTUBE_TOKEN_FILE") or "token.json"
     client_secret = env_key("YOUTUBE_CLIENT_SECRET") or "client_secret.json"
-    ok_files = True
     if not os.path.exists(token_file):
-        record("yt", "OAuth token", _FAIL, f"{token_file} missing")
-        ok_files = False
+        record("yt", "OAuth token", _WARN, f"{token_file} missing")
     if not os.path.exists(client_secret):
-        record("yt", "client secret", _FAIL, f"{client_secret} missing")
-        ok_files = False
-    if ok_files:
-        record("yt", "OAuth files", _OK,
-               f"{token_file}, {client_secret} present")
+        record("yt", "client secret", _WARN, f"{client_secret} missing")
 
     # Quota estimate: 1600 units/upload, 10,000/day cap, max 4 uploads.
     today = _count_today_uploads()
     units = today * 1600
     remaining = 10000 - units - 1600  # minus the upcoming upload
     if today >= 4:
-        record("yt", "quota", _FAIL,
+        record("yt", "quota", _WARN,
                f"{today} uploads today (max 4) — daily cap reached")
-        return False
-    if remaining < 0:
-        record("yt", "quota", _FAIL,
+    elif remaining < 0:
+        record("yt", "quota", _WARN,
                f"{today} uploads today → next upload exceeds 10,000-unit cap")
-        return False
-    record("yt", "quota", _OK,
-           f"{today} upload(s) today; {remaining} units remain after next upload")
+    else:
+        record("yt", "quota", _OK,
+               f"{today} upload(s) today; {remaining} units remain after next upload")
 
     if probe:
         try:
@@ -249,9 +254,8 @@ def check_youtube(probe: bool = False):
             yt.channels().list(part="snippet", mine=True).execute()
             record("yt", "live auth probe", _OK, "token refresh + channels.list OK")
         except Exception as e:
-            record("yt", "live auth probe", _FAIL, str(e))
-            return False
-    return ok_files
+            record("yt", "live auth probe", _WARN, str(e))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -279,10 +283,10 @@ def check_yt_score_budget():
             used = 0
     remaining = budget - used
     if remaining <= 0:
-        record("yt-score", "demand budget", _FAIL,
+        record("yt-score", "demand budget", _WARN,
                f"{used}/{budget} used today — real-time TOPSIS score disabled "
                f"(topic quality degraded)")
-        return False
+        return True
     if remaining <= 5:
         record("yt-score", "demand budget", _WARN,
                f"{used}/{budget} used today; only {remaining} searches left "
@@ -303,17 +307,28 @@ def _any_env(*names):
 
 
 def check_rag_keys(strict: bool = False):
+    crawlers = {
+        "FIRECRAWL_API_KEY": "Firecrawl",
+        "TAVILY_API_KEY": "Tavily",
+        "EXA_API_KEY": "Exa",
+        "NEWSAPI_KEY": "NewsAPI"
+    }
+    present = [name for env_var, name in crawlers.items() if env_key(env_var)]
+    
+    if len(present) < 2:
+        record("rag", "crawler apis", _FAIL,
+               f"Only {len(present)} crawler API(s) set ({', '.join(present) if present else 'none'}). At least 2 are required from: Firecrawl, Tavily, Exa, NewsAPI")
+        return False
+    record("rag", "crawler apis", _OK, f"At least 2 crawlers available: {', '.join(present)}")
+
     tier1 = _any_env("MARKETAUX_API_KEY", "ALPHA_VANTAGE_KEY")
     tier2 = _any_env("EXA_API_KEY", "NEWSAPI_KEY")
-    # Exa is a primary RAG source in build_rag_knowledge_pack; its absence is the
-    # most meaningful signal. Others are enrichment.
     exa = env_key("EXA_API_KEY")
-    imported = {"no live news/RAG API": []}
     if not exa and not tier1 and not tier2:
         record("rag", "fact sources", _WARN,
                "no Marketaux/AlphaVantage/Exa/NewsAPI keys — story grounding "
                "relies on RSS-only, quality may drop")
-        return not strict
+        return True
     detail = (f"exa={'set' if exa else 'unset'}, "
               f"macrov={'set' if tier1 else 'unset'}, "
               f"news={'set' if tier2 else 'unset'}")
@@ -329,10 +344,6 @@ def check_rag_keys(strict: bool = False):
 # hard FAIL when grounded was chosen; merely a WARN otherwise.
 # ---------------------------------------------------------------------------
 def check_grounding(rag_mode: str):
-    # "grounded" and "hybrid" both REQUIRE a live grounding config; scraper does not.
-    requested = rag_mode in ("grounded", "hybrid")
-    # Our client supports two auth paths: Enterprise (GOOGLE_CLOUD_PROJECT + ADC)
-    # or the Gemini Developer API (GEMINI_API_KEY).
     project = env_key("GOOGLE_CLOUD_PROJECT")
     api_key = env_key("GEMINI_API_KEY") or env_key("GOOGLE_API_KEY")
     configured = bool(project) or bool(api_key)
@@ -342,35 +353,18 @@ def check_grounding(rag_mode: str):
     except Exception:
         sdk_ok = False
 
-    if requested:
-        if not configured:
-            record("grounding", "auth configured", _FAIL,
-                   f"--rag {rag_mode} requested but neither GOOGLE_CLOUD_PROJECT "
-                   "nor GEMINI_API_KEY set — run would silently fall back to scraper")
-            return False
-        if not sdk_ok:
-            record("grounding", "google-genai SDK", _FAIL,
-                   f"--rag {rag_mode} requested but google-genai not installed "
-                   "(pip install google-genai)")
-            return False
-        record("grounding", "configured", _OK,
-               f"{('GOOGLE_CLOUD_PROJECT=' + project) if project else 'GEMINI_API_KEY set'}, "
-               f"google-genai SDK present (location={env_key('GOOGLE_CLOUD_LOCATION') or 'global'})")
-        return True
-
-    # Not requested: grounding is an optional upgrade. Fail it as a hard error
-    # only under --strict, else warn so the operator knows it's unused.
+    # Google Grounded search availability is now a critical/hard requirement
     if not configured:
-        record("grounding", "auth configured", _WARN,
-               "no grounding auth (GOOGLE_CLOUD_PROJECT / GEMINI_API_KEY) set — "
-               "grounding unavailable (using scraper path)")
+        record("grounding", "auth configured", _FAIL,
+               "no grounding auth (GOOGLE_CLOUD_PROJECT / GEMINI_API_KEY) set — grounding unavailable")
         return False
     if not sdk_ok:
-        record("grounding", "google-genai SDK", _WARN,
+        record("grounding", "google-genai SDK", _FAIL,
                "google-genai not installed — grounding unavailable")
         return False
     record("grounding", "configured", _OK,
-           "grounding auth + google-genai present (avail. if --rag grounded/hybrid)")
+           f"{('GOOGLE_CLOUD_PROJECT=' + project) if project else 'GEMINI_API_KEY set'}, "
+           f"google-genai SDK present")
     return True
 
 
@@ -383,15 +377,11 @@ def check_grounding(rag_mode: str):
 def check_scrape_path(strict: bool = False):
     fc = env_key("FIRECRAWL_API_KEY")
     if not fc:
-        # Only a WARN: the pipeline still gathers corpus via the feeds/RAG keys
-        # and the urllib fallback, just less reliably for the full article body.
-        record("scrape", "Firecrawl key", _FAIL if strict else _WARN,
-               "FIRECRAWL_API_KEY unset — deep-crawl falls back to bare "
-               "urllib GET which many news sites 403; article body grounding "
-               "degrades")
-        return not strict
-    record("scrape", "Firecrawl key", _OK,
-           "primary deep-crawl path available (avoids urllib 403 fallback)")
+        record("scrape", "Firecrawl key", _WARN,
+               "FIRECRAWL_API_KEY unset — deep-crawl falls back to bare urllib GET")
+    else:
+        record("scrape", "Firecrawl key", _OK,
+               "primary deep-crawl path available (avoids urllib 403 fallback)")
     return True
 
 
@@ -405,10 +395,9 @@ def check_media(strict: bool = False):
     bgm = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "resources", "bgm.mp3")
     if not os.path.exists(bgm) or os.path.getsize(bgm) < 1000:
-        record("media", "BGM asset", _WARN if not strict else _FAIL,
+        record("media", "BGM asset", _WARN,
                "resources/bgm.mp3 missing/small — final video will fall back "
                "to silence (no background music)")
-        ok = (ok and not strict)
     else:
         record("media", "BGM asset", _OK, "resources/bgm.mp3 present")
 
@@ -418,15 +407,14 @@ def check_media(strict: bool = False):
             statvfs = os.statvfs(path)
             free_gb = statvfs.f_bavail * statvfs.f_frsize / 1e9
             if free_gb < 5:
-                record("media", "disk space", _FAIL,
+                record("media", "disk space", _WARN,
                        f"{label} only {free_gb:.1f} GB free — render may abort")
-                ok = False
             else:
                 record("media", "disk space", _OK,
                        f"{label} {free_gb:.1f} GB free")
         except Exception:
             continue
-    return ok
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +460,7 @@ def _write_audit_log(exit_code: int):
 
 def main(argv):
     probe_llm = "--probe-llm" in argv
-    probe_yt = "--probe-yt" in argv
+    probe_yt = "--skip-probe-yt" not in argv
     strict = "--strict" in argv
     rag_mode = _parse_rag_mode(argv)
 

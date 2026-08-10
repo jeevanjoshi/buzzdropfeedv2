@@ -6,6 +6,7 @@ from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_ha
 from mcp_servers.youtube_cloud.server import (
     check_quota_available,
     upload_youtube_resumable,
+    upload_short,
     insert_pinned_comment,
     QuotaCheckRequest,
     UploadRequest,
@@ -79,12 +80,18 @@ class PublisherAgent:
         # Calculate actual start times for each act from the shared helper.
         # Uses MEASURED shot durations when present (publish time), falling back
         # to duration_estimate; same definition as story_designer design time.
-        from src.engine.chapters import compute_act_chapters
+        # Reuse the content-aware act titles the designer already produced so the
+        # publish-time block is timestamps-only, not renamed back to the generic
+        # static labels.
+        from src.engine.chapters import compute_act_chapters, derive_contextual_act_titles
         shots = state.script_data.shots if state.script_data else None
         durs = state.asset_paths.measured_durations if state.asset_paths else None
         crossfade = getattr(state.asset_paths, "crossfade_used", 0.0) if state.asset_paths else 0.0
+        act_names = (seo.act_titles if seo and getattr(seo, "act_titles", None)
+                     else derive_contextual_act_titles(shots))
         _ch_lines, chapter_timestamps = compute_act_chapters(
             shots=shots, measured_durations=durs, crossfade=crossfade,
+            act_names=act_names,
         )
         chapters_str = "\n".join(_ch_lines)
 
@@ -125,6 +132,20 @@ class PublisherAgent:
             seo.description = desc
             seo.chapter_timestamps = chapter_timestamps
 
+        # ── GROWTH-phase: drive subscribers + watch-time (pre-YPP) ──────────
+        # Append a subscribe/bell + series-consistency line to the description
+        # so discovery metadata actively converts viewers into subs (the YPP
+        # requirement), instead of only optimising for ad RPM (post-YPP goal).
+        phase = getattr(state, "channel_phase", "") or ""
+        _GROWTH_DESC = (
+            "\n\nNew here? Subscribe and hit the bell — we publish a new "
+            "documentary every day. Drop your take in the comments!"
+        )
+        if phase == "GROWTH" and "subscribe" not in desc.lower():
+            desc += _GROWTH_DESC
+            if seo:
+                seo.description = desc
+
         upload_res = await upload_youtube_resumable(UploadRequest(
             video_path=state.asset_paths.final_video,
             title=title,
@@ -149,10 +170,18 @@ class PublisherAgent:
 
         # 3. Post Instant Pinned Engagement Comment to kickstart early interaction metric.
         #    Non-fatal by design: comment insertion must never block a real publish.
+        #    GROWTH phase pushes subscription + watch-time; later phases push comments.
         try:
-            engagement_question = (
-                f"What is your take on {title}? Share your thoughts below — we reply to every comment!"
-            )
+            phase = getattr(state, "channel_phase", "") or ""
+            if phase == "GROWTH":
+                engagement_question = (
+                    f"What did you think of {title}? Subscribe and hit the bell so you "
+                    f"don't miss the next one — and tell us what to cover next below!"
+                )
+            else:
+                engagement_question = (
+                    f"What is your take on {title}? Share your thoughts below — we reply to every comment!"
+                )
             res = await insert_pinned_comment(InsertCommentRequest(
                 video_id=video_id,
                 comment_text=engagement_question
@@ -179,6 +208,30 @@ class PublisherAgent:
                 state.asset_paths.shorts = short_paths
         except Exception as e:
             print(f"[MicroContentProducer] Notice: {e}")
+
+        # 4b. GROWTH phase: PUBLISH the Shorts as YouTube Shorts (#1 discovery lever
+        # for a pre-YPP channel — the master is monetized long-form, the clips feed
+        # subscriptions + watch hours). Non-fatal; quota-shared with long-form.
+        try:
+            if (state.channel_phase == "GROWTH" and state.asset_paths.shorts):
+                _short_title = (seo.title if seo and seo.title else title)[:90]
+                _short_ids = []
+                for _sp in state.asset_paths.shorts:
+                    _res = await upload_short(UploadRequest(
+                        video_path=_sp,
+                        title=f"{_short_title} | Short",
+                        description=desc[:4000],
+                        tags=(tags or [])[:30] + ["#Shorts"],
+                        category_id="22",
+                    ))
+                    if _res and _is_real_video_id(_res.get("video_id", "")):
+                        _short_ids.append(_res["video_id"])
+                        run_budget.record_yt("upload")
+                if _short_ids:
+                    meta.shorts_video_id = ",".join(_short_ids)
+                    print(f"[Publisher] Published {len(_short_ids)} YouTube Short(s) for GROWTH discovery.")
+        except Exception as e:
+            print(f"[Publisher] Shorts upload skipped (non-fatal): {e}")
 
 
         # 5. Create & Dispatch Seed Traffic Package (Reddit / HN / Webhook)

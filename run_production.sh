@@ -235,7 +235,16 @@ if [ "${1:-}" != "--no-detach" ]; then
     # `setsid` fully detaches the child from this shell's session/controlling terminal so a closed
     # SSH/tmux session can NEVER kill it mid/finish (the cause of "pipeline published but no final
     # exit-code line and no email" — the child was reaped before its post-run steps).
-    setsid nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${TAIL_ARG} ${RAG_ARG} \
+    # The region override (--india/--global) is forwarded so an explicit CLI
+    # override survives the detach; with no override the child runs dynamic
+    # region (fact_retriever picks the market from day/time/topic/events).
+    REGION_FWD=""
+    if [[ "$*" == *"--india"* ]]; then
+        REGION_FWD="--india"
+    elif [[ "$*" == *"--global"* ]]; then
+        REGION_FWD="--global"
+    fi
+    setsid nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${TAIL_ARG} ${RAG_ARG} ${REGION_FWD} \
         < /dev/null > /dev/null 2>&1 &
     PID=$!
     echo "[SUCCESS] Pipeline successfully spawned in background (PID: ${PID})."
@@ -323,10 +332,21 @@ trap 'finalize $? >/dev/null 2>&1' EXIT
 
 # Run the pipeline
 # --renderer is already present in "$@" (survived the detach), so just forward.
+# Region: default is DYNAMIC (fact_retriever picks the best market from
+# day/time/topic/events and sets state.region). An explicit --india/--global
+# passthrough pins it (override) — otherwise NO fixed --global is forced.
+REGION_FLAG=""
+if [[ "$*" == *"--india"* ]]; then
+    REGION_FLAG="--india"
+elif [[ "$*" == *"--global"* ]]; then
+    REGION_FLAG="--global"
+fi
 if [[ "$*" == *"--resume"* ]]; then
     python3 main.py "$@" >> "${LOG_FILE}" 2>&1
+elif [ -n "${REGION_FLAG}" ]; then
+    python3 main.py ${REGION_FLAG} "$@" >> "${LOG_FILE}" 2>&1
 else
-    python3 main.py --global "$@" >> "${LOG_FILE}" 2>&1
+    python3 main.py "$@" >> "${LOG_FILE}" 2>&1   # dynamic region (default)
 fi
 EXIT_CODE=$?
 

@@ -32,6 +32,11 @@ class InsertCommentRequest(BaseModel):
 # publish-integrity-quality-fix-plan.md issue #1).
 _MOCK_ENABLED = os.getenv("YOUTUBE_UPLOAD_MOCK", "").strip().lower() in ("1", "true", "yes")
 
+# Publish visibility for long-form videos AND Shorts. Default is PUBLIC (the
+# channel's goal is watch-time + reach); set YOUTUBE_PRIVACY_STATUS=private|unlisted
+# in .env to stage drafts instead.
+YOUTUBE_PRIVACY_STATUS = os.getenv("YOUTUBE_PRIVACY_STATUS", "public").strip().lower()
+
 
 def _mock_payload(kind: str = "upload") -> Dict[str, Any]:
     """Fabricated demo identifiers for the explicitly-enabled mock path only."""
@@ -39,6 +44,10 @@ def _mock_payload(kind: str = "upload") -> Dict[str, Any]:
     if kind == "comment":
         return {"status": "mock", "engine": "mock_youtube_comment",
                 "comment_id": f"comment_{suffix}", "video_id": "", "pinned": False}
+    if kind == "shorts":
+        return {"status": "mock", "engine": "mock_youtube_shorts",
+                "video_id": f"demo_short_{suffix}", "youtube_url": f"https://www.youtube.com/shorts/demo_short_{suffix}",
+                "synthetic_flag": True}
     return {"status": "mock", "engine": "mock_youtube_upload",
             "video_id": f"demo_{suffix}", "youtube_url": f"https://www.youtube.com/watch?v=demo_{suffix}",
             "synthetic_flag": True}
@@ -76,26 +85,10 @@ async def upload_youtube_resumable(req: UploadRequest):
     treated as a failure — no fabricated id is ever returned.
     """
     try:
-        token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
-        client_secret_path = os.getenv("YOUTUBE_CLIENT_SECRET", "client_secret.json")
-
-        credentials = None
-
-        if os.path.exists(token_path):
-            from google.oauth2.credentials import Credentials
-            from google.auth.transport.requests import Request
-
-            credentials = Credentials.from_authorized_user_file(token_path, ["https://www.googleapis.com/auth/youtube.upload"])
-            if credentials and credentials.expired and credentials.refresh_token:
-                credentials.refresh(Request())
-
-        if not credentials:
-            raise RuntimeError("YouTube upload failed: no OAuth credentials (token.json missing or unusable)")
-
+        credentials = _load_credentials()
         import httplib2
         from googleapiclient.discovery import build
         from googleapiclient.errors import HttpError
-        from googleapiclient.http import MediaFileUpload
 
         youtube = build("youtube", "v3", credentials=credentials)
 
@@ -107,7 +100,7 @@ async def upload_youtube_resumable(req: UploadRequest):
                 "categoryId": req.category_id
             },
             "status": {
-                "privacyStatus": "private",
+                "privacyStatus": YOUTUBE_PRIVACY_STATUS,
                 "selfDeclaredMadeForKids": False,
                 "syntheticContent": {
                     "bInformed": True,
@@ -115,47 +108,111 @@ async def upload_youtube_resumable(req: UploadRequest):
                 }
             }
         }
-
-        media = MediaFileUpload(req.video_path, chunksize=256 * 1024, resumable=True, mimetype="video/mp4")
-        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-
-        response = None
-        while response is None:
-            try:
-                status, response = request.next_chunk()
-            except HttpError as e:
-                if e.resp.status in [308, 503, 502, 504]:
-                    continue
-                else:
-                    raise e
-            except (httplib2.ServerNotFoundError, http.client.IncompleteRead):
-                continue
-
-        video_id = (response or {}).get("id")
-        if not video_id:
-            raise RuntimeError("YouTube upload failed: API response carried no video id")
-
-        # Upload custom thumbnail if path is provided and exists
-        if req.thumbnail_path and os.path.exists(req.thumbnail_path):
-            try:
-                media_thumb = MediaFileUpload(req.thumbnail_path, mimetype="image/png")
-                youtube.thumbnails().set(videoId=video_id, media_body=media_thumb).execute()
-                print(f"[YouTube Upload] Successfully set custom thumbnail: {req.thumbnail_path}")
-            except Exception as thumb_err:
-                print(f"Warning: Failed to upload custom thumbnail: {thumb_err}")
-
-        return {
-            "status": "success",
-            "video_id": video_id,
-            "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
-            "synthetic_flag": True
-        }
-
+        return _resumable_upload(youtube, body, req.video_path, req.thumbnail_path)
     except Exception as e:
         if _MOCK_ENABLED:
             print(f"[YouTube Upload] MOCK mode active (YOUTUBE_UPLOAD_MOCK=1); upload would have failed: {e}")
             return _mock_payload("upload")
         raise HTTPException(status_code=502, detail=f"YouTube upload failed: {e}") from e
+
+
+@app.post("/tools/upload_short")
+async def upload_short(req: UploadRequest):
+    """
+    Uploads a vertical (<60s) clip as a YouTube Short. This is the GROWTH-phase
+    discovery lever: the long-form master already yields 9:16 Shorts clips
+    (micro_content_producer / media_producer) that are otherwise never published.
+
+    Shorts use the SAME resumable Data API v3 upload (YouTube auto-classifies by
+    aspect ratio + duration); we add the ``#Shorts`` hashtag to the description
+    and tags to signal the Shorts surface, and keep EU AI Act synthetic-content
+    disclosure. Same OAuth, same mock guard, same fail-loud semantics.
+    """
+    try:
+        credentials = _load_credentials()
+        from googleapiclient.discovery import build
+
+        youtube = build("youtube", "v3", credentials=credentials)
+        desc = (req.description or "") + "\n#Shorts #Discovery #finance"
+        tags = [t for t in (req.tags or []) if t.lower() != "#shorts"] + ["#Shorts", "Shorts"]
+        body = {
+            "snippet": {
+                "title": ((req.title or "")[:80]),
+                "description": desc[:4900],
+                "tags": list(tags)[:500],
+                "categoryId": req.category_id or "22"  # People & Blogs (typical Shorts vertical)
+            },
+            "status": {
+                "privacyStatus": YOUTUBE_PRIVACY_STATUS,
+                "selfDeclaredMadeForKids": False,
+                "syntheticContent": {
+                    "bInformed": True,
+                    "synthesized": True
+                }
+            }
+        }
+        return _resumable_upload(youtube, body, req.video_path, req.thumbnail_path)
+    except Exception as e:
+        if _MOCK_ENABLED:
+            print(f"[YouTube Shorts] MOCK mode active (YOUTUBE_UPLOAD_MOCK=1); short upload would have failed: {e}")
+            return _mock_payload("shorts")
+        raise HTTPException(status_code=502, detail=f"YouTube Shorts upload failed: {e}") from e
+
+
+def _load_credentials():
+    """Load + refresh OAuth youtube.upload credentials from token.json."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
+    credentials = None
+    if os.path.exists(token_path):
+        credentials = Credentials.from_authorized_user_file(token_path, ["https://www.googleapis.com/auth/youtube.upload"])
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+    if not credentials:
+        raise RuntimeError("YouTube upload failed: no OAuth credentials (token.json missing or unusable)")
+    return credentials
+
+
+def _resumable_upload(youtube, body: Dict[str, Any], video_path: str, thumbnail_path: Optional[str]) -> Dict[str, Any]:
+    """Chunked resumable insert + optional custom thumbnail; returns {status, video_id, youtube_url}."""
+    import httplib2
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaFileUpload
+
+    media = MediaFileUpload(video_path, chunksize=256 * 1024, resumable=True, mimetype="video/mp4")
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+    response = None
+    while response is None:
+        try:
+            status, response = request.next_chunk()
+        except HttpError as e:
+            if e.resp.status in [308, 503, 502, 504]:
+                continue
+            else:
+                raise e
+        except (httplib2.ServerNotFoundError, http.client.IncompleteRead):
+            continue
+
+    video_id = (response or {}).get("id")
+    if not video_id:
+        raise RuntimeError("YouTube upload failed: API response carried no video id")
+
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        try:
+            media_thumb = MediaFileUpload(thumbnail_path, mimetype="image/png")
+            youtube.thumbnails().set(videoId=video_id, media_body=media_thumb).execute()
+            print(f"[YouTube Upload] Successfully set custom thumbnail: {thumbnail_path}")
+        except Exception as thumb_err:
+            print(f"Warning: Failed to upload custom thumbnail: {thumb_err}")
+
+    return {
+        "status": "success",
+        "video_id": video_id,
+        "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+        "synthetic_flag": True
+    }
 
 
 @app.post("/tools/insert_pinned_comment")

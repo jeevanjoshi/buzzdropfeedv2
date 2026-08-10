@@ -24,30 +24,30 @@ from src.schemas.state import (
 _STATS_FILE = os.path.join(os.path.dirname(__file__), "../../channel_stats.json")
 _STATS_FILE = os.path.abspath(_STATS_FILE)
 
-# Phase-aware TOPSIS weight vectors [TVS, RPM, IDI, SDI, SHM, VPH, SAT]
-# GROWTH : Prioritise IDI (novelty/searchability) + TVS (trending)
-#          RPM is low-weight because ads aren't enabled yet
-TOPSIS_WEIGHTS_GROWTH  = [0.30, 0.05, 0.30, 0.10, 0.15, 0.05, 0.05]
-# REVENUE: Prioritise RPM (niche ad revenue ceiling) + TVS
-TOPSIS_WEIGHTS_REVENUE = [0.22, 0.30, 0.18, 0.05, 0.12, 0.08, 0.05]
-# SCALE  : Balanced — sustain RPM while maintaining reach
-TOPSIS_WEIGHTS_SCALE   = [0.20, 0.28, 0.20, 0.05, 0.15, 0.07, 0.05]
+# ── Revenue goal (single source of truth) ───────────────────────────────────
+# Channel goal: $2,000 / month from ad revenue. Per-video minimums are DERIVED,
+# never hardcoded, so the gate, the competitor-volume filter and the YPP
+# watch-time estimate all agree with the actual publish cadence:
+#   per-video gate = MONTHLY_REVENUE_TARGET_USD / (TARGET_DAILY_PUBLISHES × 30)
+# e.g. $2,000 / (2 × 30) = $33.33/video at 2 publishes/day (the cron cadence).
+MONTHLY_REVENUE_TARGET_USD = max(0.0, float(os.getenv("CSVG_MONTHLY_REVENUE_TARGET_USD", "2000.0")))
+TARGET_DAILY_PUBLISHES = max(1, int(os.getenv("CSVG_TARGET_DAILY_PUBLISHES", "2")))
 
-# Revenue minimum gate per video (USD) — only enforced in REVENUE/SCALE phase
-REVENUE_GATE_MIN_USD = 16.67  # $2,000 / 120 videos per month
+# Revenue minimum gate per video (USD) — only enforced in REVENUE/SCALE phase.
+# Derived from the monthly goal ÷ cadence, aligned with cron_publish.sh (2 slots/day).
+REVENUE_GATE_MIN_USD = round(MONTHLY_REVENUE_TARGET_USD / (TARGET_DAILY_PUBLISHES * 30.0), 2)
 
-# Daily publish slots in UTC (4 videos/day targeting US/UK peak hours)
-# IST 07:00 → UTC 01:30  | IST 12:00 → UTC 06:30
-# IST 16:00 → UTC 10:30  | IST 20:00 → UTC 14:30
-DAILY_PUBLISH_SLOTS_UTC = ["01:30", "06:30", "10:30", "14:30"]
+# Daily publish launch slots in UTC — MUST match cron_publish.sh's two launch
+# bands ([11:00-12:20] and [13:30-14:30] UTC back-timed from the ~1h50m runtime):
+#   india window -> launch ~11:20 UTC   (publish ~13:10 UTC / ~6:40pm IST)
+#   global window -> launch ~13:50 UTC  (publish ~15:40 UTC / ~11:40am ET)
+DAILY_PUBLISH_SLOTS_UTC = ["11:20", "13:50"]
 
-# Niche allocation targets for 4-video/day schedule
-# Slot index 0-3 maps to DAILY_PUBLISH_SLOTS_UTC
+# Niche allocation targets for the 2-publish/day schedule (cron slot → preferred niche).
+# Slot index 0-1 maps to DAILY_PUBLISH_SLOTS_UTC; dynamic region still overrides.
 SLOT_NICHE_MAP = {
     0: {"niche": "Technology & Artificial Intelligence", "audience_type": "tech"},
     1: {"niche": "Personal Finance & Investing",         "audience_type": "investor"},
-    2: {"niche": "Business & Entrepreneurship",          "audience_type": "business"},
-    3: {"niche": "Space & Scientific Innovation",        "audience_type": "space"},
 }
 
 
@@ -161,7 +161,12 @@ def get_channel_stats(force_refresh: bool = False) -> ChannelStats:
 
 
 def get_topsis_weights(channel_phase: str) -> list:
-    """Returns the correct TOPSIS weight vector for the current channel phase."""
+    """Returns the correct TOPSIS weight vector for the current channel phase.
+    Single source of truth is ``src.engine.topic_topsis`` (the 8-criterion,
+    revenue-led vectors); this is a thin delegate so nothing drifts."""
+    from src.engine.topic_topsis import (
+        TOPSIS_WEIGHTS_GROWTH, TOPSIS_WEIGHTS_REVENUE, TOPSIS_WEIGHTS_SCALE,
+    )
     if channel_phase == CHANNEL_PHASE_SCALE:
         return TOPSIS_WEIGHTS_SCALE
     elif channel_phase == CHANNEL_PHASE_REVENUE:
@@ -192,8 +197,9 @@ def get_ypp_progress_report(stats: ChannelStats) -> Dict[str, Any]:
     subs_pct = min(100.0, stats.subscribers / YPP_SUBS_THRESHOLD * 100)
     hrs_pct  = min(100.0, stats.total_watch_hours / YPP_WATCH_HOURS_THRESHOLD * 100)
 
-    # At 4 videos/day, 13 min each, 42% completion → 21.84 watch-mins/day at 100 views/vid
-    views_per_day_estimate = 400  # 4 videos × 100 views each (conservative new channel)
+    # At TARGET_DAILY_PUBLISHES/day, 13 min each → estimated watch-mins/day from a
+    # conservative new-channel view estimate (100 views/video).
+    views_per_day_estimate = TARGET_DAILY_PUBLISHES * 100
     watch_mins_per_day = views_per_day_estimate * 13.0 * 0.42
     hrs_remaining = max(0, YPP_WATCH_HOURS_THRESHOLD - stats.total_watch_hours)
     days_to_4k_hrs = (hrs_remaining * 60) / max(1, watch_mins_per_day)
@@ -218,6 +224,8 @@ channel_phase_manager = type("ChannelPhaseManager", (), {
     "get_next_publish_time_utc": staticmethod(get_next_publish_time_utc),
     "get_ypp_progress_report": staticmethod(get_ypp_progress_report),
     "REVENUE_GATE_MIN_USD": REVENUE_GATE_MIN_USD,
+    "MONTHLY_REVENUE_TARGET_USD": MONTHLY_REVENUE_TARGET_USD,
+    "TARGET_DAILY_PUBLISHES": TARGET_DAILY_PUBLISHES,
     "SLOT_NICHE_MAP": SLOT_NICHE_MAP,
     "DAILY_PUBLISH_SLOTS_UTC": DAILY_PUBLISH_SLOTS_UTC,
 })()

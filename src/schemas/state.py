@@ -26,6 +26,7 @@ class SEOMetadata(BaseModel):
     tags: List[str] = Field(default_factory=list)     # 15 high-volume YouTube search tags
     thumbnail_brief: str = ""               # ≤6 words for thumbnail text overlay
     chapter_timestamps: List[str] = Field(default_factory=list)  # ["0:00 Intro", "1:20 ..." ...]
+    act_titles: List[str] = Field(default_factory=list)  # per-act contextual chapter labels, parallel to chapter_timestamps
 
 
 class RevenueForecast(BaseModel):
@@ -77,6 +78,9 @@ class TopicCandidate(BaseModel):
     # Narrow query used to measure precise per-candidate demand (LLM-synthesized
     # tool topics carry the exact search phrase; RSS candidates leave it empty).
     demand_query: str = Field(default="", description="Exact narrow YouTube search phrase for precise demand measurement")
+    # Expected ad revenue (USD) for the candidate's BEST region/market — the
+    # revenue-led 8th TOPSIS criterion (ad revenue in region = highest weight).
+    regional_revenue_usd: float = Field(default=0.0, description="Expected total ad revenue for the best-market pick (USD)")
 
 
 from enum import Enum
@@ -158,7 +162,11 @@ class GlobalState(BaseModel):
     pipeline_id: str
     timestamp: str
     execution_stage: str = "INITIALIZATION"
-    region: str = "all"  # pipeline-run region ("all" | "india" | "global")
+    region: str = "all"  # pipeline-run region ("all" | "india" | "global") — filled in dynamically when "all"
+    # Dynamic region selection result (when region was "all"): the winning
+    # market and why, so the decision is resume-safe and auditable.
+    region_market: str = ""    # "us" | "uk" | "ca" | "au" | "eu" | "india"
+    region_reason: str = ""    # human-readable rationale
     selected_topic: Optional[TopicCandidate] = None
     verified_facts: List[VerifiedFact] = Field(default_factory=list)
     crawled_content: str = ""

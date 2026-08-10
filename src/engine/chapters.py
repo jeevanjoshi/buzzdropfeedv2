@@ -30,6 +30,90 @@ ACT_NAMES: List[str] = [
 STATIC_ACT_STARTS: List[int] = [0, 135, 270, 405, 540, 675]  # 0:00, 2:15, ...
 
 
+_PROSE_STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "for", "with",
+    "by", "at", "from", "as", "is", "are", "was", "were", "be", "been", "being",
+    "that", "this", "these", "those", "it", "its", "he", "she", "they", "them",
+    "we", "you", "your", "our", "has", "have", "had", "do", "does", "did", "will",
+    "would", "can", "could", "should", "about", "into", "over", "after", "before",
+    "not", "no", "what", "which", "who", "how", "why", "when", "where", "there",
+    "here", "their", "his", "her", "more", "most", "some", "any", "also", "just",
+    "because", "while", "during", "between", "through", "against", "around",
+    "now", "back", "still", "under", "along", "within", "across", "been", "get",
+    "got", "make", "made", "take", "took", "given", "give", "come", "came",
+    "since", "even", "only", "then", "than", "very", "much", "many", "like",
+    "these", "those", "those", "things", "thing", "way", "ways", "part", "say",
+    "says", "said", "told", "tells", "might", "must", "may", "shall", "need",
+}
+
+
+def _meaningful_terms(text: str, top_n: int = 3) -> List[str]:
+    """Top content-bearing terms from a narration snippet, in document order.
+    Sentence-openers and weak verbs are ignored so the phrase is subject-led."""
+    import re as _re
+    import collections
+
+    if not text:
+        return []
+    words = _re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", text.lower())
+    # Skip the first ~5 words: sentence openers ("this is", "the case") almost
+    # never carry the chapter's real subject.
+    candidate = words[5:]
+    meaningful = [w for w in candidate if w not in _PROSE_STOPWORDS and len(w) >= 4]
+    if not meaningful:
+        return []
+    counts = collections.Counter(meaningful)
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], candidate.index(kv[0])))
+    terms = [w for w, _ in ordered[:top_n]]
+    return sorted(terms, key=lambda t: candidate.index(t))
+
+
+def derive_contextual_act_titles(
+    shots: Optional[Any] = None,
+    act_names: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Build per-act chapter labels FROM THE ACTUAL SCRIPT content instead of the
+    static generic ``ACT_NAMES``. Groups the shots by ``act_index`` and condenses
+    each act's ``narration_text`` into a short topical phrase, e.g.
+    "Act 3: Quantum Error Correction", so every video ships unique chapters
+    that match what its narration actually covers.
+
+    Falls back to the default ``ACT_NAMES`` when no usable shot content exists so
+    descriptions are never empty/malformed.
+    """
+    labels = list(act_names or ACT_NAMES)
+    if not shots:
+        return labels
+
+    acts: dict = {}
+    for shot in shots:
+        act = getattr(shot, "act_index", None)
+        if not act:
+            continue
+        narr = " ".join(
+            str(x) for x in (
+                getattr(shot, "narration_text", None),
+                getattr(shot, "beat_summary", None),
+            ) if x
+        )
+        acts.setdefault(act, []).append(narr)
+
+    out: List[str] = []
+    for i in range(1, len(labels) + 1):
+        narrs = acts.get(i) or []
+        context = " ".join(narrs)
+        generic = labels[i - 1].split(":", 1)[-1].strip()
+        terms = _meaningful_terms(context)
+        if len(terms) >= 2:
+            # Trim back to the shoulder words so the title stays <= ~7 words.
+            phrase = " ".join(terms[: len(terms)])
+            out.append(f"Act {i}: {phrase.title()}")
+        else:
+            out.append(f"Act {i}: {generic}")
+    return out
+
+
 def _mmss(total_seconds: float) -> str:
     total = int(round(total_seconds))
     h, rem = divmod(total, 3600)

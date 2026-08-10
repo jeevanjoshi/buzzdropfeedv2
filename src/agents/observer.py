@@ -490,7 +490,8 @@ class ObserverAgent:
 
     def evaluate_script(
         self, script: ScriptData, verified_facts: List[VerifiedFact] = None,
-        topic=None, channel_phase: str = "REVENUE", crawled_content: str = ""
+        topic=None, channel_phase: str = "REVENUE", crawled_content: str = "",
+        region: str = "all"
     ) -> Tuple[bool, List[str]]:
         """
         Evaluates script constraints:
@@ -553,9 +554,11 @@ class ObserverAgent:
             return False, violations  # Early exit — no point checking further
 
         # ── Gate 0b: Revenue Gate (REVENUE + SCALE phases only) ─────────────
-        # In GROWTH phase we skip this — goal is watch-time not RPM
+        # In GROWTH phase we skip this — goal is watch-time not RPM.
+        # Evaluated against the market this topic was selected for (dynamic
+        # region), matching the fact-retriever forecast.
         if topic and channel_phase in ("REVENUE", "SCALE"):
-            rev = monetization_optimizer.calculate_revenue_yield(topic, estimated_runtime_mins=13.0)
+            rev = monetization_optimizer.calculate_revenue_yield(topic, estimated_runtime_mins=13.0, region=region)
             min_rev = channel_phase_manager.REVENUE_GATE_MIN_USD
             if rev["total_expected_revenue_usd"] < min_rev:
                 violations.append(
@@ -769,6 +772,7 @@ class ObserverAgent:
             topic=state.selected_topic,
             channel_phase=state.channel_phase,
             crawled_content=state.crawled_content,
+            region=getattr(state, "region_market", "") or getattr(state, "region", "all") or "all",
         )
 
         if is_approved:

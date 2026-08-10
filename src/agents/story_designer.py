@@ -1564,6 +1564,54 @@ class StoryDesignerAgent:
                 return title
         return None
 
+    def _generate_act_titles(self, script: ScriptData) -> Optional[List[str]]:
+        """
+        Best-effort LLM generation of 6 short, content-aware YouTube chapter
+        titles, one per act, grounded in that act's actual narration. Returns
+        None when the LLM is unavailable/unusable so callers fall back to the
+        deterministic ``derive_contextual_act_titles`` derivation.
+        """
+        if not script or not getattr(script, "shots", None) or not self.llm_client.is_available():
+            return None
+        act_snippets: List[str] = []
+        for i in range(1, 7):
+            narrs = [
+                s.narration_text for s in script.shots
+                if getattr(s, "act_index", None) == i and getattr(s, "narration_text", "")
+            ]
+            snippet = " / ".join(narrs)[:700]
+            act_snippets.append(f"Act {i}: {snippet[:300]}")
+        prompt = (
+            "Here is the narration content of each act of an infotainment documentary. "
+            "For EACH act write ONE short YouTube chapter title (3-7 words, no 'Act N' "
+            "prefix, lowercase unless proper noun) that captures what that act is actually "
+            "about. They must differ from one another and sound like real video chapters, "
+            "not generic labels.\n\n"
+            + "\n\n".join(snippet for snippet in act_snippets if snippet) +
+            "\n\nReturn ONLY a JSON object with a key 'titles' holding an array of exactly "
+            "6 strings, one per act."
+        )
+        try:
+            result = self.llm_client.generate_json(
+                prompt,
+                "You write concise, factual YouTube chapter titles. Return valid JSON only.",
+                route="generate",
+            )
+        except Exception:
+            return None
+        titles = result.get("titles") if isinstance(result, dict) else None
+        if not isinstance(titles, list) or len(titles) != 6:
+            return None
+        cleaned: List[str] = []
+        for t in titles:
+            t = str(t).strip(" \n\t\"'")
+            if not t or "json" in t.lower() or "{" in t or "}" in t:
+                return None
+            cleaned.append(t)
+        if len(set(cleaned)) < 3:  # degenerate near-duplicates are worse than generic
+            return None
+        return cleaned
+
     def generate_seo_metadata(self, topic: TopicCandidate, script: ScriptData, verified_facts: Optional[List[VerifiedFact]] = None) -> SEOMetadata:
         """
         Generates high-CTR SEO metadata (Title, Description, Tags, Thumbnail Brief) alongside the script.
@@ -1600,9 +1648,15 @@ class StoryDesignerAgent:
 
         # Chapter timestamps from the shared helper (design time -> uses shot
         # duration_estimate; measured durations only exist at publish time).
-        from src.engine.chapters import compute_act_chapters
+        # Prefer LLM-generated content-aware act titles; fall back to the
+        # deterministic derivation from the shot narrations, then ACT_NAMES.
+        from src.engine.chapters import compute_act_chapters, derive_contextual_act_titles
+        act_titles = self._generate_act_titles(script)
+        if act_titles is None:
+            act_titles = derive_contextual_act_titles(getattr(script, "shots", None))
         _ch_lines, chapter_timestamps = compute_act_chapters(
             shots=getattr(script, "shots", None),
+            act_names=act_titles,
         )
         chapters_str = "\n".join(_ch_lines)
 
@@ -1633,6 +1687,7 @@ class StoryDesignerAgent:
             tags=list(set(tags)),
             thumbnail_brief=brief,
             chapter_timestamps=chapter_timestamps,
+            act_titles=act_titles,
         )
 
     def process(self, state: GlobalState, region: str = "all", revision_violations: Optional[List[str]] = None) -> A2AMessage:

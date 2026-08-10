@@ -1060,6 +1060,151 @@ def case_chapter_timestamps():
 
 
 # ---------------------------------------------------------------------------
+# Case 14 — documentary / investigative storability gate (converged plan).
+# Direct news with no story potential must never be considered; evergreen
+# synthesized topics pass through; all-culled falls back to best-with-warning.
+# ---------------------------------------------------------------------------
+def _mk_cand(cid, headline, summary="", url="https://example.com/news/1", kws=("news",)):
+    return TopicCandidate(
+        candidate_id=cid, headline=headline, summary=summary, source_url=url,
+        keywords=list(kws), tvs_score=0.8, rpm_score=0.7, idi_score=0.6,
+        sdi_score=0.5, sat_score=0.3,
+    )
+
+
+def case_storability_gate():
+    from src.engine.documentary_potential import (
+        score_documentary_potential, gate_candidates,
+    )
+    investigative = _mk_cand(
+        "scandal-probe", "SEC opens probe into Nvidia's data-centre sales amid fraud allegations",
+        "The SEC investigation follows whistleblower claims of misleading revenue. Legal experts "
+        "weigh the fallout, which could reshape how the company books billions in AI deals.",
+        "https://www.cnbc.com/sec-nvidia", ["sec", "nvidia", "probe"])
+    blip = _mk_cand(
+        "mac-launch", "Apple launches new MacBook Air with latest chip",
+        "Apple unveiled the new MacBook Air lineup at today's event, available this month.",
+        "https://www.theverge.com/apple", ["apple", "macbook"])
+    evergreen = _mk_cand(
+        "narrow-synth-01", "Cursor vs Windsurf for building AI agents in 2026",
+        "A detailed head-to-head of the two AI coding tools for production agent work.",
+        "", ["cursor", "windsurf"])
+    evergreen.demand_query = "cursor vs windsurf for agents"
+
+    inv = score_documentary_potential(investigative)["verdict"]
+    bli = score_documentary_potential(blip)["verdict"]
+
+    kept, culled = gate_candidates([investigative, blip, evergreen])
+    kept_ids = {c.candidate_id for c in kept}
+    culled_ids = {cand.candidate_id for cand, _audit in culled}
+    ok1 = inv == "documentary"                    # probe/scandal/legal/risk = story
+    ok2 = bli == "direct_news"                    # press-release launch = culled
+    ok3 = "scandal-probe" in kept_ids and "narrow-synth-01" in kept_ids  # evergreen + doc kept
+    ok4 = "mac-launch" in culled_ids              # blip never considered
+    # all-culled -> ship best-with-warning (never abort, never empty selection)
+    all_blips = [_mk_cand(f"b{i}", "Widget Inc reports quarterly revenue up 3% this quarter",
+                          "Widget Inc announced quarterly results today with a small revenue increase.",
+                          "https://x.com/r", [f"w{i}"]) for i in range(3)]
+    kept2, culled2 = gate_candidates(all_blips)
+    ok5 = not kept2 and len(culled2) == 3
+    if not kept2:
+        best_warn = max(all_blips, key=lambda c: score_documentary_potential(c)["score"])
+        ok5 = ok5 and best_warn.candidate_id is not None
+    record("STORABILITY_GATE", ok1 and ok2 and ok3 and ok4 and ok5,
+           f"investigative={inv}, blip={bli}, kept={sorted(kept_ids)}, culled={sorted(culled_ids)}, all_culled_is_empty={not kept2}")
+    return ok1 and ok2 and ok3 and ok4 and ok5
+
+
+# ---------------------------------------------------------------------------
+# Case 15 — regional ad revenue has the HIGHEST weight (converged plan).
+# Revenue-led region selection + revenue as the 8th, highest-weighted TOPSIS
+# criterion. A market's own topics still win despite lower locale RPM.
+# ---------------------------------------------------------------------------
+def case_region_revenue_dominates():
+    from src.engine import region_intelligence as ri
+    from src.engine.topic_topsis import (
+        TOPSIS_WEIGHTS_REVENUE, TOPSIS_WEIGHTS_GROWTH, rank_topics_topsis,
+    )
+
+    rba = _mk_cand("rba", "RBA holds rates at 4.1% as Australian inflation cools, ASX 200 steady",
+                   "The Reserve Bank of Australia left the cash rate unchanged, AUD steady.",
+                   "https://www.smh.com.au/business", ["rba", "asx"])
+    meta = _mk_cand("meta", "Meta launches Muse Glimmer model as Zuckerberg champions AI",
+                    "Meta released open-weight Muse Spark, its most powerful AI model.",
+                    "https://www.theverge.com/meta", ["meta", "ai"])
+    sensex = _mk_cand("sx", "Sensex hits record high as RBI holds rates, Nifty climbs above 26,000",
+                      "Indian markets rally after the Reserve Bank of India held rates.",
+                      "https://www.moneycontrol.com/news", ["sensex", "nifty", "rbi"])
+
+    pr_rba = ri.candidate_region_profile(rba, 13 * 60 + 40)
+    pr_sensex = ri.candidate_region_profile(sensex, 13 * 60 + 40)
+    pr_meta = ri.candidate_region_profile(meta, 13 * 60 + 40)
+    ok1 = pr_rba["market"] == "au" and pr_rba["l2_region"] == "global"     # AU topic -> AU
+    ok2 = pr_sensex["market"] == "india" and pr_sensex["l2_region"] == "india"  # India topic -> IN
+    ok3 = pr_meta["market"] == "us"                                        # global tech -> US
+
+    # Revenue weighting: ALPHA (revenue) must be the single largest selection weight.
+    ok4 = ri.ALPHA > ri.BETA > ri.GAMMA and ri.ALPHA > 0.45
+
+    # TOPSIS: revenue is the 8th, highest single weight in REVENUE; GROWTH is
+    # DISCOVERY-led (TVS + IDI lead; revenue secondary, pre-YPP it earns $0).
+    ok5 = len(TOPSIS_WEIGHTS_REVENUE) == 8 and max(TOPSIS_WEIGHTS_REVENUE) == TOPSIS_WEIGHTS_REVENUE[7]
+    ok6 = (len(TOPSIS_WEIGHTS_GROWTH) == 8
+           and TOPSIS_WEIGHTS_GROWTH[0] == 0.25 == TOPSIS_WEIGHTS_GROWTH[2]
+           and TOPSIS_WEIGHTS_GROWTH[7] < TOPSIS_WEIGHTS_GROWTH[0])
+
+    # Higher regional revenue must out-rank a rival on the REVENUE vector.
+    meta.regional_revenue_usd = 45.0
+    sensex.regional_revenue_usd = 11.0
+    rba.regional_revenue_usd = 42.0
+    ranked = rank_topics_topsis([rba, meta, sensex], channel_phase="REVENUE")
+    ok7 = ranked[0].candidate_id == "meta"     # highest regional ad revenue wins first
+
+    record("REGION_REVENUE_DOMINATES",
+           ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7,
+           f"weights(revenue)={TOPSIS_WEIGHTS_REVENUE}, ALPHA={ri.ALPHA}, "
+           f"rba->{pr_rba['market']}, sensex->{pr_sensex['market']}, meta->{pr_meta['market']}, "
+           f"top1={ranked[0].candidate_id}")
+    return ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
+
+
+# ---------------------------------------------------------------------------
+# Case 16 — revenue-goal alignment: $2,000/month drives every money constant.
+# The derived per-video gate and the competitor-volume filter must agree with
+# the cadence, and the TOPSIS weights must have ONE source of truth.
+# ---------------------------------------------------------------------------
+def case_revenue_goal_alignment():
+    from src.engine.channel_phase_manager import (
+        channel_phase_manager, MONTHLY_REVENUE_TARGET_USD,
+        TARGET_DAILY_PUBLISHES, REVENUE_GATE_MIN_USD,
+    )
+    from src.engine.monetization_optimizer import monetization_optimizer
+    from src.engine.topic_topsis import TOPSIS_WEIGHTS_REVENUE
+
+    ok1 = MONTHLY_REVENUE_TARGET_USD == 2000.0
+    ok2 = TARGET_DAILY_PUBLISHES == 2                      # 2/day => 60/month
+    ok3 = abs(REVENUE_GATE_MIN_USD - 2000.0 / (2 * 30)) < 0.01   # $33.33/video
+    # TOPSIS weights: single source via the delegate (no drift to 7-criteria).
+    ok4 = channel_phase_manager.get_topsis_weights("REVENUE") == TOPSIS_WEIGHTS_REVENUE
+    ok5 = len(channel_phase_manager.get_topsis_weights("REVENUE")) == 8
+    # Competitor-volume filter now uses the derived per-video gate, not 2450:
+    # v_req(mid 9.5 tech) = (33.33/9.5)*1000 ≈ 3508 → 100k competitor views passes;
+    # under the old $2450 default it would need ~258k and fail.
+    r = monetization_optimizer.filter_by_competitor_volume(
+        "Technology & Artificial Intelligence", 100_000)
+    ok6 = r["passes_revenue_gate"] and r["v_req_realistic"] < 50_000
+    # Publish slots match the cron's two launch windows (cadence = 2/day).
+    ok7 = channel_phase_manager.DAILY_PUBLISH_SLOTS_UTC == ["11:20", "13:50"]
+
+    record("REVENUE_GOAL_ALIGNMENT",
+           ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7,
+           f"monthly=${MONTHLY_REVENUE_TARGET_USD:.0f}, daily={TARGET_DAILY_PUBLISHES}, "
+           f"gate=${REVENUE_GATE_MIN_USD:.2f}, slots={channel_phase_manager.DAILY_PUBLISH_SLOTS_UTC}, "
+           f"comp_gate_vreq={r['v_req_realistic']:,.0f}")
+    return ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def main():
@@ -1077,6 +1222,9 @@ def main():
     case_term_register_growth()
     case_best_synonym_guard()
     case_chapter_timestamps()
+    case_storability_gate()
+    case_region_revenue_dominates()
+    case_revenue_goal_alignment()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

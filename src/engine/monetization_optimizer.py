@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from src.schemas.state import TopicCandidate
 
 
@@ -80,13 +80,24 @@ class MonetizationYieldOptimizer:
         }
 
     def filter_by_competitor_volume(
-        self, category: str, competitor_30d_avg_views: float, target_revenue_usd: float = 2450.0
+        self, category: str, competitor_30d_avg_views: float, target_revenue_usd: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Competitor Volume Rejection Gate:
         Rejects topic if competitor 30-day average views < V_req (realistic).
         This ensures the niche has sufficient organic demand to sustain target revenue.
+
+        ``target_revenue_usd`` defaults to the channel's derived per-video revenue
+        gate (monthly goal ÷ daily cadence, ``channel_phase_manager.
+        REVENUE_GATE_MIN_USD``) so the gate, the gate and the $2,000/month goal
+        never drift apart.
         """
+        if target_revenue_usd is None:
+            try:
+                from src.engine.channel_phase_manager import REVENUE_GATE_MIN_USD
+                target_revenue_usd = REVENUE_GATE_MIN_USD
+            except Exception:
+                target_revenue_usd = 33.33
         v_req = self.calculate_required_views(target_revenue_usd, category)
         v_required = v_req["v_req_realistic"]
         passes = competitor_30d_avg_views >= v_required
@@ -144,14 +155,27 @@ class MonetizationYieldOptimizer:
 
     def _locale_multiplier(self, region: str) -> float:
         """
-        Audience-locale RPM factor. Our global high-RPM feeds target US/UK/CA/AU
-        (net-RPM ~$5-15+, the highest ad markets). Lower-RPM regions scale down.
+        Audience-locale RPM factor. Shares its per-market RPM baselines with
+        :mod:`region_intelligence` so the revenue forecast agrees with the
+        market the topic was selected for:
+          us 1.00 | uk 0.97 | ca 0.96 | au 0.94 | eu 0.90 | india 0.25
+        Legacy labels still work: "global"/"all" -> 1.00 (US-led), "india" and
+        any Asia/South-market alias -> 0.25, "eu"/europe  -> 0.90.
         """
+        try:
+            from .region_intelligence import MARKETS as _R_MARKETS
+            r = (region or "all").lower().strip()
+            if r in _R_MARKETS:
+                return float(_R_MARKETS[r]["rpm"])
+        except Exception:
+            pass  # import/edge guard: fall through to the legacy heuristic
         r = (region or "all").lower()
         if any(k in r for k in ("india", "asia", "sa", "africa", "pakistan", "philippines", "indonesia", "ph", "in")):
             return 0.25
         if any(k in r for k in ("eu", "europe", "de", "nl", "no")):
             return 0.90
+        if any(k in r for k in ("uk", "ca", "au")):
+            return 0.97 if "uk" in r else (0.96 if "ca" in r else 0.94)
         return 1.00  # us/uk/ca/au / all / global
 
     def calculate_revenue_yield(
