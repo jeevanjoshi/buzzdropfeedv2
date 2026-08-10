@@ -745,12 +745,17 @@ class MediaProducerAgent:
             # budget is exhausted. Cost is ~$0.05/run for 16 imgs, well under the cap.
             if not is_specialized:
                 # ── Visual cache: reuse an already-paid fal/Replicate image for
-                # the SAME enriched prompt, so re-renders / narration-only fixes
-                # never spend fal again. Cache is keyed on the exact prompt the
-                # image engine sees (enriched = base prompt + act + shot id).
+                # the SAME shot's enriched prompt, so re-renders / narration-only
+                # fixes never spend fal again. Cache is keyed on shot_id + the
+                # exact prompt the image engine sees.
                 found_cache = False
                 if _VISUAL_CACHE_ENABLED:
-                    _ck = _visual_cache_key(visual_prompt)
+                    # Key includes shot_id so two DIFFERENT shots that share a
+                    # prompt+act never collide (which would reuse one shot's image
+                    # in another — duplicate visuals within a video). The SAME
+                    # shot re-rendered (proofing, narration-only fix, resume) still
+                    # derives the identical key, so valid cross-run reuse is kept.
+                    _ck = _visual_cache_key(f"{shot.shot_id}:{visual_prompt}")
                     _cp = os.path.join(_visual_cache_dir(), f"{_ck}.png")
                     if os.path.exists(_cp) and os.path.getsize(_cp) > 5000:
                         import shutil as _sh
@@ -769,7 +774,7 @@ class MediaProducerAgent:
                                 await generate_flux_image(ImageGenRequest(prompt=visual_prompt, output_image_path=img_path))
                                 # Persist the paid image for later reuse.
                                 if _VISUAL_CACHE_ENABLED and os.path.exists(img_path) and os.path.getsize(img_path) > 5000:
-                                    _ck = _visual_cache_key(visual_prompt)
+                                    _ck = _visual_cache_key(f"{shot.shot_id}:{visual_prompt}")
                                     _cp = os.path.join(_visual_cache_dir(), f"{_ck}.png")
                                     import shutil as _sh2
                                     _sh2.copy2(img_path, _cp)
