@@ -95,8 +95,18 @@ The MiniLM model is a **frozen pretrained encoder** — no gradient updates, no 
 2. **Supervised reward classifier** — accumulate accepted-vs-rejected scripts, fine-tune a small DistilBERT to predict pass/fail. Needs ~hundreds of labeled samples.
 3. **RLHF/DPO on the writer** — treat the Observer as a reward signal and fine-tune the generative model. Requires an open model (Gemini is not fine-tunable); heavy, out of scope for 2-vCPU/12 GB.
 
+## Seed Traffic Seeding & Distribution Pipeline
+An automated post-publish distribution pipeline designed to seed early traffic, boost CTR, and jumpstart YouTube's recommendation metrics.
+
+### Components
+1. **Instant Pinned Comment:** Posts an engaging question thread via `/tools/insert_pinned_comment` right after publication to drive early comments.
+2. **Micro-Content Clips:** The `MicroContentProducer` extracts key 30-60s acts from the master video, crops them to 9:16 vertical crop layout (`crop=ih*9/16:ih`), and renders them as independent Clips for Shorts/Reels/TikTok.
+3. **Seeding Assistant (`SeedDistributor`):** Creates tailored draft templates for Reddit, Hacker News, LinkedIn, X, TikTok, Instagram, Pinterest, Telegram, and Medium based on the video's summary. It dispatches a rich embed to Slack/Discord webhooks containing copyable markdown blocks.
+4. **Intelligent Semantic Relevance:** Computes cosine similarity between thread topics and video content using the resident `MiniLM` sentence-transformer. Posts are only seeded if relevance matches the `0.75` threshold.
+
 ## Conventions & gotchas
 - New hosts/agents must not duplicate functionality already in `src/engine`; follow the existing A2A message + `tracer.record_step(state, ...)` + structured `logger` pattern used by every agent.
 - Blocked/promo/advertorial content is filtered out of RSS and RAG candidates (covered by the smoke test's RAG/publisher path); keep this intact — it's a monetization/quality invariant.
 - Publish path enforces YouTube quota (max ~4 uploads/day) and EU AI Act synthetic-content disclosure tags; don't bypass in tests or new features.
 - Story requires live LLM and quality gates (Observer + Gates 1/3b/4/5/6/7) pass before publish. Fact/temporal/revenue/audience violations and quality gates 1/3b/4/5/6/7 are hard abort conditions — never warnings. Observer style-class violations are soft (see Semantic quality gates section).
+

@@ -3,7 +3,14 @@ import datetime
 from typing import Dict, Any, Optional
 from src.schemas.state import GlobalState, UploadMetadata
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
-from mcp_servers.youtube_cloud.server import check_quota_available, upload_youtube_resumable, QuotaCheckRequest, UploadRequest
+from mcp_servers.youtube_cloud.server import (
+    check_quota_available,
+    upload_youtube_resumable,
+    insert_pinned_comment,
+    QuotaCheckRequest,
+    UploadRequest,
+    InsertCommentRequest,
+)
 from src.engine.run_budget import run_budget
 
 
@@ -38,12 +45,93 @@ class PublisherAgent:
             tags = seo.tags or []
         else:
             title = state.script_data.title if state.script_data else state.selected_topic.headline
+            default_chapters_str = (
+                "0:00 - Act 1: The Inciting Incident\n"
+                "2:15 - Act 2: Historical Precedents & Origins\n"
+                "4:30 - Act 3: Deep Technical Mechanics\n"
+                "6:45 - Act 4: Actionable Real-World Impact\n"
+                "9:00 - Act 5: Critical Risks & Counter-Arguments\n"
+                "11:15 - Act 6: Strategic Future Verdict"
+            )
             desc = (
                 f"Deep-dive financial storytelling breakdown on: {title}.\n\n"
+                f"CHAPTERS:\n"
+                f"{default_chapters_str}\n\n"
                 f"Sources & Facts: {state.selected_topic.source_url if state.selected_topic else 'Verified Financial News Feeds'}\n\n"
                 f"Disclaimer: AI-synthesized visualization for educational & infotainment storytelling."
             )
             tags = state.selected_topic.keywords if state.selected_topic else ["finance", "tech"]
+
+        # Calculate actual start times for each act based on actual (measured) shot durations and crossfades
+        act_names = {
+            1: "Act 1: The Inciting Incident",
+            2: "Act 2: Historical Precedents & Origins",
+            3: "Act 3: Deep Technical Mechanics",
+            4: "Act 4: Actionable Real-World Impact",
+            5: "Act 5: Critical Risks & Counter-Arguments",
+            6: "Act 6: Strategic Future Verdict"
+        }
+        act_starts = {}
+        if state.script_data and state.script_data.shots and state.asset_paths:
+            shots = state.script_data.shots
+            durs = state.asset_paths.measured_durations or []
+            crossfade = getattr(state.asset_paths, "crossfade_used", 0.0)
+            
+            # running_offset tracks the start time of the current shot in the timeline
+            running_offset = 0.0
+            for idx, shot in enumerate(shots):
+                dur = durs[idx] if idx < len(durs) else shot.duration_estimate
+                if shot.act_index not in act_starts:
+                    act_starts[shot.act_index] = running_offset
+                running_offset += dur
+                if crossfade > 0 and idx < len(shots) - 1:
+                    running_offset -= crossfade
+
+        chapters_lines = []
+        chapter_timestamps = []
+        for act_idx in sorted(act_names.keys()):
+            start_time = act_starts.get(act_idx, 0.0)
+            if act_idx == 1 or start_time < 0.1:
+                start_time = 0.0
+            
+            total_seconds = int(round(start_time))
+            h = total_seconds // 3600
+            m = (total_seconds % 3600) // 60
+            s = total_seconds % 60
+            if h > 0:
+                time_str = f"{h}:{m:02d}:{s:02d}"
+            else:
+                time_str = f"{m}:{s:02d}"
+            
+            chapters_lines.append(f"{time_str} - {act_names[act_idx]}")
+            chapter_timestamps.append(f"{time_str} {act_names[act_idx]}")
+        
+        chapters_str = "\n".join(chapters_lines)
+        
+        # Dynamic replacement of chapters in the description
+        old_chapters_pattern = (
+            "0:00 - Act 1: The Inciting Incident\n"
+            "2:15 - Act 2: Historical Precedents & Origins\n"
+            "4:30 - Act 3: Deep Technical Mechanics\n"
+            "6:45 - Act 4: Actionable Real-World Impact\n"
+            "9:00 - Act 5: Critical Risks & Counter-Arguments\n"
+            "11:15 - Act 6: Strategic Future Verdict"
+        )
+        if "[CHAPTERS_PLACEHOLDER]" in desc:
+            desc = desc.replace("[CHAPTERS_PLACEHOLDER]", chapters_str)
+        elif old_chapters_pattern in desc:
+            desc = desc.replace(old_chapters_pattern, chapters_str)
+        else:
+            if "CHAPTERS:" in desc:
+                parts = desc.split("CHAPTERS:")
+                desc = parts[0] + "CHAPTERS:\n" + chapters_str + "\n\n" + parts[1].split("\n\n", 1)[-1]
+            else:
+                desc += f"\n\nCHAPTERS:\n{chapters_str}"
+
+        # Update the state object
+        if seo:
+            seo.description = desc
+            seo.chapter_timestamps = chapter_timestamps
 
         upload_res = await upload_youtube_resumable(UploadRequest(
             video_path=state.asset_paths.final_video,
@@ -54,14 +142,44 @@ class PublisherAgent:
         ))
         run_budget.record_yt("upload")
 
+        video_id = upload_res.get("video_id", "demo_id")
+
+        # 3. Post Instant Pinned Engagement Comment to kickstart early interaction metric
+        engagement_question = (
+            f"What is your take on {title}? Share your thoughts below — we reply to every comment!"
+        )
+        await insert_pinned_comment(InsertCommentRequest(
+            video_id=video_id,
+            comment_text=engagement_question
+        ))
+
         meta = UploadMetadata(
-            video_id=upload_res.get("video_id", "demo_id"),
+            video_id=video_id,
             status="PUBLISHED",
             retry_count=0,
             synthetic_content_flag=True
         )
         state.upload_metadata = meta
         state.execution_stage = "PUBLISHED_SUCCESS"
+
+        # 4. Generate Short-Form 9:16 Micro-Content Clips (Shorts / Reels / TikTok)
+        try:
+            from src.engine.micro_content_producer import micro_content_producer
+            short_paths = micro_content_producer.generate_shorts(state, max_shorts=2)
+            if hasattr(state.asset_paths, "shorts"):
+                state.asset_paths.shorts = short_paths
+        except Exception as e:
+            print(f"[MicroContentProducer] Notice: {e}")
+
+
+        # 5. Create & Dispatch Seed Traffic Package (Reddit / HN / Webhook)
+        try:
+            from src.engine.seed_distributor import seed_distributor
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+            seed_pkg = seed_distributor.create_seed_package(state, youtube_url)
+            await seed_distributor.dispatch_webhook_notification(seed_pkg)
+        except Exception as e:
+            print(f"[SeedDistributor] Notice: {e}")
 
         # Record to persistent deduplication history so future runs skip this topic
         from src.engine.topic_deduplicator import topic_deduplicator
@@ -71,6 +189,7 @@ class PublisherAgent:
         topic_deduplicator.record_published_topic(topic_headline, topic_summary, topic_kws)
 
         return meta
+
 
     async def process(self, state: GlobalState, daily_uploads: int = 0) -> A2AMessage:
         """

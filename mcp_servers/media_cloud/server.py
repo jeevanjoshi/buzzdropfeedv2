@@ -327,13 +327,22 @@ async def generate_thumbnail(req: ThumbnailRequest):
             # Bright, vibrant, on-theme background: "dark moody" reads muddy/dark
             # and the raw headline string produces garbled "text-in-image" tearing.
             # Explicit no-text guard stops fal/replicate from painting letters.
-            prompt = (
-                f"Widescreen 16:9 YouTube thumbnail background image of: {scene}. "
-                f"Photorealistic, bright natural daylight, vivid vibrant colors, high contrast, "
-                f"sunny optimistic atmosphere, crisp sharp focus. "
-                f"Absolutely no text, no words, no letters, no numbers, no typography, "
-                f"no watermark, no logo, no captions, no UI, no people overlaid."
-            )
+            style_keywords = ["neon", "dramatic", "minimalist", "angle", "perspective", "lighting", "cyberpunk", "dark", "moody", "high-contrast", "contrast", "vivid", "saturated"]
+            has_style_cues = any(kw in scene.lower() for kw in style_keywords)
+            if has_style_cues:
+                prompt = (
+                    f"Widescreen 16:9 YouTube thumbnail background image of: {scene}. "
+                    f"Absolutely no text, no words, no letters, no numbers, no typography, "
+                    f"no watermark, no logo, no captions, no UI, no people overlaid."
+                )
+            else:
+                prompt = (
+                    f"Widescreen 16:9 YouTube thumbnail background image of: {scene}. "
+                    f"Photorealistic, bright natural daylight, vivid vibrant colors, high contrast, "
+                    f"sunny optimistic atmosphere, crisp sharp focus. "
+                    f"Absolutely no text, no words, no letters, no numbers, no typography, "
+                    f"no watermark, no logo, no captions, no UI, no people overlaid."
+                )
 
             # Try generating a background image using fal.ai or replicate
             bg_data = None
@@ -711,19 +720,22 @@ def _bgm_duck_filter(narration_stream: str, bgm_stream: str) -> str:
 
     Music rides down under narration (sidechain keyed on the voice) and swells
     back in the pauses. Env-tunable without code edits:
-      - BGM_VOLUME            resting music level (default 0.5)
+      - BGM_VOLUME               resting music level (default 0.45)
       - BGM_SIDECHAIN_THRESHOLD  duck trigger level (default 0.02)
+      - BGM_SIDECHAIN_RATIO      sidechain compression ratio (default 12)
     Emits a stream named ``[a]`` ready for ffmpeg's ``-map [a]``.
     """
-    bgm_vol = os.getenv("BGM_VOLUME", "0.5")
+    bgm_vol = os.getenv("BGM_VOLUME", "0.45")
     sc_thresh = os.getenv("BGM_SIDECHAIN_THRESHOLD", "0.02")
+    sc_ratio = os.getenv("BGM_SIDECHAIN_RATIO", "12")
     return (
         f"{bgm_stream}volume={bgm_vol}[bgm];"
-        f"{narration_stream}volume=1.0,asplit=2[voice][sc];"
-        f"[bgm][sc]sidechaincompress=threshold={sc_thresh}:ratio=12:attack=150:release=1200[duck];"
+        f"{narration_stream}highpass=f=80,equalizer=f=6000:width_type=q:width=2:g=-3,loudnorm=I=-16:TP=-1.5:LRA=7,asplit=2[voice][sc];"
+        f"[bgm][sc]sidechaincompress=threshold={sc_thresh}:ratio={sc_ratio}:attack=120:release=1000[duck];"
         f"[voice][duck]amix=inputs=2:duration=first,alimiter=limit=0.9:level=false,"
         f"loudnorm=I=-14:TP=-1.5:LRA=11[a]"
     )
+
 
 
 def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
