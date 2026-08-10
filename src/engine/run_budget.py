@@ -67,11 +67,36 @@ class RunBudget:
             self._pipeline_id = pipeline_id
             self._stage = "in_progress"
             self._started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            self._usd = {}
-            self._yt = {}
-            self._calls = {}
-            self._notes = []
+            # Merge-on-resume: start() is also invoked when a pipeline RESUMES
+            # from its checkpoint (orchestrator.py runs run_pipeline again). A
+            # naive reset would zero the counters and clobber `run_budget_<id>.json`
+            # with only the post-resume session's spend, undercounting visual/LLM
+            # cost. So if a per-run record already exists for this pipeline_id,
+            # re-seed the tallies from it and accumulate on top instead of resetting.
+            prior = self._load_prior(pipeline_id)
+            self._usd = prior.get("_usd", {})
+            self._yt = prior.get("_yt", {})
+            self._calls = prior.get("_calls", {})
+            self._notes = prior.get("_notes", [])
         self._start_flush_thread()
+
+    def _load_prior(self, pipeline_id: Optional[str]) -> dict:
+        """Read any persisted per-run record for pipeline_id and return its
+        tallies, so a resumed session accumulates lifetime spend for the run.
+        Returns an empty dict when there is nothing to merge (fresh run)."""
+        if not pipeline_id:
+            return {}
+        prior_path = os.path.join(self.logs_dir, f"run_budget_{pipeline_id}.json")
+        try:
+            with open(prior_path, "r", encoding="utf-8") as f:
+                rec = json.load(f)
+        except (IOError, OSError, json.JSONDecodeError):
+            return {}
+        cats = rec.get("categories") or {}
+        usd = {c: float(v.get("est_usd", 0.0)) for c, v in cats.items() if v.get("est_usd")}
+        yt = {c: int(v.get("yt_units", 0)) for c, v in cats.items() if v.get("yt_units")}
+        calls = {c: int(v.get("calls", 0)) for c, v in cats.items() if v.get("calls")}
+        return {"_usd": usd, "_yt": yt, "_calls": calls, "_notes": list(rec.get("notes") or [])}
 
     def set_stage(self, stage: str) -> None:
         with self._lock:
