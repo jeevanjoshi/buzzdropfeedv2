@@ -14,6 +14,20 @@ from mcp_servers.youtube_cloud.server import (
 from src.engine.run_budget import run_budget
 
 
+# Fake video identifiers that must NEVER be treated as a successful publish.
+# A `demo_*`/sentinel id means the upload silently fell back to the mock path
+# (token failure, 403, quota, network) — recording it as PUBLISHED_SUCCESS masks
+# a real outage and poisons topic dedup (see publish-integrity-quality-fix-plan.md
+# issue #1). Reject them everywhere: publish, resume guard, and side effects.
+def _is_real_video_id(video_id: Optional[str]) -> bool:
+    if not video_id:
+        return False
+    vid = str(video_id).strip()
+    if not vid or len(vid) > 64:
+        return False
+    return vid.lower() not in ("demo_id", "uploaded_demo_id") and not vid.lower().startswith("demo_")
+
+
 class PublisherAgent:
     """
     Publisher Agent managing YouTube MCP upload tools, checking daily API quotas,
@@ -62,53 +76,21 @@ class PublisherAgent:
             )
             tags = state.selected_topic.keywords if state.selected_topic else ["finance", "tech"]
 
-        # Calculate actual start times for each act based on actual (measured) shot durations and crossfades
-        act_names = {
-            1: "Act 1: The Inciting Incident",
-            2: "Act 2: Historical Precedents & Origins",
-            3: "Act 3: Deep Technical Mechanics",
-            4: "Act 4: Actionable Real-World Impact",
-            5: "Act 5: Critical Risks & Counter-Arguments",
-            6: "Act 6: Strategic Future Verdict"
-        }
-        act_starts = {}
-        if state.script_data and state.script_data.shots and state.asset_paths:
-            shots = state.script_data.shots
-            durs = state.asset_paths.measured_durations or []
-            crossfade = getattr(state.asset_paths, "crossfade_used", 0.0)
-            
-            # running_offset tracks the start time of the current shot in the timeline
-            running_offset = 0.0
-            for idx, shot in enumerate(shots):
-                dur = durs[idx] if idx < len(durs) else shot.duration_estimate
-                if shot.act_index not in act_starts:
-                    act_starts[shot.act_index] = running_offset
-                running_offset += dur
-                if crossfade > 0 and idx < len(shots) - 1:
-                    running_offset -= crossfade
+        # Calculate actual start times for each act from the shared helper.
+        # Uses MEASURED shot durations when present (publish time), falling back
+        # to duration_estimate; same definition as story_designer design time.
+        from src.engine.chapters import compute_act_chapters
+        shots = state.script_data.shots if state.script_data else None
+        durs = state.asset_paths.measured_durations if state.asset_paths else None
+        crossfade = getattr(state.asset_paths, "crossfade_used", 0.0) if state.asset_paths else 0.0
+        _ch_lines, chapter_timestamps = compute_act_chapters(
+            shots=shots, measured_durations=durs, crossfade=crossfade,
+        )
+        chapters_str = "\n".join(_ch_lines)
 
-        chapters_lines = []
-        chapter_timestamps = []
-        for act_idx in sorted(act_names.keys()):
-            start_time = act_starts.get(act_idx, 0.0)
-            if act_idx == 1 or start_time < 0.1:
-                start_time = 0.0
-            
-            total_seconds = int(round(start_time))
-            h = total_seconds // 3600
-            m = (total_seconds % 3600) // 60
-            s = total_seconds % 60
-            if h > 0:
-                time_str = f"{h}:{m:02d}:{s:02d}"
-            else:
-                time_str = f"{m}:{s:02d}"
-            
-            chapters_lines.append(f"{time_str} - {act_names[act_idx]}")
-            chapter_timestamps.append(f"{time_str} {act_names[act_idx]}")
-        
-        chapters_str = "\n".join(chapters_lines)
-        
-        # Dynamic replacement of chapters in the description
+        # Dynamic replacement of chapters in the description (kept for the
+        # SEO-provided description; no regex drift because we generate the block
+        # from the same helper, but tolerate the old static text too).
         old_chapters_pattern = (
             "0:00 - Act 1: The Inciting Incident\n"
             "2:15 - Act 2: Historical Precedents & Origins\n"
@@ -122,7 +104,17 @@ class PublisherAgent:
         elif old_chapters_pattern in desc:
             desc = desc.replace(old_chapters_pattern, chapters_str)
         else:
-            if "CHAPTERS:" in desc:
+            import re as _re
+            # Replace whatever chapter block currently sits between "CHAPTERS:\n"
+            # and the following blank line, using the freshly computed block.
+            _desc, _n = _re.subn(
+                r"CHAPTERS:\n.*?(?=\n\n|$)",
+                lambda m: ("CHAPTERS:\n" + chapters_str),
+                desc, count=1, flags=_re.DOTALL,
+            )
+            if _n:
+                desc = _desc
+            elif "CHAPTERS:" in desc:
                 parts = desc.split("CHAPTERS:")
                 desc = parts[0] + "CHAPTERS:\n" + chapters_str + "\n\n" + parts[1].split("\n\n", 1)[-1]
             else:
@@ -142,16 +134,33 @@ class PublisherAgent:
         ))
         run_budget.record_yt("upload")
 
-        video_id = upload_res.get("video_id", "demo_id")
+        # Abort on a fabricated/sentinel id BEFORE any side effect (pinned
+        # comment, shorts, seed dispatch, dedup record). A demo id means the
+        # upload fell back to mock and no video exists on YouTube — faking
+        # PUBLISHED_SUCCESS here hides the outage and permanently marks the
+        # topic as published.
+        video_id = upload_res.get("video_id", "")
+        if not _is_real_video_id(video_id):
+            raise RuntimeError(
+                f"YouTube upload did not produce a real video id (got: '{video_id}'). "
+                f"Not publishing, not posting comments/seeds, not recording dedup. "
+                f"Check the YouTube OAuth token/scopes (get_youtube_token.py)."
+            )
 
-        # 3. Post Instant Pinned Engagement Comment to kickstart early interaction metric
-        engagement_question = (
-            f"What is your take on {title}? Share your thoughts below — we reply to every comment!"
-        )
-        await insert_pinned_comment(InsertCommentRequest(
-            video_id=video_id,
-            comment_text=engagement_question
-        ))
+        # 3. Post Instant Pinned Engagement Comment to kickstart early interaction metric.
+        #    Non-fatal by design: comment insertion must never block a real publish.
+        try:
+            engagement_question = (
+                f"What is your take on {title}? Share your thoughts below — we reply to every comment!"
+            )
+            res = await insert_pinned_comment(InsertCommentRequest(
+                video_id=video_id,
+                comment_text=engagement_question
+            ))
+            if res.get("status") != "success":
+                print(f"[Publisher] Pinned comment skipped (status={res.get('status')}): {res.get('comment_id')}")
+        except Exception as e:
+            print(f"[Publisher] Pinned comment skipped (non-fatal): {e}")
 
         meta = UploadMetadata(
             video_id=video_id,

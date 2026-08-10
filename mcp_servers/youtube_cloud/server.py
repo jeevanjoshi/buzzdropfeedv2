@@ -26,6 +26,23 @@ class InsertCommentRequest(BaseModel):
     comment_text: str
 
 
+# Explicit opt-in for the offline/test mock upload path. Production runs
+# (no env) must NEVER silently fall back to a fabricated `demo_*` id — a masked
+# upload failure was previously recorded as PUBLISHED_SUCCESS (see
+# publish-integrity-quality-fix-plan.md issue #1).
+_MOCK_ENABLED = os.getenv("YOUTUBE_UPLOAD_MOCK", "").strip().lower() in ("1", "true", "yes")
+
+
+def _mock_payload(kind: str = "upload") -> Dict[str, Any]:
+    """Fabricated demo identifiers for the explicitly-enabled mock path only."""
+    suffix = os.urandom(4).hex()
+    if kind == "comment":
+        return {"status": "mock", "engine": "mock_youtube_comment",
+                "comment_id": f"comment_{suffix}", "video_id": "", "pinned": False}
+    return {"status": "mock", "engine": "mock_youtube_upload",
+            "video_id": f"demo_{suffix}", "youtube_url": f"https://www.youtube.com/watch?v=demo_{suffix}",
+            "synthetic_flag": True}
+
 
 @app.post("/tools/check_quota_available")
 async def check_quota_available(req: QuotaCheckRequest):
@@ -53,6 +70,10 @@ async def upload_youtube_resumable(req: UploadRequest):
     """
     Handles YouTube Data API v3 resumable video upload with 100% Headless OAuth2 refresh tokens (zero-human-input),
     chunked retries, and EU AI Act synthetic content disclosure metadata (`syntheticContent: true`).
+
+    On real failure this RAISES (never a silent mock) unless ``YOUTUBE_UPLOAD_MOCK=1``
+    is explicitly set (offline/dry-run only). A missing ``id`` in the API response is
+    treated as a failure — no fabricated id is ever returned.
     """
     try:
         token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
@@ -68,82 +89,84 @@ async def upload_youtube_resumable(req: UploadRequest):
             if credentials and credentials.expired and credentials.refresh_token:
                 credentials.refresh(Request())
 
-        if credentials:
-            import httplib2
-            from googleapiclient.discovery import build
-            from googleapiclient.errors import HttpError
-            from googleapiclient.http import MediaFileUpload
+        if not credentials:
+            raise RuntimeError("YouTube upload failed: no OAuth credentials (token.json missing or unusable)")
 
-            youtube = build("youtube", "v3", credentials=credentials)
+        import httplib2
+        from googleapiclient.discovery import build
+        from googleapiclient.errors import HttpError
+        from googleapiclient.http import MediaFileUpload
 
-            body = {
-                "snippet": {
-                    "title": req.title,
-                    "description": req.description,
-                    "tags": req.tags,
-                    "categoryId": req.category_id
-                },
-                "status": {
-                    "privacyStatus": "private",
-                    "selfDeclaredMadeForKids": False,
-                    "syntheticContent": {
-                        "bInformed": True,
-                        "synthesized": True
-                    }
+        youtube = build("youtube", "v3", credentials=credentials)
+
+        body = {
+            "snippet": {
+                "title": req.title,
+                "description": req.description,
+                "tags": req.tags,
+                "categoryId": req.category_id
+            },
+            "status": {
+                "privacyStatus": "private",
+                "selfDeclaredMadeForKids": False,
+                "syntheticContent": {
+                    "bInformed": True,
+                    "synthesized": True
                 }
             }
+        }
 
-            media = MediaFileUpload(req.video_path, chunksize=256 * 1024, resumable=True, mimetype="video/mp4")
-            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        media = MediaFileUpload(req.video_path, chunksize=256 * 1024, resumable=True, mimetype="video/mp4")
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
-            response = None
-            while response is None:
-                try:
-                    status, response = request.next_chunk()
-                except HttpError as e:
-                    if e.resp.status in [308, 503, 502, 504]:
-                        continue
-                    else:
-                        raise e
-                except (httplib2.ServerNotFoundError, http.client.IncompleteRead):
+        response = None
+        while response is None:
+            try:
+                status, response = request.next_chunk()
+            except HttpError as e:
+                if e.resp.status in [308, 503, 502, 504]:
                     continue
+                else:
+                    raise e
+            except (httplib2.ServerNotFoundError, http.client.IncompleteRead):
+                continue
 
-            video_id = response.get("id", "uploaded_demo_id")
+        video_id = (response or {}).get("id")
+        if not video_id:
+            raise RuntimeError("YouTube upload failed: API response carried no video id")
 
-            # Upload custom thumbnail if path is provided and exists
-            if req.thumbnail_path and os.path.exists(req.thumbnail_path):
-                try:
-                    media_thumb = MediaFileUpload(req.thumbnail_path, mimetype="image/png")
-                    youtube.thumbnails().set(videoId=video_id, media_body=media_thumb).execute()
-                    print(f"[YouTube Upload] Successfully set custom thumbnail: {req.thumbnail_path}")
-                except Exception as thumb_err:
-                    print(f"Warning: Failed to upload custom thumbnail: {thumb_err}")
+        # Upload custom thumbnail if path is provided and exists
+        if req.thumbnail_path and os.path.exists(req.thumbnail_path):
+            try:
+                media_thumb = MediaFileUpload(req.thumbnail_path, mimetype="image/png")
+                youtube.thumbnails().set(videoId=video_id, media_body=media_thumb).execute()
+                print(f"[YouTube Upload] Successfully set custom thumbnail: {req.thumbnail_path}")
+            except Exception as thumb_err:
+                print(f"Warning: Failed to upload custom thumbnail: {thumb_err}")
 
-            return {
-                "status": "success",
-                "video_id": video_id,
-                "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
-                "synthetic_flag": True
-            }
+        return {
+            "status": "success",
+            "video_id": video_id,
+            "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+            "synthetic_flag": True
+        }
 
-    except Exception:
-        pass
-
-    # Fallback response for offline / test dry-run environment
-    mock_video_id = f"demo_{os.urandom(4).hex()}"
-    return {
-        "status": "success",
-        "engine": "mock_youtube_upload",
-        "video_id": mock_video_id,
-        "youtube_url": f"https://www.youtube.com/watch?v={mock_video_id}",
-        "synthetic_flag": True
-    }
+    except Exception as e:
+        if _MOCK_ENABLED:
+            print(f"[YouTube Upload] MOCK mode active (YOUTUBE_UPLOAD_MOCK=1); upload would have failed: {e}")
+            return _mock_payload("upload")
+        raise HTTPException(status_code=502, detail=f"YouTube upload failed: {e}") from e
 
 
 @app.post("/tools/insert_pinned_comment")
 async def insert_pinned_comment(req: InsertCommentRequest):
     """
     Inserts a pinned engagement question comment on a published YouTube video using YouTube Data API v3.
+
+    This is an OPTIONAL engagement side-effect: its failure must never gate publish
+    success, so on a real (non-mock) failure it returns ``status: "error"`` rather
+    than raising. The fabricated ``comment_*`` id is only produced when
+    ``YOUTUBE_UPLOAD_MOCK=1``.
     """
     try:
         token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
@@ -169,22 +192,27 @@ async def insert_pinned_comment(req: InsertCommentRequest):
                     }
                 }
                 res = youtube.commentThreads().insert(part="snippet", body=body).execute()
-                comment_id = res.get("id", "comment_demo_id")
-                return {
-                    "status": "success",
-                    "comment_id": comment_id,
-                    "video_id": req.video_id,
-                    "pinned": True
-                }
+                comment_id = (res or {}).get("id")
+                if comment_id:
+                    return {
+                        "status": "success",
+                        "comment_id": comment_id,
+                        "video_id": req.video_id,
+                        "pinned": True
+                    }
+                print("[YouTube Comment] Comment API response carried no comment id; not reported as success.")
     except Exception as e:
+        if _MOCK_ENABLED:
+            print(f"[YouTube Comment] MOCK mode active (YOUTUBE_UPLOAD_MOCK=1); comment would have failed: {e}")
+            return _mock_payload("comment")
         print(f"[YouTube Comment] Notice: Comment API returned: {e}")
 
     return {
-        "status": "success",
-        "engine": "mock_youtube_comment",
-        "comment_id": f"comment_{os.urandom(4).hex()}",
+        "status": "error",
+        "engine": "noop_youtube_comment",
+        "comment_id": "",
         "video_id": req.video_id,
-        "pinned": True
+        "pinned": False
     }
 
 

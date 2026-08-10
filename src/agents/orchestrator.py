@@ -12,7 +12,7 @@ from src.agents.fact_retriever import FactRetrieverAgent
 from src.agents.story_designer import StoryDesignerAgent
 from src.agents.observer import ObserverAgent, is_soft_violation, observer_quality_score
 from src.agents.media_producer import MediaProducerAgent
-from src.agents.publisher import PublisherAgent
+from src.agents.publisher import PublisherAgent, _is_real_video_id
 from src.engine.quality_verifier import quality_verifier
 from src.engine.video_quality_metrics import video_quality_metrics
 from src.engine.channel_phase_manager import channel_phase_manager, get_ypp_progress_report
@@ -578,7 +578,7 @@ class OrchestratorAgent:
 
             # 5. YouTube Publishing
             if publish:
-                if state.upload_metadata and state.upload_metadata.video_id and state.upload_metadata.video_id != "demo_id":
+                if state.upload_metadata and _is_real_video_id(state.upload_metadata.video_id):
                     logger.info("PHASE_4_YOUTUBE_PUBLISHING", f"Resuming: Video already published to YouTube with ID: {state.upload_metadata.video_id}", pipeline_id=p_id, component="PUBLISHER")
                     run_budget.set_stage("PUBLISHED_SUCCESS")
                 else:

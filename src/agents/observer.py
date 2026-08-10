@@ -43,8 +43,10 @@ _LOCATION_PAT = r"[A-Z][A-Za-z0-9\s.,\-\/’'\u2019]{2,50}"
 
 # Narration must NEVER contain raw scrape/citation junk (markdown links, bare
 # URLs, datelines "(City, St – Month DD, YYYY)", "Retrieved ..." bibliography
-# tails). These are unambiguous production errors (paste/leak) — NOT style — so
-# violations are HARD aborts and are excluded from the soft-approval path.
+# tails, bylines/follow-prompts/hashtag tags like "ByTom Carter You're currently
+# following this author! # Meta launches ..."). These are unambiguous production
+# errors (paste/leak) — NOT style — so violations are HARD aborts and are
+# excluded from the soft-approval path.
 _RAW_JUNK_IN_NARR_RE = re.compile(
     r'\[[^\]\n]{0,120}?\]\((?:https?://|#|/)[^)\n]{0,300}?\)'
     r'|\bhttps?://'
@@ -52,7 +54,11 @@ _RAW_JUNK_IN_NARR_RE = re.compile(
     r'|\b' + _LOCATION_PAT + r'\s*[–—-]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\b'
     r'|\bRetrieved\b'
     r'|[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?'
-    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?',
+    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?'
+    r'|\bBy[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+'
+    r'|You\'?re\s+currently\s+following\s+this\s+(?:author|writer)'
+    r'|\b(?:Subscribe|Sign)\s+(?:to\s+continue|for\s+(?:updates|more))'
+    r'|#\s+[A-Z][A-Za-z]+',
     re.IGNORECASE,
 )
 
@@ -499,14 +505,16 @@ class ObserverAgent:
         violations = []
 
         # ── Gate: raw markup/scrape/citation junk in narration (HARD) ────────
-        # Markdown links, URLs, datelines and 'Retrieved' tails in the narration
-        # are paste/leak errors, not style, so they abort rather than soft-approve.
+        # Markdown links, URLs, datelines, 'Retrieved' tails, bylines, follow
+        # prompts and hashtag tags in the narration are paste/leak errors, not
+        # style, so they abort rather than soft-approve.
         for _shot in script.shots:
             _m = _RAW_JUNK_IN_NARR_RE.search(_shot.narration_text or "")
             if _m:
                 violations.append(
                     f"Raw markup/citation junk in Shot #{_shot.shot_id} narration "
-                    f"contains a markdown link, URL, dateline, or 'Retrieved' tail "
+                    f"contains a markdown link, URL, dateline, byline/follow prompt, "
+                    f"hashtag tag, or 'Retrieved' tail "
                     f"(leaked {_m.group(0)[:60]!r}). Scrub before publish."
                 )
             for _sent in re.split(r'[.!?]', _shot.narration_text or ""):

@@ -6,10 +6,11 @@ import os
 import html
 import time
 import datetime as _dt
-from typing import Dict, Any, List, Tuple, Set
+from typing import Dict, Any, List, Tuple, Set, Optional
 from src.schemas.state import TopicCandidate, VerifiedFact
 from src.engine.run_budget import run_budget
 from src.engine.logger import logger
+from src.engine.term_register import term_register
 
 # ── RAG Corpus Sufficiency Gate thresholds ─────────────────────────────
 # A 15-shot / 10-15 min script needs ~1,500+ narration words grounded in a
@@ -105,6 +106,113 @@ def _line_snippet_text(line: str) -> str:
     """Strip a bullet's '[Source: title]' prefix, returning just the snippet body."""
     parts = line.split("]:", 1)
     return parts[1].strip() if len(parts) > 1 else line
+
+
+# Placeholder/generic "sources" that carry no topical grounding. These are
+# enrichment stubs (World Bank macro, NASA APOD, on-this-day history, Wikipedia
+# root links) or mass-market feed buckets ("Verified Reports") that RSS ingestion
+# attaches to nearly every story. They are NOT evidence the video rests on, so
+# they must never appear under "Sources & Data Grounding" in the published
+# description. URLs are compared by host; names by substring.
+_GENERIC_SOURCE_NAMES = (
+    "the world bank", "world bank", "wikipedia historical archives",
+    "nasa open apis", "verified reports", "verified market reports",
+    "wikipedia", "historyextra", "precedenceresearch", "rdworldonline",
+    "seekingalpha", "financefeed", "finance.yahoo", "yahoo finance",
+    "abcnews", "business wire", "global news",
+)
+_GENERIC_SOURCE_HOSTS = (
+    "data.worldbank.org",
+    "wikipedia.org",
+    "apod.nasa.gov",
+    "finance.yahoo.com",
+    "seekingalpha.com",
+    "financefeeds.com",
+    "historyextra.com",
+)
+
+
+def _is_generic_source(source_name: str, url: str = "") -> bool:
+    """True when a fact's source is a placeholder/enrichment/wire bucket that
+    must not be cited as grounding in the published description."""
+    name = (source_name or "").strip().lower()
+    if any(g in name for g in _GENERIC_SOURCE_NAMES):
+        return True
+    host = (url or "").lower().split("//")[-1].split("/")[0]
+    return host in _GENERIC_SOURCE_HOSTS
+
+
+def _topic_signature_tokens(
+    headline: str, summary: str = "", keywords=None,
+    background_docs: List[str] = None,
+) -> Set[str]:
+    """
+    Topic SIGNATURE tokens — the topic's distinctive vocabulary after removing
+    high-frequency niche/news words (model, ai, researchers, found, ...) that
+    appear in unrelated stories of the same niche.
+
+    Generic-ness is driven by the CORPUS, not a hardcoded list:
+      * ``term_register`` accumulates document-frequency across runs (persisted),
+      * ``background_docs`` (the current run's full feed pool) is folded in, so a
+        leak word circulating today is caught immediately and self-maintains.
+    Used by EVERY on-topic gate so a single definition drives ingestion,
+    sufficiency and citation-listing: an off-topic line (e.g. "Contract Research
+    Organizations market ..." for an archaeology topic) scores 0 and is dropped
+    BEFORE it enters the corpus.
+    """
+    tokens = _build_topic_tokens(headline, summary, keywords or [])
+    generic = term_register.generic_tokens(extra_docs=background_docs)
+    signature = tokens - generic
+    # Never collapse to an empty scorer: for a topic whose vocabulary is nearly
+    # all generic (rare), fall back to the full token set rather than rejecting
+    # everything.
+    if len(signature) < 2:
+        return tokens
+    return signature
+
+
+def filter_facts_for_topic(
+    verified_facts: List[VerifiedFact],
+    headline: str,
+    summary: str = "",
+    keywords: Optional[List[str]] = None,
+    min_hits: int = 3,
+    max_facts: int = 6,
+    background_docs: List[str] = None,
+) -> List[VerifiedFact]:
+    """
+    Public on-topic filter used to pick which facts may be cited in the published
+    SEO description.
+
+    The full RSS/enrichment ``verified_facts`` list is polluted with unrelated
+    feed items (Mars rovers, housecoats, crosswords...) that share generic tokens
+    ("researchers", "tech", "model", "market") with the topic. This helper keeps
+    only facts that genuinely match the topic's SIGNATURE tokens (computed
+    corpus-driven via ``term_register``, optionally grounded against
+    ``background_docs`` = the day's full feed pool), drops placeholder/generic
+    sources, and caps the list so YouTube descriptions stay short and credible.
+    """
+    topic_tokens = _topic_signature_tokens(headline, summary, keywords or [], background_docs=background_docs)
+    scored: List[Tuple[int, VerifiedFact]] = []
+
+    for vf in verified_facts:
+        if _is_generic_source(vf.source_name, vf.url):
+            continue
+        line = f"{vf.headline}: {vf.summary} (Source: {vf.source_name})"
+        score = _on_topic_hits(line, topic_tokens)
+        if score >= min_hits:
+            scored.append((score, vf))
+
+    # Always keep the topic's OWN story fact even if token matching misses it.
+    own = (headline or "").strip().lower()
+    if own and not any((vf.headline or "").strip().lower() == own for _, vf in scored):
+        for vf in verified_facts:
+            if (vf.headline or "").strip().lower() == own:
+                scored.append((100, vf))
+                break
+
+    scored.sort(key=lambda x: (-x[0], (x[1].source_name or "")))
+    return [vf for _, vf in scored[:max_facts]]
 
 
 def _crawler_item_to_dict(item) -> Dict[str, str]:
@@ -832,7 +940,7 @@ class RAGTopicRetriever:
         summary = (pack.get("summary") or topic.summary or "").lower()
         keywords = [k.lower() for k in (pack.get("keywords") or topic.keywords or [])]
 
-        topic_tokens = _build_topic_tokens(headline, summary, keywords)
+        topic_tokens = _topic_signature_tokens(headline, summary, keywords)
 
         fact_corpus = pack.get("fact_corpus") or ""
         fact_lines = [l.strip() for l in fact_corpus.splitlines() if l.strip()]
@@ -955,8 +1063,20 @@ class RAGTopicRetriever:
         # Combine verified facts into core ground truth block — but only ON-TOPIC
         # facts. The full RSS corpus is polluted with unrelated feed items, so
         # feeding every headline into the prompt makes the LLM wander and starves
-        # the script of real grounding.
-        topic_tokens = _build_topic_tokens(headline, summary, keywords)
+        # the script of real grounding. Uses SIGNATURE tokens (niche-generic words
+        # removed) so a fact sharing only "researchers"/"research" with the topic
+        # is dropped before it can leak into the narration (right-first-time).
+        # The day's WHOLE feed pool is observed so circulating generic words are
+        # self-detected (and persisted) rather than being a hardcoded list.
+        _feed_pool = []
+        for _vf in verified_facts:
+            _headline = (_vf.headline or "").strip()
+            _summary = (_vf.summary or "").strip()
+            if _headline or _summary:
+                _feed_pool.append(f"{_headline} {_summary}")
+        if _feed_pool:
+            term_register.observe(_feed_pool)
+        topic_tokens = _topic_signature_tokens(headline, summary, keywords, background_docs=_feed_pool)
         # Dedup facts by headline (the RSS corpus commonly carries the same story
         # from the same feed more than once) before scoring/keeping.
         seen_facts: Set[str] = set()
@@ -1063,10 +1183,11 @@ class RAGTopicRetriever:
         retrieved_facts = unique_lines
         retrieved_facts_all = retrieved_facts
 
-        # On-topic relevance filter: rank retrieved lines by topic-token density
-        # and DROP clearly off-topic hits (e.g. a generic "History of the Jews in
-        # China" Wikipedia page for an AI-in-Africa query). Keeps the best 2+
-        # token matches first so the LLM gets dense, relevant grounding.
+        # On-topic relevance filter: rank retrieved lines by SIGNATURE topic-token
+        # density and DROP clearly off-topic hits (e.g. a generic "History of the
+        # Jews in China" Wikipedia page for an AI-in-Africa query, or a CRO-market
+        # stat for an archaeology topic — both share only generic words). Keeps
+        # the best 2+ token matches first so the LLM gets dense, relevant grounding.
         scored_retrieved = []
         for l in retrieved_facts:
             score = _on_topic_hits(l, topic_tokens)
@@ -1241,4 +1362,8 @@ class RAGTopicRetriever:
 
 
 rag_retriever = RAGTopicRetriever()
+
+# Module-level helper exposed on the singleton as well (callers import the
+# instance via `from src.engine.rag_retriever import rag_retriever`).
+rag_retriever.filter_facts_for_topic = filter_facts_for_topic
 

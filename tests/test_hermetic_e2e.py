@@ -632,6 +632,434 @@ def case_gate6_shallow_shots():
 
 
 # ---------------------------------------------------------------------------
+# Case 7 — demo_/fake upload ids must abort publish, not fake success.
+# ---------------------------------------------------------------------------
+def case_fake_upload_aborts():
+    from src.agents.publisher import PublisherAgent, _is_real_video_id
+
+    # 1. The shared predicate rejects every fabricated/sentinel id form.
+    ids = {
+        "demo_id": False,
+        "demo_451614aa": False,
+        "demo_abc123": False,
+        "uploaded_demo_id": False,
+        "": False,
+        None: False,
+        "E1T5IiXSl3E": True,
+        "dQw4w9WgXcQ": True,
+    }
+    pred_ok = all(_is_real_video_id(k) is v for k, v in ids.items())
+
+    # 2. SIDE EFFECTS are gated: a PublisherAgent whose upload returns a
+    #    demo_ id must raise BEFORE the pinned comment / shorts / seed /
+    #    dedup side effects run (monkeypatch the network-y boundary).
+    from src.schemas.state import GlobalState, UploadMetadata
+    stub_calls = {"comment": 0, "seed": 0, "dedup": 0}
+    import src.agents.publisher as pub
+
+    async def fake_upload_fails(req):
+        return {"status": "mock", "video_id": "demo_abcdef", "youtube_url": "x"}
+
+    async def fake_comment(req):
+        stub_calls["comment"] += 1
+        return {"status": "mock", "comment_id": "comment_x", "video_id": req.video_id}
+
+    orig_upload = pub.upload_youtube_resumable
+    orig_comment = pub.insert_pinned_comment
+    orig_record = None
+    try:
+        from src.engine import topic_deduplicator as td_mod
+        orig_record = td_mod.record_published_topic
+
+        def fake_record_published(*a, **k):
+            stub_calls["dedup"] += 1
+
+        pub.upload_youtube_resumable = fake_upload_fails
+        pub.insert_pinned_comment = fake_comment
+        td_mod.record_published_topic = fake_record_published
+
+        # Build a minimal, publish-ready state (media assets present).
+        st = GlobalState(pipeline_id="fake-upload-1", timestamp="0")
+        st.selected_topic = TOPIC
+        st.verified_facts = list(VERIFIED_FACTS)
+        st.crawled_content = _canonical_corpus()
+        st.script_data = _script_from_json(SCRIPT_JSON)
+        st.seo_metadata = None  # force the default description path
+
+        from src.schemas.state import AssetPaths
+        ap = AssetPaths(final_video="/tmp/csvg_hermetic_media/final_video_1080p.mp4",
+                        thumbnail="/tmp/csvg_hermetic_media/thumb.png")
+        st.asset_paths = ap
+
+        raised = False
+        try:
+            asyncio.run(PublisherAgent().publish_video(st))
+        except RuntimeError:
+            raised = True
+
+        side_effects_gated = (stub_calls["comment"] == 0 and stub_calls["seed"] == 0
+                              and stub_calls["dedup"] == 0)
+        not_published = (st.execution_stage != "PUBLISHED_SUCCESS"
+                         and not _is_real_video_id(getattr(st.upload_metadata, "video_id", None)))
+        ok = raised and side_effects_gated and not_published
+        record("FAKE_UPLOAD_ABORTS", ok,
+               f"raised={raised}, comment_calls={stub_calls['comment']}, "
+               f"seed_calls={stub_calls['seed']}, dedup_calls={stub_calls['dedup']}, "
+               f"published={getattr(st.upload_metadata, 'video_id', '')}")
+    finally:
+        pub.upload_youtube_resumable = orig_upload
+        pub.insert_pinned_comment = orig_comment
+        if orig_record is not None:
+            from src.engine import topic_deduplicator as td_mod2
+            td_mod2.record_published_topic = orig_record
+
+    # 3. Orchestrator resume guard must NOT treat demo_ as already-published.
+    from src.agents.publisher import _is_real_video_id as _pred
+    um = UploadMetadata(video_id="demo_abc", status="PUBLISHED")
+    st2 = GlobalState(pipeline_id="resume-demo", timestamp="0")
+    st2.upload_metadata = um
+    # The predicate is the same one the orchestrator now uses.
+    resume_ok = not _pred(um.video_id)
+
+    ok &= pred_ok and resume_ok
+    record("RESUME_DEMO_ID_NOT_PUBLISHED", resume_ok, f"demo_ treated as published: {not resume_ok}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 8 — SEO "Sources & Data Grounding" filtered to on-topic facts only.
+# ---------------------------------------------------------------------------
+def case_seo_source_filter():
+    from src.schemas.state import VerifiedFact
+    from src.engine.rag_retriever import filter_facts_for_topic
+
+    headline = "Meta launches Muse Glimmer model as Zuckerberg champions AI for everyone"
+    summary = "The social media giant plans to release an open-weight version of Muse Spark, its most powerful AI model, soon, Mark Zuckerberg said on Monday."
+    keywords = ["champions", "launches", "open", "zuckerberg", "meta", "spark", "release", "version", "media", "plans"]
+
+    facts = [
+        # primary story (kept via own-headline rule)
+        VerifiedFact(source_id="1", headline=headline,
+                     summary="Open-weight 30B model announced.", url="https://businessinsider.com/meta-muse-glimmer-2026-8",
+                     source_name="Business Insider"),
+        # explicitly on-topic secondary (kept: meta + spark signature tokens)
+        VerifiedFact(source_id="3", headline="Meta's open-weight Muse Spark 1.2 gains 100k-token context",
+                     summary="Muse Spark 1.1 to 1.2 upgrade on Artificial Analysis index.",
+                     url="https://meta.example/spark", source_name="Meta AI"),
+        # shares only generic 'model' tokens (dropped)
+        VerifiedFact(source_id="2", headline="Anthropic rolls out new Claude coding model",
+                     summary="Company releases updated model.", url="https://anthropic.example/x", source_name="Anthropic"),
+        # generic/placeholder source, off-topic (dropped)
+        VerifiedFact(source_id="4", headline="NASA APOD: Sun silhouettes",
+                     summary="Astronomy picture of the day.", url="https://apod.nasa.gov/x", source_name="NASA Open APIs"),
+        # fake marketplace feed (dropped by generic source + off-topic)
+        VerifiedFact(source_id="5", headline="Wall Street rally after oil gains",
+                     summary="Shares mixed after oil.", url="https://abcnews.example/ws", source_name="Verified Reports"),
+    ]
+
+    kept = filter_facts_for_topic(facts, headline=headline, summary=summary, keywords=keywords)
+    kept_urls = [vf.url for vf in kept]
+
+    ok = (
+        len(kept) == 2
+        and "https://businessinsider.com/meta-muse-glimmer-2026-8" in kept_urls
+        and "https://meta.example/spark" in kept_urls
+        and "https://anthropic.example/x" not in kept_urls
+        and "https://apod.nasa.gov/x" not in kept_urls
+        and "https://abcnews.example/ws" not in kept_urls
+    )
+    record("SEO_SOURCE_FILTER", ok,
+           f"kept={len(kept)} urls={kept_urls}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 9 — byline/follow/hashtag scraped junk is dropped from narration and
+#          hard-flagged by the Observer.
+# ---------------------------------------------------------------------------
+def case_narration_junk_scrub():
+    from src.agents.story_designer import _snippet_is_junk, _clean_narration, _BYLINE_FOLLOW_RE
+    from src.agents.story_designer import StoryDesignerAgent
+    from src.agents.observer import _RAW_JUNK_IN_NARR_RE
+
+    # The EXACT leaked tail observed live in the Meta run's Shot 18.
+    bad_tail = (
+        "Will Meta's open-source strategy truly democratize artificial intelligence? "
+        "# Meta launches new artificial intelligence model as Zuckerberg champions open-weight push. "
+        "Tech Meta launches Muse Glimmer model as Zuckerberg champions artificial intelligence for 'everyone' "
+        "ByTom Carter You're currently following this author! "
+        "# Meta launches Muse Spark artificial intelligence model as part of its artificial intelligence turnaround."
+    )
+
+    junk_detected = bool(_BYLINE_FOLLOW_RE.search(bad_tail))
+    snippet_junk = _snippet_is_junk(bad_tail)
+    observer_hard_flag = bool(_RAW_JUNK_IN_NARR_RE.search(bad_tail))
+    cleaned = _clean_narration(bad_tail)
+    junk_scrubbed = (
+        "ByTom" not in cleaned
+        and "following this author" not in cleaned
+        and "# Meta launches" not in cleaned
+    )
+    # The legitimate question sentence must survive the scrub.
+    survived = "truly democratize artificial intelligence" in cleaned
+
+    # The semantic-expansion padding path must refuse the junk snippet too.
+    padding = StoryDesignerAgent(llm_client=None)._paraphrase_padding(bad_tail)
+    padding_rejected = (padding == "")
+
+    # Guard: clean narration must NOT be falsely flagged.
+    good = "Meta's open-weight strategy positions the company directly against competitors that prefer proprietary models."
+    good2 = "By 2026, Meta will have shipped its new open models to millions of users."
+    no_false_positive = (
+        _snippet_is_junk(good) is False
+        and bool(_RAW_JUNK_IN_NARR_RE.search(good)) is False
+        and _snippet_is_junk(good2) is False
+        and bool(_RAW_JUNK_IN_NARR_RE.search(good2)) is False
+    )
+
+    ok = junk_detected and snippet_junk and observer_hard_flag and junk_scrubbed and survived and no_false_positive and padding_rejected
+    record("NARRATION_JUNK_SCRUB", ok,
+           f"junk_detected={junk_detected}, snippet_junk={snippet_junk}, "
+           f"observer_hard={observer_hard_flag}, scrubbed={junk_scrubbed}, "
+           f"survived={survived}, no_false_pos={no_false_positive}, padding_rejected={padding_rejected}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 10 — RIGHT-FIRST-TIME: off-topic facts dropped at corpus ingestion via
+#          signature-token scoring (no downstream leak possible).
+# ---------------------------------------------------------------------------
+def case_signature_ingestion_filter():
+    from src.engine.rag_retriever import _topic_signature_tokens, _on_topic_hits
+
+    # Archaeology topic whose summary happens to mention "researchers"/"research".
+    headline = "60,000-year-old ostrich eggshell engravings reveal a surprisingly sophisticated human mind"
+    summary = ("More than 60,000 years ago, humans in southern Africa were engraving ostrich "
+               "eggshells with intricate geometric patterns. Researchers found recurring grids, "
+               "parallel lines, right angles, and repeated shapes.")
+    keywords = ["researchers", "engravings", "ostrich", "eggshell", "geometric", "southern"]
+
+    signature = _topic_signature_tokens(headline, summary, keywords)
+
+    # The CRO-market stat that leaked into the ostrich narration/reel (off-topic:
+    # shares only generic "researchers"/"research" tokens with the topic).
+    cro_line = ("The market for Contract Research Organizations (CROs), where many "
+                "researchers contribute their expertise, was estimated at USD 69.56 billion"
+                " in 2025 and is predicted to grow to USD 74.37 billion in 2026.")
+    cro_active = "Contract Research Organizations" in " ".join(signature)
+
+    cro_hits = _on_topic_hits(cro_line, signature)
+    cro_dropped = cro_hits < 2  # fails the ingestion on-topic filter -> never in corpus
+
+    # A genuinely on-topic line (mentions ostrich eggshell + geometric) MUST pass.
+    good_line = ("Archaeologists recovered engraved ostrich eggshell fragments with geometric "
+                 "grids and parallel lines from southern African sites.")
+    good_hits = _on_topic_hits(good_line, signature)
+    good_kept = good_hits >= 2
+
+    # Ensure the signature didn't collapse to the full token set (i.e. it really
+    # stripped the generic words) — otherwise the fix is a no-op.
+    sig_actually_signature = ("researchers" not in signature and "research" not in signature)
+
+    ok = cro_dropped and good_kept and sig_actually_signature and not cro_active
+    record("SIGNATURE_INGESTION_FILTER", ok,
+           f"cro_hits={cro_hits}, cro_dropped={cro_dropped}, good_hits={good_hits}, "
+           f"good_kept={good_kept}, generic_stripped={sig_actually_signature}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 11 — RIGHT-FIRST-TIME, self-maintaining: TermRegister grows on its own.
+# A word becomes "generic" once it circulates through enough background docs; a
+# distinctive topic word stays out. Uses an isolated temp register (hermetic).
+# ---------------------------------------------------------------------------
+def case_term_register_growth():
+    import tempfile, os
+    from src.engine.term_register import TermRegister, DF_RATIO_THRESHOLD
+
+    with tempfile.TemporaryDirectory() as td:
+        reg = TermRegister(file_path=os.path.join(td, "term_register.json"))
+
+        # A recurring off-topic leak word: appears in MANY unrelated docs.
+        generic_word = "contractual"
+        niche_word = "ostrich"
+
+        # Start: 10 docs, contract appears once, ostrich once.
+        docs1 = ["firm A in a contractual dispute over delivery",
+                 "studio B looks at contractual obligations for acts",
+                 "quote C handles contractual terms for the season",
+                 "institute D reviews contractual language in grants",
+                 "agency E warns of contractual risks in rollout",
+                 "bank F sets contractual deadlines for the loan",
+                 "tech G disputes a contractual clause with a vendor",
+                 "lab H evaluates contractual liability in research",
+                 "city I manages contractual procurement for buses",
+                 "fund J files contractual claims against the manager"]
+        # Make every doc mention the generic word (so df-ratio rises to ~1.0).
+        docs1 = [d.replace("contractual", generic_word) for d in docs1]
+        reg.observe(docs1)
+        g1 = reg.generic_tokens()
+        became_generic_after_many = generic_word in g1
+
+        # A distinctive topic word observed rarely must NOT become generic.
+        docs2 = [f"archaeologists found {niche_word} eggshell at a dig site"]
+        reg.observe(docs2)
+        g2 = reg.generic_tokens()
+        niche_still_distinctive = niche_word not in g2
+
+        # A SINGLE occurrence among many docs is NOT yet generic (the DF floor
+        # is only reached when a word circulates widely) — catches the common
+        # case without over-stripping one-off distinctive vocabulary.
+        reg2 = TermRegister(file_path=os.path.join(td, "term_register2.json"))
+        many_docs = [f"snippet {i} about unrelated market events each day" for i in range(100)]
+        many_docs[7] = f"a single study mentions the rare word {generic_word} once"
+        reg2.observe(many_docs)
+        g_single = reg2.generic_tokens(extra_docs=many_docs)
+        single_occurrence_not_generic = generic_word not in g_single
+
+        # Verify persistence: a fresh instance reads the same learned generic.
+        reg_reload = TermRegister(file_path=reg.file_path)
+        g_reload = reg_reload.generic_tokens()
+        persisted = generic_word in g_reload
+
+        ok = (became_generic_after_many and niche_still_distinctive
+              and single_occurrence_not_generic and persisted)
+        record("TERM_REGISTER_GROWTH", ok,
+               f"learned_generic={generic_word in g1}, niche_distinctive={niche_still_distinctive}, "
+               f"single_occ_not_generic={single_occurrence_not_generic}, persists={persisted}, "
+               f"threshold={DF_RATIO_THRESHOLD}")
+        return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 12 — _best_synonym quality guard: never emits stilted/archaic words.
+# Uses a deterministic FAKE wordnet so this case is hermetic (no NLTK needed).
+# ---------------------------------------------------------------------------
+def case_best_synonym_guard():
+    from src.agents.story_designer import StoryDesignerAgent
+    sd = StoryDesignerAgent(llm_client=None)
+
+    class _Lemma:
+        def __init__(self, name):
+            self._n = name
+        def name(self):
+            return self._n
+
+    class _FakeSS:
+        # synset(base) with lemmas ordered so the OLD code would pick the
+        # stilted first lemma; the guard must skip it and reach the common one.
+        def __init__(self, lemmas):
+            self._lemmas = [_Lemma(x) for x in lemmas]
+        def lemmas(self):
+            return self._lemmas
+
+    class _FakeWN:
+        def __init__(self, mapping):
+            self._m = mapping
+        def synsets(self, word):
+            return self._m.get(word.lower(), [])
+
+    # "years" -> old code returns 'eld' (first); guard must return 'age' (a
+    # multi-lemma-synset, common word).
+    wn = _FakeWN({
+        "years": [
+            _FakeSS(["eld", "age", "geez"]),
+            _FakeSS(["age", "old age"]),
+        ],
+        "ability": [
+            _FakeSS(["powerfulness", "power", "potency"]),
+            _FakeSS(["power", "capability"]),
+        ],
+        "capableness": [
+            _FakeSS(["capableness", "capability"]),
+            _FakeSS(["capability", "potency"]),
+        ],
+        "powerfulness": [
+            _FakeSS(["powerfulness", "power"]),
+            _FakeSS(["power", "potency"]),
+        ],
+        "plain": [
+            _FakeSS(["plain"]),
+        ],
+    })
+
+    good = sd._best_synonym("years", wn)
+    ok1 = good == "age" and good != "eld"
+
+    good2 = sd._best_synonym("ability", wn)
+    ok2 = good2 in ("power",) and good2 != "powerfulness"
+
+    good3 = sd._best_synonym("capableness", wn)
+    ok3 = good3 in ("capability",) and good3 != "capableness"
+
+    good4 = sd._best_synonym("powerfulness", wn)
+    ok4 = good4 in ("power",) and good4 != "powerfulness"
+
+    # A token with only a stilted candidate must yield None (leave the word),
+    # never inject the stilted one.
+    wn_single = _FakeWN({"years": [_FakeSS(["eld"])]})
+    good5 = sd._best_synonym("years", wn_single)
+    ok5 = good5 is None
+
+    # Token whose every candidate is multi-word/long -> None (never a bad swap).
+    wn_none = _FakeWN({"plain": [_FakeSS(["plain text"])]})
+    good6 = sd._best_synonym("plain", wn_none)
+    ok6 = good6 is None
+
+    # The stilted words are actually registered on the guard.
+    stilted_registered = (
+        "eld" in sd._STILTED_SYNONYMS
+        and "powerfulness" in sd._STILTED_SYNONYMS
+        and "capableness" in sd._STILTED_SYNONYMS
+    )
+
+    ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and stilted_registered
+    record("BEST_SYNONYM_GUARD", ok,
+           f"years->{good}, ability->{good2}, capableness->{good3}, "
+           f"powerfulness->{good4}, single_stilted->{good5}, none_ok={good6 is None}, "
+           f"registered={stilted_registered}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 13 — shared chapter timing: computed from shot durations, not static.
+# ---------------------------------------------------------------------------
+def case_chapter_timestamps():
+    from src.engine.chapters import compute_act_chapters
+
+    class Shot:
+        def __init__(self, act, dur):
+            self.act_index = act
+            self.duration_estimate = dur
+
+    # 6 acts, 1 shot each at 45s => Act 2 at 0:45, Act 3 at 1:30, ... Act 6 at 3:45.
+    shots = [Shot(act=i, dur=45.0) for i in range(1, 7)]
+    lines, ts = compute_act_chapters(shots=shots)
+
+    ok1 = lines[0].startswith("0:00")            # Act 1 anchored at 0
+    ok2 = lines[1].startswith("0:45")            # Act 2 at 0:45
+    ok3 = lines[2].startswith("1:30")            # Act 3 at 1:30
+    ok4 = lines[5].startswith("3:45")            # Act 6 at 3:45
+    # description block uppercase-act labels; timestamps list parallel
+    ok5 = "Act 4" in lines[3] and ts[3] == lines[3].replace(" - ", " ")
+
+    # Static fallback when no shots.
+    slines, _ = compute_act_chapters(shots=None)
+    ok6 = slines[0].startswith("0:00") and slines[1].startswith("2:15")
+
+    # Crossfade overlap subtracts between shots: 2 shots 45s, 5s crossfade =>
+    # Act 2 at 40s.
+    shots_cf = [Shot(1, 45.0), Shot(2, 45.0)]
+    clines, _ = compute_act_chapters(shots=shots_cf, crossfade=5.0)
+    ok7 = clines[1].startswith("0:40")
+
+    ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
+    record("CHAPTER_TIMESTAMPS", ok,
+           f"lines={lines}, fallback_0={slines[0]}, fallback_1={slines[1]}, crossfade={clines[1]}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def main():
@@ -642,6 +1070,13 @@ def main():
     case_routing()
     case_a2a_alignment()
     case_gate6_shallow_shots()
+    case_fake_upload_aborts()
+    case_seo_source_filter()
+    case_narration_junk_scrub()
+    case_signature_ingestion_filter()
+    case_term_register_growth()
+    case_best_synonym_guard()
+    case_chapter_timestamps()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

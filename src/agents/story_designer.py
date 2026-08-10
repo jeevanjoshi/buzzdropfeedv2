@@ -44,6 +44,19 @@ _WEB_CHATTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Author bylines / follow prompts / hashtag-section tags pasted from scraped
+# article chrome. Observed live (Meta run Shot 18): "ByTom Carter You're
+# currently following this author! # Meta launches ...". These are unambiguous
+# scrape markers that never appear in legitimate narration, so they must be
+# dropped sentence-wise (narration), junk-flagged (snippet pool) and hard-gated
+# by the Observer. Kept in sync with observer._RAW_JUNK_IN_NARR_RE.
+_BYLINE_FOLLOW_RE = re.compile(
+    r'\bBy[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+'                # byline w/o space: ByTom Carter
+    r'|You\'?re\s+currently\s+following\s+this\s+(?:author|writer)'  # follow prompt
+    r'|\b(?:Subscribe|Sign)\s+(?:to\s+continue|for\s+(?:updates|more))'
+    r'|#\s+[A-Z][A-Za-z]+'                                # hashtag section tag: "# Meta launches"
+)
+
 # Raw scrape/citation junk that must never survive into final narration (the
 # "pasted slop" class observed live: markdown links like [Skip to content](url),
 # bare URLs, datelines "(Washington, D.C. – January 12, 2026)" and bibliography
@@ -115,6 +128,7 @@ def _clean_narration(narr: str) -> str:
     sents = re.split(r'(?<=[.!?])\s+', s)
     sents = [x for x in sents if x.strip() and not re.fullmatch(r'[.!?…\-–]{1,}', x.strip())]
     sents = [x for x in sents if not _WEB_CHATTER_RE.search(x)]
+    sents = [x for x in sents if not _BYLINE_FOLLOW_RE.search(x)]
     sents = [x for x in sents if not _CITATION_DROP_RE.search(x)]
     sents = [x for x in sents if not _is_market_ticker_sentence(x)]
     sents = [x for x in sents if not _VULGAR_RE.search(x)]
@@ -269,6 +283,7 @@ _SNIPPET_JUNK_RE = re.compile(
 def _snippet_is_junk(snippet: str) -> bool:
     """True if a snippet is dominated by boilerplate/ad/credit/citation/market junk."""
     return bool(_SNIPPET_JUNK_RE.search(snippet or "") or _CITATION_DROP_RE.search(snippet or "")
+                or _BYLINE_FOLLOW_RE.search(snippet or "")
                 or _is_market_ticker_sentence(snippet))
 
 
@@ -508,6 +523,11 @@ class StoryDesignerAgent:
         s = _clean_snippet_text(snippet)
         if not s:
             return ""
+        # Reject byline/follow/hashtag/ticker/citation junk even if it slipped
+        # past the pool guard — a pasted byline or follow-prompt must never
+        # become narration padding (leaked live in the Meta run's Shot 18).
+        if _snippet_is_junk(s):
+            return ""
         # Drop leading connectors that give away a raw cut-and-paste.
         s = re.sub(
             r'^\s*(that\s+|which\s+|in which\s+|and\s+|but\s+|so\s+|'
@@ -549,19 +569,60 @@ class StoryDesignerAgent:
             self._WN_CACHE = None
         return self._WN_CACHE
 
+    # WordNet lemmas that read as stilted / archaic / over-formal in modern
+    # narration. Observed live on the ostrich/Meta runs (ability→powerfulness,
+    # years→eld, capableness) plus a small register of common offenders. A
+    # dissolve must never swap these in — it reads as broken English and trips
+    # the Observer. Kept deliberately small; the primary protection below is to
+    # prefer common synonyms and to stop (leave the word) when nothing good is
+    # found rather than inject a rare word.
+    _STILTED_SYNONYMS = frozenset({
+        "eld", "powerfulness", "capableness", "capable", "aforementioned",
+        "wherewithal", "wherefore", "aught", "naught", "belike", "peradventure",
+        "methinks", "whilst", "thou", "thy", "thee", "hast", "doth", "whence",
+        "thence", "heretofore", "thereunto", "thereupon", "hitherto", "yea",
+        "nary", "verily", "forsooth",
+    })
+
     def _best_synonym(self, tok: str, wn) -> Optional[str]:
-        """First single-word WordNet synonym for a token, preserving case."""
+        """Best single-word WordNet synonym for a token, preserving case.
+
+        Prefers COMMON lemmas over the raw first-hit: iterates every synset of
+        the token, skips stilted/archaic/over-long/hyphenated lemmas, and favours
+        a lemma whose synset offers multiple alternatives (a proxy for a
+        well-used word). Returns None when no good synonym exists so the caller
+        leaves the word unchanged instead of injecting a rare word."""
         bare = tok.strip(',.!?;:()"\'')
         if not re.search(r"[A-Za-z]", bare):
             return None
         base = bare.lower()
+
+        def _acceptable(alt: str) -> bool:
+            al = alt.lower()
+            if " " in alt or len(alt) > 14:
+                return False
+            if al in self._STILTED_SYNONYMS:
+                return False
+            # -ness/-ment nominalisations are rarely a natural single-word swap
+            # in the middle of narration; only allow if it is common and short.
+            if al.endswith(("-ness", "-ment")):
+                return False
+            return al != base and 2 < len(al) and al not in ("the", "and", "for", "but")
+
+        # Pass 1: prefer a lemma from a synset that lists multiple lemmas
+        # (indicates a well-attested, commonly-used word).
+        for ss in wn.synsets(base):
+            lemmas = [L.name().replace("_", " ") for L in ss.lemmas()]
+            if len(lemmas) < 2:
+                continue
+            for alt in lemmas:
+                if _acceptable(alt):
+                    return alt.capitalize() if bare[0].isupper() else alt
+        # Pass 2: fall back to any acceptable lemma (single-lemma synset).
         for ss in wn.synsets(base):
             for lemma in ss.lemmas():
                 alt = lemma.name().replace("_", " ")
-                if " " in alt or len(alt) > 14:
-                    continue
-                al = alt.lower()
-                if al != base and 2 < len(al) and al not in ("the", "and", "for", "but"):
+                if _acceptable(alt):
                     return alt.capitalize() if bare[0].isupper() else alt
         return None
 
@@ -1518,7 +1579,18 @@ class StoryDesignerAgent:
             source_links.append(f"- Primary Source: {topic.source_url}")
         seen_urls = {topic.source_url} if topic.source_url else set()
         if verified_facts:
-            for fact in verified_facts:
+            # Only list ON-TOPIC, non-generic facts under "Sources & Data
+            # Grounding". The full verified_facts list is the RSS/enrichment
+            # corpus and is polluted with unrelated feed items (Mars rovers,
+            # housecoats, crosswords) that share generic tokens with the topic;
+            # citing them in the published description reads as junk grounding
+            # (see publish-integrity-quality-fix-plan.md issue #2).
+            for fact in rag_retriever.filter_facts_for_topic(
+                verified_facts,
+                headline=topic.headline,
+                summary=topic.summary,
+                keywords=topic.keywords,
+            ):
                 if fact.url and fact.url not in seen_urls:
                     name = fact.source_name or "Verified Source"
                     source_links.append(f"- {name}: {fact.url}")
@@ -1526,16 +1598,19 @@ class StoryDesignerAgent:
         source_links.append("- Curated research & automated production by the Lumen Loop Documentary Project (2026)")
         sources_str = "\n".join(source_links)
 
+        # Chapter timestamps from the shared helper (design time -> uses shot
+        # duration_estimate; measured durations only exist at publish time).
+        from src.engine.chapters import compute_act_chapters
+        _ch_lines, chapter_timestamps = compute_act_chapters(
+            shots=getattr(script, "shots", None),
+        )
+        chapters_str = "\n".join(_ch_lines)
+
         description = (
             f"Deep-dive documentary analysis on: {headline}.\n\n"
             f"In this video, we break down the ground-truth data, market implications, and strategic lessons.\n\n"
             f"CHAPTERS:\n"
-            f"0:00 - Act 1: The Inciting Incident\n"
-            f"2:15 - Act 2: Historical Precedents & Origins\n"
-            f"4:30 - Act 3: Deep Technical Mechanics\n"
-            f"6:45 - Act 4: Actionable Real-World Impact\n"
-            f"9:00 - Act 5: Critical Risks & Counter-Arguments\n"
-            f"11:15 - Act 6: Strategic Future Verdict\n\n"
+            f"{chapters_str}\n\n"
             f"Sources & Data Grounding:\n{sources_str}\n\n"
             f"#Infotainment #{topic.niche_category.replace(' ', '')} #Documentary"
         )
@@ -1557,10 +1632,7 @@ class StoryDesignerAgent:
             description=description,
             tags=list(set(tags)),
             thumbnail_brief=brief,
-            chapter_timestamps=[
-                "0:00 Intro", "2:15 Historical Background", "4:30 Technical Analysis", 
-                "6:45 Real Impact", "9:00 Risk Analysis", "11:15 Conclusion"
-            ]
+            chapter_timestamps=chapter_timestamps,
         )
 
     def process(self, state: GlobalState, region: str = "all", revision_violations: Optional[List[str]] = None) -> A2AMessage:
