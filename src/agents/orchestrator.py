@@ -63,6 +63,9 @@ class OrchestratorAgent:
         self.publisher = publisher or PublisherAgent()
         self.logs_dir = logs_dir
         os.makedirs(self.logs_dir, exist_ok=True)
+        tracer.log_dir = self.logs_dir
+        run_budget.logs_dir = self.logs_dir
+        logger.set_log_dir(self.logs_dir)
 
     async def run_pipeline(
         self,
@@ -251,9 +254,10 @@ class OrchestratorAgent:
                 run_budget.set_stage("RAG_QUALITY_PASSED")
 
             # 2. Story Script Generation
-            if not state.script_data or state.execution_stage == "SCRIPT_REVISION_REQUIRED":
-                if state.execution_stage == "SCRIPT_REVISION_REQUIRED":
-                    logger.info("PHASE_2_SCRIPT_DESIGN", "Found incomplete/failed script from a failed run (Stage: SCRIPT_REVISION_REQUIRED). Clearing and re-generating...", pipeline_id=p_id, component="STORY_DESIGNER")
+            APPROVED_SCRIPT_STAGES = {"SCRIPT_APPROVED", "MEDIA_PRODUCED", "MEDIA_READY", "QUALITY_VERIFIED", "PUBLISHED_SUCCESS"}
+            if not state.script_data or state.execution_stage not in APPROVED_SCRIPT_STAGES:
+                if state.execution_stage not in APPROVED_SCRIPT_STAGES and state.script_data:
+                    logger.info("PHASE_2_SCRIPT_DESIGN", f"Found unapproved/failed script from a previous run (Stage: {state.execution_stage}). Clearing and re-generating...", pipeline_id=p_id, component="STORY_DESIGNER")
                     state.script_data = None
                 logger.info("PHASE_2_SCRIPT_DESIGN", "Generating 10-15 Min 6-Act dramatic arc narrative script...", pipeline_id=p_id, component="STORY_DESIGNER")
                 msg_script = self.story_designer.process(state)
@@ -273,25 +277,27 @@ class OrchestratorAgent:
                 msg_obs = self.observer.process(state)
 
                 # Define a helper function to audit script quality (Gate 1 & Gate 6)
-                def run_script_quality_checks() -> Tuple[bool, Optional[str]]:
+                def run_script_quality_checks() -> Tuple[bool, List[str]]:
+                    issues = []
                     # Gate 1: Topic-to-Script coherence check
                     gate1_pass, gate1_issues = quality_verifier.verify_gate1_topic_to_script(
                         state.selected_topic, state.script_data
                     )
                     if not gate1_pass:
-                        return False, f"Gate 1 Fail (Topic Coherence): {gate1_issues}"
+                        issues.extend([f"Gate 1 Fail (Topic Coherence): {issue}" for issue in gate1_issues])
                     
                     # Gate 6: Anti-Slop Entropy Audit
                     gate6_result = quality_verifier.verify_gate6_anti_slop_entropy(state.script_data)
                     if not gate6_result["passes"]:
-                        return False, f"Gate 6 Fail (Anti-Slop): {gate6_result['issues']}"
+                        issues.extend([f"Gate 6 Fail (Anti-Slop): {issue}" for issue in gate6_result["issues"]])
                     
-                    return True, None
+                    return len(issues) == 0, issues
 
-                quality_pass, quality_error = run_script_quality_checks()
+                quality_pass, quality_errors = run_script_quality_checks()
 
                 if msg_obs.intent == AgentIntent.REVISE_SCRIPT or not quality_pass:
-                    reason = "Observer rejection" if msg_obs.intent == AgentIntent.REVISE_SCRIPT else quality_error
+                    state.execution_stage = "SCRIPT_REVISION_REQUIRED"
+                    reason = "Observer rejection" if msg_obs.intent == AgentIntent.REVISE_SCRIPT else "; ".join(quality_errors)
                     logger.warning(
                         "PHASE_2_OBSERVER_AUDIT",
                         f"Script failed initial validation ({reason}). Triggering A2A revision loop...",
@@ -310,7 +316,7 @@ class OrchestratorAgent:
                     MAX_REVISIONS = 3
                     revision_ok = False
                     last_violations: List[str] = []
-                    last_quality_error: Optional[str] = None
+                    last_quality_errors: List[str] = []
                     best_script = None
                     best_script_key = (10**9, -1.0)  # (hard_count, -quality_score)
                     prev_hard: Optional[int] = None
@@ -318,8 +324,8 @@ class OrchestratorAgent:
                         violations = []
                         if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
                             violations.extend(msg_obs.payload.get("violations", []))
-                        if not quality_pass and quality_error:
-                            violations.append(quality_error)
+                        if not quality_pass and quality_errors:
+                            violations.extend(quality_errors)
 
                         logger.warning(
                             "PHASE_2_OBSERVER_AUDIT",
@@ -331,11 +337,27 @@ class OrchestratorAgent:
                         # driven by the Observer's message (with state_hash) rather
                         # than a second ad-hoc generation path.
                         if by_shot:
+                            # Keep a copy of the original shots before repair to capture the diff
+                            original_shots = {s.shot_id: s.narration_text for s in state.script_data.shots}
                             repaired = self.story_designer.repair_shots(
                                 state.script_data, state, by_shot, global_v, msg_obs=msg_obs
                             )
                             if repaired is not None:
                                 state.script_data = repaired
+                                # Record successful corrections in feedback memory
+                                try:
+                                    from src.engine.feedback_memory import feedback_memory
+                                    for s_id, violations in by_shot.items():
+                                        repaired_shot = next((s for s in repaired.shots if s.shot_id == s_id), None)
+                                        if repaired_shot and original_shots.get(s_id) != repaired_shot.narration_text:
+                                            feedback_memory.record_correction(
+                                                topic=state.selected_topic.headline if state.selected_topic else "Unknown Topic",
+                                                violation="; ".join(violations),
+                                                original_text=original_shots.get(s_id, ""),
+                                                corrected_text=repaired_shot.narration_text
+                                            )
+                                except Exception as fe:
+                                    logger.warning("PHASE_2_OBSERVER_AUDIT", f"Failed to log feedback: {fe}", pipeline_id=p_id)
                         elif global_v:
                             # Only script-wide issues remain (no shot-specific nits):
                             # the existing fact-preserving polish pass repairs prose
@@ -357,10 +379,10 @@ class OrchestratorAgent:
                             best_script_key = _cur_key
                             best_script = copy.deepcopy(state.script_data)
                         msg_obs = self.observer.process(state)
-                        quality_pass, quality_error = run_script_quality_checks()
+                        quality_pass, quality_errors = run_script_quality_checks()
 
                         last_violations = violations
-                        last_quality_error = quality_error if not quality_pass else None
+                        last_quality_errors = quality_errors if not quality_pass else []
 
                         if msg_obs.intent != AgentIntent.REVISE_SCRIPT and quality_pass:
                             revision_ok = True
@@ -369,7 +391,7 @@ class OrchestratorAgent:
                         # Early exit: a straight/rising hard-violation count across
                         # attempts means the draft genuinely can't improve (corpus
                         # poison, contradictory instructions) — stop burning calls.
-                        if prev_hard is not None and len(hard_now) >= prev_hard:
+                        if prev_hard is not None and prev_hard > 0 and len(hard_now) >= prev_hard:
                             logger.warning(
                                 "PHASE_2_OBSERVER_AUDIT",
                                 f"Hard violations non-decreasing ({prev_hard} -> {len(hard_now)}); "
@@ -403,12 +425,13 @@ class OrchestratorAgent:
                             msg_obs = self.observer.process(state)
                             state.execution_stage = "SCRIPT_APPROVED"
                         else:
+                            state.execution_stage = "SCRIPT_REVISION_REQUIRED"
                             # Report the ACTUAL failure: prefer Observer violations when the
                             # observer rejected; otherwise surface the failing quality gate.
                             if msg_obs.intent == AgentIntent.REVISE_SCRIPT and msg_obs.payload:
                                 detail = msg_obs.payload.get("violations")
                             else:
-                                detail = last_quality_error or last_violations
+                                detail = last_quality_errors or last_violations
                             raise RuntimeError(
                                 f"Script failed validation after {MAX_REVISIONS} revisions: {detail}"
                             )
@@ -453,7 +476,19 @@ class OrchestratorAgent:
                 logger.info("PHASE_2_SCRIPT_DESIGN", f"Resuming: Using existing approved script: '{state.script_data.title}'", pipeline_id=p_id, component="STORY_DESIGNER")
 
             # 4. Media Production (Audio, Visuals, FFmpeg Assembly)
-            if not state.asset_paths.final_video:
+            video_exists = False
+            if state.asset_paths and state.asset_paths.final_video:
+                if os.path.exists(state.asset_paths.final_video) and os.path.getsize(state.asset_paths.final_video) > 0:
+                    video_exists = True
+                else:
+                    logger.warning(
+                        "PHASE_3_MEDIA_PRODUCTION",
+                        f"Final video path is recorded ({state.asset_paths.final_video}) but file is missing or empty. Re-generating...",
+                        pipeline_id=p_id, component="ORCHESTRATOR"
+                    )
+                    state.asset_paths.final_video = ""
+
+            if not video_exists:
                 logger.info("PHASE_3_MEDIA_PRODUCTION", "Synthesizing Edge TTS Audio and Rendering 16:9 Widescreen Visuals...", pipeline_id=p_id, component="MEDIA_PRODUCER")
                 msg_media = await self.media_producer.process(state, dummy_frames=dummy_frames)
                 
@@ -543,12 +578,16 @@ class OrchestratorAgent:
 
             # 5. YouTube Publishing
             if publish:
-                logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Publishing Video to YouTube with Synthetic Metadata...", pipeline_id=p_id, component="PUBLISHER")
-                msg_pub = await self.publisher.process(state)
+                if state.upload_metadata and state.upload_metadata.video_id and state.upload_metadata.video_id != "demo_id":
+                    logger.info("PHASE_4_YOUTUBE_PUBLISHING", f"Resuming: Video already published to YouTube with ID: {state.upload_metadata.video_id}", pipeline_id=p_id, component="PUBLISHER")
+                    run_budget.set_stage("PUBLISHED_SUCCESS")
+                else:
+                    logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Publishing Video to YouTube with Synthetic Metadata...", pipeline_id=p_id, component="PUBLISHER")
+                    msg_pub = await self.publisher.process(state)
 
-                logger.info("PHASE_4_YOUTUBE_PUBLISHING", f"Pipeline Run Completed Successfully! Video ID: {state.upload_metadata.video_id}", pipeline_id=p_id, component="PUBLISHER")
-                tracer.record_step(state, "PUBLISHED_SUCCESS", message=msg_pub)
-                run_budget.set_stage("PUBLISHED_SUCCESS")
+                    logger.info("PHASE_4_YOUTUBE_PUBLISHING", f"Pipeline Run Completed Successfully! Video ID: {state.upload_metadata.video_id}", pipeline_id=p_id, component="PUBLISHER")
+                    tracer.record_step(state, "PUBLISHED_SUCCESS", message=msg_pub)
+                    run_budget.set_stage("PUBLISHED_SUCCESS")
             else:
                 logger.info("PHASE_4_YOUTUBE_PUBLISHING", "Skipping YouTube Publishing step as requested (pipeline run till upload complete).", pipeline_id=p_id, component="ORCHESTRATOR")
                 state.execution_stage = "QUALITY_VERIFIED"

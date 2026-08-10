@@ -38,6 +38,20 @@ class PipelineLogger:
         file_handler.setFormatter(logging.Formatter("%(message)s"))
         self.logger.addHandler(file_handler)
 
+    def set_log_dir(self, log_dir: str):
+        """Re-route all logging output to a different directory."""
+        self.log_dir = log_dir
+        self.log_file = os.path.join(self.log_dir, "csvg_execution.log")
+        os.makedirs(self.log_dir, exist_ok=True)
+        # Recreate file handler on the new log file path
+        for handler in list(self.logger.handlers):
+            if isinstance(handler, logging.FileHandler):
+                self.logger.removeHandler(handler)
+                handler.close()
+        file_handler = logging.FileHandler(self.log_file, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("%(message)s"))
+        self.logger.addHandler(file_handler)
+
     def log(
         self,
         level: str,

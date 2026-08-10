@@ -315,7 +315,10 @@ fn api_logs(root: &str) -> Value {
     let raw = read_text(root, "logs/pipeline_run.log")
         .map(|t| {
             let lines: Vec<&str> = t.lines().collect();
-            lines[lines.len().saturating_sub(150)..].join("\n")
+            let start = lines.len().saturating_sub(150);
+            let mut tail = lines[start..].to_vec();
+            tail.reverse();
+            tail.join("\n")
         })
         .unwrap_or_default();
 
@@ -450,6 +453,32 @@ fn api_runs(root: &str) -> Value {
         let video_id = json::get_path(&v, &["upload_metadata", "video_id"])
             .and_then(string_value)
             .unwrap_or_default();
+        let niche = json::get_path(&v, &["selected_topic", "niche_category"])
+            .and_then(string_value)
+            .unwrap_or_default();
+        let audience = json::get_path(&v, &["selected_topic", "audience_type"])
+            .and_then(string_value)
+            .unwrap_or_default();
+        let topsis = json::get_path(&v, &["selected_topic", "topsis_score"])
+            .and_then(string_value)
+            .unwrap_or_default();
+        let runtime = json::get_path(&v, &["script_data", "estimated_runtime_seconds"])
+            .and_then(string_value)
+            .unwrap_or_default();
+        let shots = json::get_path(&v, &["script_data", "target_shots"])
+            .and_then(string_value)
+            .unwrap_or_default();
+        let revenue = json::get_path(&v, &["revenue_forecast", "total_expected_revenue_usd"])
+            .and_then(string_value)
+            .unwrap_or_default();
+        let region = v.get_str("region").unwrap_or_default();
+        let fact_count = json::get_path(&v, &["verified_facts"])
+            .map(|val| match val {
+                Value::Arr(a) => a.len().to_string(),
+                _ => "0".to_string(),
+            })
+            .unwrap_or_else(|| "0".to_string());
+
         out.push(obj(&[
             ("pipeline_id", s(&v.get_str("pipeline_id").unwrap_or_default())),
             ("timestamp", s(&v.get_str("timestamp").unwrap_or_default())),
@@ -457,6 +486,14 @@ fn api_runs(root: &str) -> Value {
             ("headline", s(&topic)),
             ("script_title", s(&script)),
             ("video_id", s(&video_id)),
+            ("niche", s(&niche)),
+            ("audience", s(&audience)),
+            ("topsis", s(&topsis)),
+            ("runtime", s(&runtime)),
+            ("shots", s(&shots)),
+            ("revenue", s(&revenue)),
+            ("region", s(&region)),
+            ("fact_count", s(&fact_count)),
         ]));
     }
     arr(out)

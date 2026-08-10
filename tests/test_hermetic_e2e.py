@@ -602,6 +602,36 @@ def case_a2a_alignment():
 
 
 # ---------------------------------------------------------------------------
+# Case 6 — Gate 6 shallow shot formatting and routing.
+# ---------------------------------------------------------------------------
+def case_gate6_shallow_shots():
+    from src.engine.quality_verifier import StageQualityVerifier
+    from src.agents.orchestrator import _bucket_violations
+
+    qv = StageQualityVerifier()  # fresh instance, not the stubbed singleton
+    script_data = _script_from_json(SCRIPT_JSON)
+    # Make shot 10 shallow (under 75 words)
+    script_data.shots[9] = script_data.shots[9].model_copy(update={
+        "narration_text": "This is a short narration containing only ten words."
+    })
+
+    res = qv.verify_gate6_anti_slop_entropy(script_data)
+    ok_passes = (res["passes"] is False)
+    ok_shallow = (10 in res["shallow_shots"])
+
+    # Check that issues lists the shot as Shot #10
+    issues = res["issues"]
+    has_formatted_shot_issue = any("Shot #10" in issue for issue in issues)
+
+    # Check that _bucket_violations correctly buckets this to shot 10
+    by_shot, global_v = _bucket_violations(issues)
+    ok_bucket = (10 in by_shot)
+
+    record("GATE6_SHALLOW_SHOTS", ok_passes and ok_shallow and has_formatted_shot_issue and ok_bucket,
+           f"passes_false={ok_passes}, shallow_10={ok_shallow}, formatted_shot_issue={has_formatted_shot_issue}, bucketed={ok_bucket}")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def main():
@@ -611,6 +641,7 @@ def main():
     case_outline_first()
     case_routing()
     case_a2a_alignment()
+    case_gate6_shallow_shots()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

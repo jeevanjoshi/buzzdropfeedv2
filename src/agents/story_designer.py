@@ -55,11 +55,14 @@ _RAW_JUNK_RE = re.compile(
     r'|https?://\S+',                                             # bare URL
 )
 
-# Dateline fragment " (City, St. – Month DD, YYYY)" anywhere in a sentence.
+_MONTHS_PAT = r"(?:Jan(?:uary|\.)?|Feb(?:ruary|\.)?|Mar(?:ch|\.)?|Apr(?:il|\.)?|May|June?|July?|Aug(?:ust|\.)?|Sept?(?:ember|\.)?|Oct(?:ober|\.)?|Nov(?:ember|\.)?|Dec(?:ember|\.)?)"
+_DATE_PAT = r"(?:" + _MONTHS_PAT + r"\s+\d{1,2}|\d{1,2}\s+" + _MONTHS_PAT + r")"
+_LOCATION_PAT = r"[A-Z][A-Za-z0-9\s.,\-\/’'\u2019]{2,50}"
+
+# Dateline fragment anywhere in a sentence (parenthesized/bracketed, or unparenthesized).
 _DATELINE_RE = re.compile(
-    r'\(\s*[A-Z][A-Za-z.-]*(?:\s*,\s*[A-Z][A-Za-z.-]*)*\s*[–—-]\s*'
-    r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+'
-    r'\d{1,2},?\s+\d{4}\s*\)',
+    r'[\(\[]\s*' + _LOCATION_PAT + r'\s*[–—-]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]'
+    r'|\b' + _LOCATION_PAT + r'\s*[–—-]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\b',
     re.IGNORECASE,
 )
 
@@ -68,10 +71,8 @@ _DATELINE_RE = re.compile(
 # monogram bibliography entry like "McCammon, Sarah (August 10, 2016)".
 _CITATION_DROP_RE = re.compile(
     r'\bRetrieved\b'
-    r'|\((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+'
-    r'\d{1,2},?\s+\d{4}\s*\)\.?'
-    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+\((?:January|February|March|April|May|June|July|August|September|'
-    r'October|November|December)\s+\d{1,2},?\s+\d{4}\)\.?',
+    r'|[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?'
+    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?',
     re.IGNORECASE,
 )
 
@@ -746,6 +747,18 @@ class StoryDesignerAgent:
                         component="STORY_DESIGNER",
                     )
                     time.sleep(4)
+
+                # Query past corrections from feedback memory
+                from src.engine.feedback_memory import feedback_memory
+                lessons = feedback_memory.get_relevant_feedback(headline, limit=3)
+                lessons_str = ""
+                if lessons:
+                    lessons_str = "\n\n⚠️ LESSONS LEARNED FROM PAST CORRECTIONS (AVOID THESE ERRORS):\n"
+                    for item in lessons:
+                        lessons_str += f"- Past Error: {item['violation']}\n"
+                        lessons_str += f"  Avoid this phrasing: \"{item['original_text']}\"\n"
+                        lessons_str += f"  Write like this instead: \"{item['corrected_text']}\"\n"
+
                 prompt = f"""
                 You are an investigative documentary director crafting a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
                 CATEGORY: '{category}'
@@ -754,6 +767,7 @@ class StoryDesignerAgent:
             
                 FULL RAG KNOWLEDGE PACK (RETRIEVED DEEP FACTS & CONTEXT):
                 {rag_context_text}
+                {lessons_str}
                 """
 
                 if revision_violations:
@@ -1119,6 +1133,17 @@ class StoryDesignerAgent:
             for item in repair_list)
         global_txt = ("\n".join(f"- {v}" for v in global_violations or []))
 
+        # Query past corrections from feedback memory
+        from src.engine.feedback_memory import feedback_memory
+        lessons = feedback_memory.get_relevant_feedback(topic, limit=3)
+        lessons_str = ""
+        if lessons:
+            lessons_str = "\n=== LESSONS LEARNED FROM PAST CORRECTIONS ===\n"
+            for item in lessons:
+                lessons_str += f"- Past Error: {item['violation']}\n"
+                lessons_str += f"  Avoid this: \"{item['original_text']}\"\n"
+                lessons_str += f"  Corrected: \"{item['corrected_text']}\"\n"
+
         prompt = (
             "You are a documentary editor repairing specific failing shots of an existing script. "
             f"TOPIC: {topic}\n"
@@ -1126,6 +1151,8 @@ class StoryDesignerAgent:
             "number, name, date and the tracked source attribution. Fix these violations\n"
             f"{violations_txt}\n"
         )
+        if lessons_str:
+            prompt += lessons_str + "\n"
         if global_txt:
             prompt += f"Also address these script-wide issues without changing shot identities:\n{global_txt}\n"
         prompt += (
@@ -1339,39 +1366,83 @@ class StoryDesignerAgent:
         """
         MIN_TOTAL_WORDS = 1500    # ~10.0 mins @ 150 wpm (Observer hard floor)
         MIN_SHOT_WORDS = 75       # shorter shots (~90 words) so no still is held a full minute
+        MIN_FINAL_SHOT_WORDS = 40
         headline = state.selected_topic.headline if state.selected_topic else script.title
         category = getattr(state.selected_topic, "niche_category", "") if state.selected_topic else ""
 
         total_words = sum(len(s.narration_text.split()) for s in script.shots)
-        if total_words >= MIN_TOTAL_WORDS:
+        
+        # Check if we have any shot that is under its minimum word limit.
+        shallow_shots = []
+        for shot in script.shots:
+            wc = len(shot.narration_text.split())
+            limit = MIN_FINAL_SHOT_WORDS if shot.shot_id == len(script.shots) else MIN_SHOT_WORDS
+            if wc < limit:
+                shallow_shots.append(shot)
+
+        # If there are no shallow shots and the total is already >= MIN_TOTAL_WORDS,
+        # we can safely return immediately.
+        if not shallow_shots and total_words >= MIN_TOTAL_WORDS:
             return script
 
         logger.info(
             "SCRIPT_DESIGN",
-            f"Post-polish word floor: {total_words} words < {MIN_TOTAL_WORDS}. "
-            f"Expanding short shots from the RAG snippet pool...",
+            f"Post-polish safety net triggered: total={total_words} words (min {MIN_TOTAL_WORDS}), "
+            f"shallow={len(shallow_shots)} shots. "
+            f"Expanding shots from the RAG snippet pool...",
             component="STORY_DESIGNER"
         )
         snippets = getattr(self, "_last_rag_snippets", []) or []
         used = getattr(self, "_last_used_snips", set()) or set()
         expanded = False
 
-        # Two bounded passes: each pass tops up any shot still under the floor.
+        # Two bounded passes: each pass tops up any shot still under its minimum.
+        # If the total is still under MIN_TOTAL_WORDS, we also top up the shortest body shots.
         for _pass in range(2):
             for shot in script.shots:
                 wc = len(shot.narration_text.split())
-                if wc < MIN_SHOT_WORDS:
+                limit = MIN_FINAL_SHOT_WORDS if shot.shot_id == len(script.shots) else MIN_SHOT_WORDS
+                if wc < limit:
                     new_narr = self.expand_narration_with_semantic_facts(
                         shot.narration_text, headline, category,
-                        snippets, used, target_word_count=MIN_SHOT_WORDS
+                        snippets, used, target_word_count=limit
                     )
                     if new_narr != shot.narration_text:
                         shot.narration_text = new_narr
                         shot.duration_estimate = max(42.0, round(len(new_narr.split()) / 2.2, 1))
                         expanded = True
+
             total_words = sum(len(s.narration_text.split()) for s in script.shots)
+
+            # If total_words is still under the floor, top up body shots that are under 90 words
+            if total_words < MIN_TOTAL_WORDS:
+                for shot in script.shots:
+                    if shot.shot_id == len(script.shots):
+                        continue
+                    wc = len(shot.narration_text.split())
+                    if wc < 90:
+                        new_narr = self.expand_narration_with_semantic_facts(
+                            shot.narration_text, headline, category,
+                            snippets, used, target_word_count=90
+                        )
+                        if new_narr != shot.narration_text:
+                            shot.narration_text = new_narr
+                            shot.duration_estimate = max(42.0, round(len(new_narr.split()) / 2.2, 1))
+                            expanded = True
+                total_words = sum(len(s.narration_text.split()) for s in script.shots)
+
             if total_words >= MIN_TOTAL_WORDS:
-                break
+                # We've met both requirements (no shallow shots and total >= 1500)
+                # Check for any remaining shallow shots just in case
+                has_shallow = False
+                for shot in script.shots:
+                    wc = len(shot.narration_text.split())
+                    limit = MIN_FINAL_SHOT_WORDS if shot.shot_id == len(script.shots) else MIN_SHOT_WORDS
+                    if wc < limit:
+                        has_shallow = True
+                        break
+                if not has_shallow:
+                    break
 
         script.estimated_runtime_seconds = round(total_words / 150.0 * 60.0, 1)
         if expanded:

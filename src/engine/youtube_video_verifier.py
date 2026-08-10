@@ -73,8 +73,12 @@ class YouTubeVideoVerifier:
             return output_path
             
         print(f"[Verifier] Downloading audio for {video_id} via yt-dlp...")
+        yt_dlp_bin = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
+        if not os.path.exists(yt_dlp_bin):
+            yt_dlp_bin = "yt-dlp"
+
         cmd = [
-            "./venv/bin/yt-dlp",
+            yt_dlp_bin,
             "-x",
             "--audio-format", "mp3",
             "-o", os.path.join(output_dir, f"{video_id}.%(ext)s"),
@@ -112,8 +116,12 @@ class YouTubeVideoVerifier:
             os.makedirs(output_dir, exist_ok=True)
             vtt_pattern = os.path.join(output_dir, f"{video_id}.en.vtt")
             
+            yt_dlp_bin = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
+            if not os.path.exists(yt_dlp_bin):
+                yt_dlp_bin = "yt-dlp"
+
             cmd = [
-                "./venv/bin/yt-dlp",
+                yt_dlp_bin,
                 "--write-auto-subs",
                 "--sub-lang", "en",
                 "--skip-download",

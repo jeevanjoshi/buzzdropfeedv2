@@ -18,7 +18,11 @@ class LinUCBContextualBandit:
     - Joint Feature Scaling: Normalises context vectors across arms to prevent reward magnitude drift
     """
 
-    STATE_PATH = "/opt/csvg_pipeline/logs/bandit_state.json"
+    STATE_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "logs",
+        "bandit_state.json"
+    )
 
     def __init__(self, feature_dim: int = 5, alpha: float = 0.5, l2_reg: float = 1.0):
         self.d = feature_dim

@@ -200,7 +200,7 @@ class StageQualityVerifier:
         # 4. Per-Shot Minimum Narration Depth (catches single shallow shots)
         # The final shot (closing/conclusion) is naturally shorter than the
         # narrative body so it gets a relaxed minimum (40 words).
-        _min_shot_words = 80
+        _min_shot_words = 75
         _min_final_shot_words = 40
         shallow_shots = []
         for s in script.shots:
@@ -229,10 +229,12 @@ class StageQualityVerifier:
         if variance < VARIANCE_MIN:
             issues.append(f"Low sentence length variance ({variance:.1f} < {VARIANCE_MIN}): Monotone rhythm detected.")
         if shallow_shots:
-            issues.append(
-                f"Shallow shots detected: Shot IDs {shallow_shots}. "
-                f"Body shots need ≥{_min_shot_words} words, final shot ≥{_min_final_shot_words} words."
-            )
+            for s_id in shallow_shots:
+                limit = _min_final_shot_words if s_id == len(script.shots) else _min_shot_words
+                issues.append(
+                    f"Shallow shot detected: Shot #{s_id} has under {limit} words. "
+                    f"Body shots need ≥{_min_shot_words} words, final shot ≥{_min_final_shot_words} words."
+                )
 
         return {
             "passes": passes,

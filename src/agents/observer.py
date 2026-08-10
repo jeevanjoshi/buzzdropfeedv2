@@ -37,6 +37,10 @@ _SOFT_VIOLATION_MARKERS = (
     "Bare acronym",
 )
 
+_MONTHS_PAT = r"(?:Jan(?:uary|\.)?|Feb(?:ruary|\.)?|Mar(?:ch|\.)?|Apr(?:il|\.)?|May|June?|July?|Aug(?:ust|\.)?|Sept?(?:ember|\.)?|Oct(?:ober|\.)?|Nov(?:ember|\.)?|Dec(?:ember|\.)?)"
+_DATE_PAT = r"(?:" + _MONTHS_PAT + r"\s+\d{1,2}|\d{1,2}\s+" + _MONTHS_PAT + r")"
+_LOCATION_PAT = r"[A-Z][A-Za-z0-9\s.,\-\/’'\u2019]{2,50}"
+
 # Narration must NEVER contain raw scrape/citation junk (markdown links, bare
 # URLs, datelines "(City, St – Month DD, YYYY)", "Retrieved ..." bibliography
 # tails). These are unambiguous production errors (paste/leak) — NOT style — so
@@ -44,12 +48,11 @@ _SOFT_VIOLATION_MARKERS = (
 _RAW_JUNK_IN_NARR_RE = re.compile(
     r'\[[^\]\n]{0,120}?\]\((?:https?://|#|/)[^)\n]{0,300}?\)'
     r'|\bhttps?://'
-    r'|\(\s*[A-Z][A-Za-z.-]*(?:\s*,\s*[A-Z][A-Za-z.-]*)*\s*[–—-]\s*'
-    r'(?:January|February|March|April|May|June|July|August|September|October|'
-    r'November|December)\s+\d{1,2},?\s+\d{4}\s*\)'
+    r'|[\(\[]\s*' + _LOCATION_PAT + r'\s*[–—-]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]'
+    r'|\b' + _LOCATION_PAT + r'\s*[–—-]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\b'
     r'|\bRetrieved\b'
-    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+\((?:January|February|March|April|May|June|'
-    r'July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\)\.?',
+    r'|[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?'
+    r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?',
     re.IGNORECASE,
 )
 
@@ -67,7 +70,7 @@ _TOOL_NAME_IN_NARR_RE = re.compile(
 # are exempt (see _ACRONYM_ALLOWLIST). Everything else must be spelt out — this
 # is the deterministic gate that makes "no acronyms" independent of LLM sampling
 # (the writer/polish already expand common terms, this catches the residue).
-_ACRONYM_RE = re.compile(r'(?<![A-Za-z0-9])[A-Z]{2,6}(?!\$)(?!%)')
+_ACRONYM_RE = re.compile(r'(?<![A-Za-z0-9])[A-Z]{2,6}(?![A-Za-z0-9])(?!\$)(?!%)')
 _ACRONYM_ALLOWLIST = frozenset({
     "NASA", "IBM", "MIT", "CNN", "BBC", "NBC", "CBS", "ABC", "FOX",
     "NY", "LA", "NYSE", "NASDAQ", "IMF", "WTO", "ECB", "FOMC",
@@ -246,6 +249,12 @@ class ObserverAgent:
             ]
             if corpus_sents:
                 _sem_on = semantic_embedder.available
+                corpus_vectors = None
+                if _sem_on:
+                    corpus_vectors = semantic_embedder.encode_batch(corpus_sents)
+                    if corpus_vectors is None:
+                        _sem_on = False
+
                 for shot in script.shots:
                     for sent in re.split(r'[.!?]', shot.narration_text):
                         sent_norm = re.sub(r'[^a-z0-9 ]', '', sent.strip().lower()).strip()
@@ -254,9 +263,11 @@ class ObserverAgent:
                         # Semantic whole-sentence meaning-copy check: catches lightly
                         # rewritten but semantically identical slop the substring test
                         # misses, while avoiding false positives on the 0.82-0.93 band.
-                        if _sem_on:
-                            max_sim = semantic_max_similarity(sent_norm, corpus_sents)
-                            if max_sim is not None:
+                        if _sem_on and corpus_vectors is not None:
+                            q_vec = semantic_embedder.encode_batch([sent_norm])
+                            if q_vec is not None:
+                                sims = q_vec[0] @ corpus_vectors.T
+                                max_sim = float(sims.max()) if len(sims) else 0.0
                                 if max_sim >= COPY_SEMANTIC_HARD_THRESHOLD:
                                     violations.append(
                                         f"Shot #{shot.shot_id} verbatim source copy: narration copies the "

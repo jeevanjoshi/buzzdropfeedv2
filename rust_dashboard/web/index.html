@@ -312,9 +312,35 @@ function runsList(){
     const stage=(r.execution_stage||'');
     const ok = r.video_id || stage==='PUBLISHED_SUCCESS';
     const tag = ok?'<span class="tag ok">published</span>':(stage.includes('FAIL')||stage.includes('ERROR'))?'<span class="tag err">failed</span>':'<span class="tag warn">'+esc(stage.slice(0,18))+'</span>';
-    return `<div class="item"><div class="title">${esc(r.headline||r.script_title||r.pipeline_id||'—')}</div>
-      <div class="meta"><span class="mono">${esc(r.pipeline_id||'—')}</span><span>${esc(r.timestamp||'')}</span>${tag}
-      ${r.video_id?`<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${esc(r.video_id)}">Watch ↗</a>`:''}</div></div>`;
+    
+    let rtStr = '—';
+    if (r.runtime && !isNaN(r.runtime)) {
+      const rtSec = Number(r.runtime);
+      rtStr = Math.floor(rtSec / 60) + 'm ' + Math.round(rtSec % 60) + 's';
+    }
+    
+    const revStr = (r.revenue && !isNaN(r.revenue)) ? '$' + Number(r.revenue).toFixed(2) : '—';
+    const topsisStr = (r.topsis && !isNaN(r.topsis)) ? Number(r.topsis).toFixed(4) : '—';
+
+    return `<div class="item">
+      <div class="title">${esc(r.headline||r.script_title||r.pipeline_id||'—')}</div>
+      <div class="meta">
+        <span class="mono">${esc(r.pipeline_id||'—')}</span>
+        <span>${esc(r.timestamp||'')}</span>
+        ${tag}
+        ${r.video_id?`<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${esc(r.video_id)}">Watch ↗</a>`:''}
+      </div>
+      <div class="run-params" style="margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; font-size: 11.5px; border-top: 1px solid var(--border); padding-top: 10px;">
+        <div><span class="muted">Region:</span> <b style="color:var(--cyan)">${esc(r.region || '—')}</b></div>
+        <div><span class="muted">Niche:</span> <span style="color:var(--text)" title="${esc(r.niche || '')}">${esc(r.niche ? (r.niche.length > 22 ? r.niche.slice(0, 20) + '...' : r.niche) : '—')}</span></div>
+        <div><span class="muted">Audience:</span> <b style="color:var(--purple)">${esc(r.audience || '—')}</b></div>
+        <div><span class="muted">TOPSIS Score:</span> <b style="color:var(--amber)">${topsisStr}</b></div>
+        <div><span class="muted">Runtime:</span> <b style="color:var(--text)">${rtStr}</b></div>
+        <div><span class="muted">Shots:</span> <b style="color:var(--text)">${esc(r.shots || '—')}</b></div>
+        <div><span class="muted">Facts:</span> <b style="color:var(--text)">${esc(r.fact_count || '—')}</b></div>
+        <div><span class="muted">Est. Revenue:</span> <b style="color:var(--green)">${revStr}</b></div>
+      </div>
+    </div>`;
   }).join('')}</div>`;
 }
 
@@ -322,12 +348,19 @@ function publishedList(){
   const ps = DATA.published||[];
   if(!ps || !ps.length) return '<div class="empty">No published topics recorded yet.</div>';
   return `<div class="list">${ps.slice().reverse().map(p=>{
-    const ts = p.timestamp?new Date(p.timestamp).toLocaleString():'N/A';
+    const ts = p.published_at ? new Date(p.published_at).toLocaleString() : (p.timestamp ? new Date(p.timestamp).toLocaleString() : 'N/A');
     const to = (v)=>v!=null?Number(v).toFixed(4):'—';
-    return `<div class="item"><div class="title">${esc(p.headline||p.topic||'Untitled')}</div>
-      <div class="meta"><span>${esc(ts)}</span><span>TOPSIS <b>${to(p.topsis_score)}</b></span>
-      <span class="tag ${p.published?'ok':'warn'}">${p.published?'Published':'Generated'}</span>
-      ${p.video_id?'<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v='+esc(p.video_id)+'">Watch ↗</a>':''}</div></div>`;
+    return `<div class="item">
+      <div class="title">${esc(p.headline||p.topic||'Untitled')}</div>
+      <div class="meta">
+        <span>Published At: <b>${esc(ts)}</b></span>
+        ${p.topsis_score!=null?`<span>TOPSIS <b>${to(p.topsis_score)}</b></span>`:''}
+        <span class="tag ok">Published</span>
+        ${p.video_id?'<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v='+esc(p.video_id)+'">Watch ↗</a>':''}
+      </div>
+      ${p.summary?`<div style="margin-top:8px; font-size:12px; color:var(--muted); line-height:1.4;">${esc(p.summary)}</div>`:''}
+      ${p.keywords && p.keywords.length ? `<div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:5px;">${p.keywords.map(kw=>`<span style="font-size:10px; background:rgba(255,255,255,0.04); border:1px solid var(--border); padding:2px 6px; border-radius:4px; color:var(--muted);">${esc(kw)}</span>`).join('')}</div>`:''}
+    </div>`;
   }).join('')}</div>`;
 }
 

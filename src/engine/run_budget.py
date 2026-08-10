@@ -58,6 +58,7 @@ class RunBudget:
         self._notes: list = []
         self._lock = threading.Lock()
         self._flush_thread = None
+        self.logs_dir = os.getenv("BUDGET_LOGS_DIR", "logs")
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self, pipeline_id: Optional[str] = None) -> None:
@@ -127,20 +128,21 @@ class RunBudget:
     def _write(self, rec: dict, pipeline_id: Optional[str], _status: str) -> Optional[dict]:
         rid = (pipeline_id or rec.get("pipeline_id")) or "unknown"
         try:
-            os.makedirs(BUDGET_LOGS_DIR, exist_ok=True)
+            os.makedirs(self.logs_dir, exist_ok=True)
+            aggregate_file = os.path.join(self.logs_dir, "run_budget.json")
             with self._lock:
-                per_run = os.path.join(BUDGET_LOGS_DIR, f"run_budget_{rid}.json")
+                per_run = os.path.join(self.logs_dir, f"run_budget_{rid}.json")
                 self._atomic_dump(per_run, rec)
                 agg: dict = {}
-                if os.path.exists(AGGREGATE_FILE):
+                if os.path.exists(aggregate_file):
                     try:
-                        with open(AGGREGATE_FILE, "r", encoding="utf-8") as f:
+                        with open(aggregate_file, "r", encoding="utf-8") as f:
                             agg = json.load(f)
                     except (json.JSONDecodeError, IOError, OSError):
                         agg = {}
                 rec["pipeline_id"] = rid
                 agg[rid] = rec
-                self._atomic_dump(AGGREGATE_FILE, agg)
+                self._atomic_dump(aggregate_file, agg)
                 return rec
         except (IOError, OSError):
             return None

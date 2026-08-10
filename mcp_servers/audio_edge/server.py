@@ -95,6 +95,22 @@ def generate_synthetic_wav(output_path: str, duration_sec: float = 3.0, sample_r
             wav_file.writeframes(struct.pack('<h', sample))
 
 
+def _resolve_local_path(path: str) -> str:
+    """
+    Translates absolute paths sent from remote nodes (e.g. OCI /home/ubuntu/...)
+    to the local node's repo root or tmp dir to prevent permission/missing dir errors.
+    """
+    if not path:
+        return path
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    # Map repo paths (e.g. /home/ubuntu/buzzdropfeedv2/logs/...) -> /home/jeevanjoshi/buzzdropfeedv2/logs/...
+    if "/buzzdropfeedv2/" in path:
+        rel = path.split("/buzzdropfeedv2/", 1)[1]
+        return os.path.join(base_dir, rel)
+    # Map legacy /tmp/csvg_media paths if any
+    return path
+
+
 @app.post("/tools/synthesize_tts")
 async def synthesize_tts(req: TTSRequest):
     """
@@ -102,6 +118,7 @@ async def synthesize_tts(req: TTSRequest):
     and region-appropriate voice selection (Neutral / Indian English).
     """
     try:
+        req.output_path = _resolve_local_path(req.output_path)
         output_dir = os.path.dirname(os.path.abspath(req.output_path))
         os.makedirs(output_dir, exist_ok=True)
 
@@ -149,6 +166,8 @@ async def align_subtitles_whisper(req: WhisperRequest):
     Generates word-level timestamp alignment and compiles a 16:9 YouTube Shorts / Widescreen .ass subtitle file.
     """
     try:
+        req.audio_path = _resolve_local_path(req.audio_path)
+        req.output_ass_path = _resolve_local_path(req.output_ass_path)
         output_dir = os.path.dirname(os.path.abspath(req.output_ass_path))
         os.makedirs(output_dir, exist_ok=True)
 
@@ -246,9 +265,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 @app.get("/files")
 async def get_file(path: str):
-    if not os.path.exists(path):
+    local_path = _resolve_local_path(path)
+    if not os.path.exists(local_path):
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path)
+    return FileResponse(local_path)
 
 
 if __name__ == "__main__":

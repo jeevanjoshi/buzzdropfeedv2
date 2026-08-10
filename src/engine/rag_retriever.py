@@ -9,6 +9,7 @@ import datetime as _dt
 from typing import Dict, Any, List, Tuple, Set
 from src.schemas.state import TopicCandidate, VerifiedFact
 from src.engine.run_budget import run_budget
+from src.engine.logger import logger
 
 # ── RAG Corpus Sufficiency Gate thresholds ─────────────────────────────
 # A 15-shot / 10-15 min script needs ~1,500+ narration words grounded in a
@@ -460,6 +461,7 @@ class RAGTopicRetriever:
                 re.IGNORECASE
             )
 
+            candidates = []
             # Split the HTML page into individual result blocks
             blocks = html.split('<div class="result results_links results_links_deep web-result')
             for block in blocks[1:]:
@@ -485,18 +487,28 @@ class RAGTopicRetriever:
                         combined_text = f"{clean_title} {clean_snippet}"
                         if ad_pattern.search(combined_text):
                             continue
+                        candidates.append({
+                            "title": clean_title,
+                            "snippet": clean_snippet,
+                            "combined": combined_text
+                        })
 
-                        try:
-                            vectorizer = TfidfVectorizer(stop_words='english')
-                            tfidf_matrix = vectorizer.fit_transform([query, combined_text])
-                            sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-                        except Exception:
-                            sim = 0.0
-
+            if candidates:
+                try:
+                    vectorizer = TfidfVectorizer(stop_words='english')
+                    corpus = [query] + [c["combined"] for c in candidates]
+                    tfidf_matrix = vectorizer.fit_transform(corpus)
+                    similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])[0]
+                    for idx, sim in enumerate(similarities):
                         if sim > 0.08:
-                            results.append({"title": clean_title, "snippet": clean_snippet})
+                            results.append({
+                                "title": candidates[idx]["title"],
+                                "snippet": candidates[idx]["snippet"]
+                            })
                             if len(results) >= max_results:
                                 break
+                except Exception as eval_err:
+                    print(f"[RAGRetriever] Error evaluating DuckDuckGo semantic match: {eval_err}")
         except Exception as e:
             print(f"[RAGRetriever] Search Warning: {e}")
 
@@ -574,6 +586,7 @@ class RAGTopicRetriever:
         """
         api_key = os.getenv("TAVILY_API_KEY")
         if not api_key:
+            logger.warning("RAG_RETRIEVER", "TAVILY_API_KEY is not set in environment. Skipping Tavily search.")
             return []
         try:
             import requests
@@ -597,7 +610,7 @@ class RAGTopicRetriever:
                 and not _is_social_source(r.get("url", ""), r.get("title", ""), r.get("content", ""))
             ]
         except Exception as e:
-            print(f"[RAGRetriever] Tavily Warning: {e}")
+            logger.warning("RAG_RETRIEVER", f"Tavily search failed: {e}")
             return []
 
     def search_firecrawl_facts(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -606,6 +619,7 @@ class RAGTopicRetriever:
         """
         api_key = os.getenv("FIRECRAWL_API_KEY")
         if not api_key:
+            logger.warning("RAG_RETRIEVER", "FIRECRAWL_API_KEY is not set in environment. Skipping Firecrawl search.")
             return []
         try:
             import requests
@@ -632,7 +646,7 @@ class RAGTopicRetriever:
                     out.append({"title": title, "snippet": str(desc), "url": meta_url})
             return out
         except Exception as e:
-            print(f"[RAGRetriever] Firecrawl Warning: {e}")
+            logger.warning("RAG_RETRIEVER", f"Firecrawl search failed: {e}")
             return []
 
     def _html_to_text(self, raw_html: str) -> str:

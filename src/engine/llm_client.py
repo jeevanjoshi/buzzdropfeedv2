@@ -108,15 +108,41 @@ class LLMClient:
         try:
             return json.loads(content_clean, strict=False)
         except Exception as e1:
-            import re
-            match = re.search(r'\{.*\}', content_clean, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(0), strict=False)
-                except Exception as e2:
-                    print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. Regex fallback error: {e2}")
+            # Lexical parser fallback: extracts the first matching outer JSON object
+            first_brace = content_clean.find("{")
+            if first_brace != -1:
+                count = 0
+                in_string = False
+                escape = False
+                extracted = ""
+                for i in range(first_brace, len(content_clean)):
+                    char = content_clean[i]
+                    if escape:
+                        escape = False
+                        continue
+                    if char == "\\":
+                        escape = True
+                        continue
+                    if char == '"':
+                        in_string = not in_string
+                        continue
+                    if not in_string:
+                        if char == "{":
+                            count += 1
+                        elif char == "}":
+                            count -= 1
+                            if count == 0:
+                                extracted = content_clean[first_brace:i+1]
+                                break
+                if extracted:
+                    try:
+                        return json.loads(extracted, strict=False)
+                    except Exception as e2:
+                        print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. Lexical parser fallback error: {e2}")
+                else:
+                    print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. Unbalanced braces found.")
             else:
-                print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. No curly braces match found.")
+                print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. No curly braces found.")
         return None
 
     def generate_json(self, prompt: str, system_prompt: str = "",
@@ -134,7 +160,7 @@ class LLMClient:
             if not self.is_llama_cpp_available():
                 return None
             try:
-                timeout = int(os.getenv("LLAMA_CPP_TIMEOUT", "300"))
+                timeout = int(os.getenv("LLAMA_CPP_TIMEOUT", "45"))
                 print(f"[LLMClient] Invoking Local llama.cpp server ({self.llama_cpp_url})...")
                 
                 # 1. Try OpenAI-compatible chat completions endpoint first
