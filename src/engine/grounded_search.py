@@ -139,25 +139,48 @@ def _client() -> Optional[Any]:
     return None
 
 
-def _facets(headline: str, summary: str, keywords: Optional[List[str]] = None) -> List[str]:
+def _facets(headline: str, summary: str, keywords: Optional[List[str]] = None,
+            category: str = "") -> List[str]:
     """Build a small set of specific, answerable research questions (facets) from
     the topic. Keeping each query SHORT and direct is what makes Google attach
     ``grounding_chunks`` to the answer (a single 10-18-fact synthesis prompt
-    fires searches but returns no inline citations)."""
+    fires searches but returns no inline citations).
+
+    The facet set is CATEGORY-AWARE: market/competitor/forecast questions only
+    make sense for business/finance topics. For History, Science, Health,
+    Geopolitics etc. those generic finance facets make Google grounding return
+    off-topic "Contract Research Organizations market $X" snippets that pollute
+    the corpus, so they are replaced with domain-appropriate questions.
+    """
     kw = list(keywords or [])
     primary = kw[0].strip() if kw else "the topic"
     topic = headline.strip().strip(".").strip()[:90] or primary
     summary_short = summary.strip().strip(".").strip()[:120] or topic
-    return [
+
+    # Core facets are universal: latest facts, developments, background, risks.
+    facets = [
         f"Give the latest key facts and figures about: {topic}.",
         f"Summarize the latest developments behind: {summary_short}. Give specific facts.",
-        f"What are the exact financial figures (revenue, market cap, growth) for {primary} as of now?",
-        f"What products, models, or launches did {primary} recently announce? Give specific details.",
-        f"Which companies or competitors are most affected by {topic}? Give specific facts.",
-        f"What are the main risks, concerns, or criticisms about {topic}? Give several facts.",
         f"What is the recent historical background of {topic}? Give several facts.",
-        f"What is the near-term outlook or forecast for {topic}? Give several facts.",
+        f"What are the main risks, concerns, or criticisms about {topic}? Give several facts.",
     ]
+
+    # Finance/business topics get market+competitor+forecast depth; everything
+    # else gets domain-appropriate questions instead (never "market cap/outlook").
+    _BUSINESS = ("Finance", "Trading", "Economics", "Business", "Startup")
+    if any(b.lower() in category.lower() for b in _BUSINESS):
+        facets += [
+            f"What are the exact financial figures (revenue, market cap, growth) for {primary} as of now?",
+            f"What products, models, or launches did {primary} recently announce? Give specific details.",
+            f"Which companies or competitors are most affected by {topic}? Give specific facts.",
+            f"What is the near-term outlook or forecast for {topic}? Give several facts.",
+        ]
+    else:
+        facets += [
+            f"What are the key events, people, or findings central to {topic}? Give specific, dated facts.",
+            f"What evidence or studies support the claims about {topic}? Cite specific sources and numbers.",
+        ]
+    return facets
 
 
 def _split_fact_sentences(text: str, min_words: int = 6) -> List[str]:
@@ -205,6 +228,7 @@ def grounded_research(
     summary: str,
     keywords: Optional[List[str]] = None,
     model: Optional[str] = None,
+    category: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Run a per-facet Google-Search-grounded research pass.
 
@@ -232,7 +256,7 @@ def grounded_research(
     seen_facts: set = set()
     topic_terms = ", ".join((keywords or [])[:6]) or headline[:40]
 
-    for q in _facets(headline, summary, keywords):
+    for q in _facets(headline, summary, keywords, category):
         try:
             resp = client.models.generate_content(
                 model=model,
@@ -358,7 +382,8 @@ def build_grounded_knowledge_pack(
     Returns ``None`` when grounding is unavailable so callers fall back to the
     non-grounded scraper path.
     """
-    result = grounded_research(headline, summary, keywords, model=model)
+    category = _category_guess(headline, summary, keywords)
+    result = grounded_research(headline, summary, keywords, model=model, category=category)
     if not result or not result["facts"]:
         print("[GroundedSearch] No grounded facts produced; falling back to scraper path.")
         return None
@@ -374,7 +399,7 @@ def build_grounded_knowledge_pack(
     sources = sorted({f.get("source_name") or "" for f in result["facts"] if f.get("source_name")})
     pack = {
         "topic_headline": headline,
-        "category": _category_guess(headline, summary, keywords),
+        "category": category,
         "summary": summary,
         "keywords": keywords or [],
         "rag_mode": "google_search_grounded",
@@ -383,7 +408,7 @@ def build_grounded_knowledge_pack(
         "selected_article": "",
         "fact_corpus": fact_corpus,
         "full_rag_context_text": (
-            f"TOPIC CATEGORY: {_category_guess(headline, summary, keywords)}\n"
+            f"TOPIC CATEGORY: {category}\n"
             f"RAG EXECUTION MODE: GOOGLE_SEARCH_GROUNDED\n"
             f"HEADLINE: {headline}\n"
             f"SUMMARY: {summary}\n\n"
@@ -411,10 +436,13 @@ def _category_guess(headline: str, summary: str, keywords: Optional[List[str]]) 
         return "History & Documentary"
     if any(w in combined for w in ["space", "nasa", "planet", "rocket", "star", "physics", "science"]):
         return "Space & Scientific Innovation"
+    # Finance beats technology: "Nvidia stock surges / crypto market / bank revenue"
+    # is an economics topic even when it names a tech company.  Failing to route
+    # these to the finance branch would strip the market/forecast facets they need.
+    if any(w in combined for w in ["fed", "market", "stock", "trading", "crypto", "bank", "inflation", "revenue", "dollar", "earnings", "growth"]):
+        return "Global Economics & Finance"
     if any(w in combined for w in ["ai", "chatgpt", "software", "tech", "chip", "nvidia", "cloud", "seo", "app"]):
         return "Technology & Artificial Intelligence"
-    if any(w in combined for w in ["fed", "market", "stock", "trading", "crypto", "bank", "inflation", "revenue", "dollar"]):
-        return "Global Economics & Finance"
     if any(w in combined for w in ["war", "election", "policy", "country", "president", "government"]):
         return "Geopolitics & World Affairs"
     return "Global Trends & Cultural Infotainment"

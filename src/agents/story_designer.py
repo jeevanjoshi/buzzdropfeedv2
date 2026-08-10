@@ -763,7 +763,7 @@ class StoryDesignerAgent:
                 You are an investigative documentary director crafting a 10-15 minute 16:9 widescreen YouTube Infotainment script for topic: '{headline}'.
                 CATEGORY: '{category}'
                 DYNAMIC TEMPORAL ANCHOR: Current Date is {current_date_str} ({current_month_year}). Year: {current_year}.
-                TRUSTED SOURCE ATTRIBUTION: Cite diverse actual publications matching the facts from the RAG pack (e.g. Wired, New York Times, TechCrunch, World Bank, Reuters). Never attribute a news fact to the TERMINOLOGY REFERENCE block / Wikipedia / an encyclopedia — that block is for jargon/acronym definitions only.
+                TRUSTED SOURCE ATTRIBUTION: Do NOT cite, name, or attribute any publication, source, or website verbally in the narration text or video prompts (do NOT say e.g., 'According to Wired', 'Reuters reports', or similar). Present the facts directly and naturally as part of the narrative. The sources and references will be listed separately in the video description.
             
                 FULL RAG KNOWLEDGE PACK (RETRIEVED DEEP FACTS & CONTEXT):
                 {rag_context_text}
@@ -795,7 +795,7 @@ class StoryDesignerAgent:
                      * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
                      * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
                      * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
-                4. Spoken Attribution: Dynamically cite the specific actual publisher or source from the RAG pack (e.g. Wired, New York Times, TechCrunch, World Bank, Reuters) for each fact in a natural, conversational way. Avoid over-attributing everything to a single source. NEVER cite 'Terminology', 'Wikipedia', 'Encyclopedia' or any search tool as the source of a news claim — the TERMINOLOGY REFERENCE block exists ONLY to expand jargon/acronyms, not as a news attribution.
+                4. No Spoken/Visual Citations: Do NOT explicitly name or verbally attribute the sources, publishers, or web links in the spoken narration or screen visual prompts (e.g. do not say 'According to Wired', 'Reuters reports', 'as shown by TechCrunch'). Present the facts directly and naturally in the storytelling without these spoken citations. The sources will be captured in the description instead.
                 5. Strict Temporal Grounding: Frame current developments within {current_month_year}; treat any pre-2026/historical-tagged fact as PAST background only, never as a current event.
                 5b. NO ACRONYMS: Never use acronyms or initialisms in narration. Spell EVERY abbreviation out to its most appropriate full term for the sentence's context the first time it appears (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product', 'IPO' → 'initial public offering', 'ROI' → 'return on investment', 'CEO' → 'chief executive officer'). Proper-noun company/person names that are themselves initialisms (NASA, IBM, CNN, NYSE) may remain. NEVER emit a bare all-caps shorthand.
                 6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
@@ -811,15 +811,15 @@ class StoryDesignerAgent:
                     "CRITICAL RULES: "
                     "1. STYLISTIC EXCELLENCE (Vox/Netflix Documentary Style): Write in a gripping, cinematic, and narrative-first tone. "
                     "Never write dry summaries or list scraped facts line-by-line. Instead, weave facts into a suspenseful, unfolding human story. "
-                    "2. DIVERSE CITATIONS: Dynamically attribute facts to the actual distinct publishers in the RAG pack (e.g. 'As reported by The New York Times', 'Wired analysis shows', 'Reuters records indicate'). Do not attribute everything to a single publisher. NEVER attribute a fact to 'Wikipedia' or an encyclopedia — the TERMINOLOGY REFERENCE block is definitions-only for expanding jargon/acronyms, not a news source. "
+                    "2. NO SPOKEN CITATIONS: Do NOT verbally cite, name, or attribute any publication or website (e.g. 'According to The New York Times', 'Wired shows', etc.) in the narration or visual prompts. Present all news and facts naturally without naming the publisher. Do not use phrases like 'as reported by', 'according to', or the names of news agencies in the script. "
                     "3. CREATIVE ANALOGIES: Translate complex data, metrics, or technical mechanisms into vivid metaphors and simple physical analogies. "
                     "3b. NO ACRONYMS: Spell out every acronym/initialism to its most contextually-appropriate full term on first mention (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product'). The narration must ship ZERO bare all-caps shorthand; only proper-noun initialisms (NASA, IBM, NYSE, CNN) may remain. "
-                     "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
-                     "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
-                     "6. TEMPORAL GROUNDING: Today is {current_year}. Treat any fact dated before 2026 (e.g. '(historical: YYYY)' tags, or any pre-2026 year) as HISTORICAL/PAST context ONLY. "
-                     "Never present older-dated data as a development happening in {current_month_year}. Only describe something as current/this-month if the source is clearly recent; otherwise frame it as 'back in ...' / 'historically ...'. "
-                     "7. NEVER start two consecutive shots with the same subject or phrase. Ensure seamless transitions between shots. "
-                     "8. Visual prompts must describe unique, high-end cinematic locations, camera moves, and lighting. Return valid JSON only."
+                    "4. DYNAMIC RHYTHM: Vary sentence lengths dramatically. Pair long, analytical explanations with short, punchy, high-impact statements. "
+                    "5. Rhetorical & Structural Diversity: Alternate styles across shots—declarative hooks, rhetorical questions, storytelling scenes, and data assertions. "
+                    "6. TEMPORAL GROUNDING: Today is {current_year}. Treat any fact dated before 2026 (e.g. '(historical: YYYY)' tags, or any pre-2026 year) as HISTORICAL/PAST context ONLY. "
+                    "Never present older-dated data as a development happening in {current_month_year}. Only describe something as current/this-month if the source is clearly recent; otherwise frame it as 'back in ...' / 'historically ...'. "
+                    "7. NEVER start two consecutive shots with the same subject or phrase. Ensure seamless transitions between shots. "
+                    "8. Visual prompts must describe unique, high-end cinematic locations, camera moves, and lighting. Return valid JSON only."
                 )
                 repair_hint = ""
                 if attempt > 1:
@@ -984,7 +984,9 @@ class StoryDesignerAgent:
             prompt = (
                 "You are a skilled documentary editor. For EACH shot, rewrite the narration to be "
                 "more engaging, human, fluent and creative, while STRICTLY preserving every fact, "
-                "number, name, date, source attribution and the original meaning. Remove any raw "
+                "number, name, date, and the original meaning. Do NOT include any spoken source "
+                "attributions, publisher names, or website names in the narration text (e.g., do NOT "
+                "say 'According to Wired', 'TechCrunch reported'). Remove any raw "
                 "citation tags like '[Tavily:...]' or '[Exa:...]' and keep clean prose.\n"
                 "Rules:\n"
                 "- Keep every shot's narration between 85 and 105 words (aim ~95).\n"
@@ -1232,7 +1234,7 @@ class StoryDesignerAgent:
             "Rules:\n"
             "- beat_summary: what this shot must accomplish (one clause).\n"
             "- facts_to_use: 1-3 REAL facts above this shot must convey. Never invent.\n"
-            "- publisher: the single publication from the facts to attribute. NEVER a search tool.\n"
+            "- publisher: the single publication from the facts to attribute (for reference only; do not include in narration/prose). NEVER a search tool.\n"
             "- visual_type: standard_image | gif_meme | matplotlib_chart | svg_ticker. "
             "Use matplotlib_chart ONLY for a shot whose facts carry numbers.\n"
             "- NO ACRONYMS in beat_summary (spell them out).\n"
@@ -1277,9 +1279,8 @@ class StoryDesignerAgent:
             beach = b.beat_summary or ""
             if beach and re.search(r"\b[A-Z]{2,6}\b", beach):
                 b.beat_summary = _expand_acronyms(beach)
-        pubs = [b.publisher for b in beats if b.publisher]
-        if len(pubs) >= 2 and len(set(pubs)) < 2:
-            errs.append("source diversity: single attribution across all beats")
+        # Single attribution check on outline publishers is bypassed since citations are description-only now.
+        pass
         if errs:
             logger.warning(
                 "SCRIPT_DESIGN",
@@ -1308,8 +1309,8 @@ class StoryDesignerAgent:
                 "You are a documentary narrator. Write narration for this act of a "
                 f"6-Act infotainment script. Topic: '{headline}'. Period: {current_month_year}.\n"
                 "For each beat, write the stated fact in YOUR OWN words (85-105 words). "
-                "Paraphrase — never quote the fact verbatim. Cite the beat's publisher "
-                "conversationally ('As reported by X'). NO acronyms unless proper nouns "
+                "Paraphrase — never quote the fact verbatim. Do NOT cite the publisher's "
+                "name or website verbally in the narration text. NO acronyms unless proper nouns "
                 "(NASA, IBM, NYSE, CNN). DO NOT repeat or paraphrase the previous act's "
                 "opening/closing.\n"
                 f"PREVIOUS ACT's final narration (continuity only, do not repeat):\n{prev_act_narr or '(none)'}\n\n"
@@ -1502,7 +1503,7 @@ class StoryDesignerAgent:
                 return title
         return None
 
-    def generate_seo_metadata(self, topic: TopicCandidate, script: ScriptData) -> SEOMetadata:
+    def generate_seo_metadata(self, topic: TopicCandidate, script: ScriptData, verified_facts: Optional[List[VerifiedFact]] = None) -> SEOMetadata:
         """
         Generates high-CTR SEO metadata (Title, Description, Tags, Thumbnail Brief) alongside the script.
         """
@@ -1512,6 +1513,19 @@ class StoryDesignerAgent:
         tags = [t.strip().lower() for t in topic.keywords if len(t.strip()) > 2][:10]
         tags.extend(["infotainment", "documentary", "2026", "analysis", "explained"])
         
+        source_links = []
+        if topic.source_url:
+            source_links.append(f"- Primary Source: {topic.source_url}")
+        seen_urls = {topic.source_url} if topic.source_url else set()
+        if verified_facts:
+            for fact in verified_facts:
+                if fact.url and fact.url not in seen_urls:
+                    name = fact.source_name or "Verified Source"
+                    source_links.append(f"- {name}: {fact.url}")
+                    seen_urls.add(fact.url)
+        source_links.append("- Curated research & automated production by the Lumen Loop Documentary Project (2026)")
+        sources_str = "\n".join(source_links)
+
         description = (
             f"Deep-dive documentary analysis on: {headline}.\n\n"
             f"In this video, we break down the ground-truth data, market implications, and strategic lessons.\n\n"
@@ -1522,7 +1536,7 @@ class StoryDesignerAgent:
             f"6:45 - Act 4: Actionable Real-World Impact\n"
             f"9:00 - Act 5: Critical Risks & Counter-Arguments\n"
             f"11:15 - Act 6: Strategic Future Verdict\n\n"
-            f"Sources & Data Grounding:\n- {topic.source_url}\n- Grounded Fact Verification via CSVG Pipeline (2026)\n\n"
+            f"Sources & Data Grounding:\n{sources_str}\n\n"
             f"#Infotainment #{topic.niche_category.replace(' ', '')} #Documentary"
         )
         
@@ -1654,7 +1668,7 @@ class StoryDesignerAgent:
             state.selected_topic.headline, 65)
 
         state.script_data = script
-        state.seo_metadata = self.generate_seo_metadata(state.selected_topic, script)
+        state.seo_metadata = self.generate_seo_metadata(state.selected_topic, script, state.verified_facts)
         state.execution_stage = "SCRIPT_GENERATED"
 
         msg = A2AMessage(

@@ -733,35 +733,9 @@ class ObserverAgent:
                     f"Keyword over-repetition: '{_worst}' appears in {_tok_freq[_worst]}/{_n_shots} shots. Vary the vocabulary."
                 )
 
-        # (B) Source-attribution diversity: scripts should cite multiple distinct
-        # authentic sources and not over-attribute to a single one.
-        if verified_facts:
-            source_names = {f.source_name for f in verified_facts if f.source_name}
-            source_names = {
-                s for s in source_names
-                if s and "Viet" not in s and "Verified Market Reports" not in s
-            }
-            if len(source_names) >= 2:
-                narration_full = " ".join(s.narration_text for s in script.shots).lower()
-                cited = {sn: narration_full.count(sn.lower()) for sn in source_names if sn.lower() in narration_full}
-                if cited:
-                    total_cites = sum(cited.values())
-                    max_cites = max(cited.values())
-                    top_source = max(cited, key=cited.get)
-                    if total_cites > 0:
-                        if len(cited) == 1:
-                            violations.append(
-                                f"Source Diversity: narration cites only '{top_source}'. "
-                                f"Attribute to multiple distinct sources (available: {sorted(source_names)})."
-                            )
-                        elif total_cites >= 3 and max_cites / total_cites > 0.45:
-                            # Only enforce the over-citation ratio once there are enough
-                            # citations to be meaningful; with 1-2 cites a 50/50 split is
-                            # just a small sample, not systematic over-attribution.
-                            violations.append(
-                                f"Source Diversity: '{top_source}' over-cited ({max_cites}/{total_cites} = "
-                                f"{max_cites/total_cites:.0%}). Balance citations across authentic sources."
-                            )
+        # (B) Source-attribution diversity check is bypassed/disabled for narration
+        # since references are no longer included in the audio/video, only in the description.
+        pass
 
         # Anti-Hallucination Audit — against verified facts + full RAG fact corpus
         if verified_facts:

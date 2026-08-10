@@ -168,7 +168,7 @@ The pipeline has been upgraded with the following production-grade features:
 
 ### 1. Dynamic NLP RAG Expansion
 * **Semantic Search Grounding**: Replaced static boilerplate filler text with a dynamic `scikit-learn` `TfidfVectorizer` and `cosine_similarity` search engine. Short script segments are expanded with the most semantically relevant real-time facts fetched from search results.
-* **Diverse Citations**: Instructed the LLM to attribute facts dynamically to their actual source publications (e.g. Wikipedia, New York Times, Wired) instead of generic over-attributions.
+* **Description-Only Citations**: Ingested sources are compiled and automatically appended as a list of links in the YouTube video description (credited to the *Lumen Loop Documentary Project*). Spoken and visual source attributions have been removed from the narration and video subtitles to ensure an uninterrupted, cinematic storytelling flow.
 
 ### 2. Specialized Visuals Audio Merging & Watermarking
 * **FFmpeg Audio Mixing**: Specialized visual clips (memes, SVG tickers, matplotlib charts) are automatically merged post-generation with the corresponding voiceover WAV track to prevent audio drops.

@@ -274,11 +274,24 @@ class StageQualityVerifier:
             sub_text = " ".join(sub_phrases)
             script_text = " ".join([s.narration_text for s in state.script_data.shots])
 
+            # Normalize number/scale glyphs before comparing coherence. Whisper
+            # transcribes spoken numerals differently than the script writes them
+            # ("60,000-year-old" in script -> "60.0 THOUSAND YEARS AGO" in the
+            # .ass), which collapsed cosine similarity to ~0.85 on otherwise
+            # identical subtitles. Masking numbers + magnitude words measures real
+            # content alignment, not font of the numbers. (Verified: 0.854 raw ->
+            # 0.978 normalized on a failing run.)
+            def _norm_numerals(text: str) -> str:
+                t = text.lower()
+                t = re.sub(r'\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b', ' NUM ', t)
+                t = re.sub(r'\b\d[\d.,]*\b', ' NUM ', t)
+                return re.sub(r'\b(thousand|million|billion|trillion)s?\b', ' NUM ', t)
+
             from sklearn.feature_extraction.text import TfidfVectorizer
             from sklearn.metrics.pairwise import cosine_similarity
 
             vectorizer = TfidfVectorizer(stop_words='english')
-            tfidf_matrix = vectorizer.fit_transform([script_text, sub_text])
+            tfidf_matrix = vectorizer.fit_transform([_norm_numerals(script_text), _norm_numerals(sub_text)])
             coherence = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
             
             if coherence < 0.90:

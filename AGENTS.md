@@ -68,7 +68,7 @@ The model cache stays in `.hf_cache/` (gitignored, excluded from `sync_to_pi.sh`
 | Quality score | N/A | Paraphrase diversity = 1 − mean pairwise sentence sim; used for best-draft retention across revisions |
 
 ### Soft approval (orchestrator.py)
-After the bounded 3-revision loop, style-class violations (keyword over-repetition, verbatim copy, sentence repetition, source diversity, visual prompt, narration too long) are **non-blocking** when `ALLOW_SOFT_APPROVAL=1` (default). Hard invariants (fact/temporal audit, revenue/audience gate, runtime, shot count, quality gates 1–7) still abort. Set `ALLOW_SOFT_APPROVAL=0` to restore all-or-nothing.
+After the bounded 3-revision loop, style-class violations (keyword over-repetition, verbatim copy, sentence repetition, visual prompt, narration too long) are **non-blocking** when `ALLOW_SOFT_APPROVAL=1` (default). Source diversity checks are bypassed for the narration since attributions are description-only. Hard invariants (fact/temporal audit, revenue/audience gate, runtime, shot count, quality gates 1–7) still abort. Set `ALLOW_SOFT_APPROVAL=0` to restore all-or-nothing.
 
 ### Model persistence
 The model loads lazily on first use and stays **resident** for the process lifetime. `release()` frees the model weights (~50 MB) but torch stays imported in-process. Reloading is expensive (~10–20 s) and unnecessary for 4–6 runs/day — resident is the default.
