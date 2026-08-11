@@ -4,6 +4,36 @@ Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPS
 
 **Design, architecture decisions and feature status (shipped/planned/not-feasible) live in `docs/PIPELINE_CONVERGED_PLAN.md` — the single source of truth.** This file is the operational quick-reference only.
 
+## Where to look (file index)
+
+Need to change something? Start here, not with a global grep.
+
+| Concern | File(s) |
+|---|---|
+| Pipeline entrypoint / flags / resume | `main.py` |
+| Run orchestration, phase wiring, soft approval | `src/agents/orchestrator.py` (single entrypoint `run_pipeline()`) |
+| Production wrapper (health check, detach, email, auto-resume) | `run_production.sh`, `healthcheck.py`, `send_pipeline_email.py` |
+| Cron scheduling / daily publish cadence | `cron_publish.sh` |
+| Deploy / sync to Pi | `deploy.sh`, `sync_to_pi.sh`, `pull_from_oci.sh` |
+| Agents (sequential A2A) | `src/agents/fact_retriever.py`, `story_designer.py`, `observer.py`, `media_producer.py`, `publisher.py` |
+| Pydantic models / checkpoint schema | `src/schemas/state.py`, `a2a.py`, `seed_distribution.py` |
+| LLM client + per-role routing | `src/engine/llm_client.py` |
+| RAG (scrapers + grounder) | `src/engine/rag_retriever.py`, `grounded_search.py`, `external_apis.py` |
+| RSS ingestion / news source | `src/engine/rss_ingestion.py` |
+| Topic selection (TOPSIS, demand, dedup, doc-gate, region) | `src/engine/topic_topsis.py`, `opportunity_score.py`, `youtube_topic_demand.py`, `topic_deduplicator.py`, `documentary_potential.py`, `trend_velocity.py`, `social_signals.py`, `tool_topic_synthesizer.py` |
+| Region / market / revenue selection | `src/engine/region_intelligence.py`, `monetization_optimizer.py`, `channel_phase_manager.py` |
+| Script quality (semantic gates, embeddings, chapters, pacing, term register) | `src/engine/quality_verifier.py`, `text_embeddings.py`, `chapters.py`, `script_pacing_engine.py`, `term_register.py`, `feedback_memory.py` |
+| Media production (audio/visuals/ffmpeg/orchestration) | `src/agents/media_producer.py`, `src/engine/micro_content_producer.py`, `media_budget.py`, `pexels_retriever.py`, `pixabay_retriever.py`, `gif_retriever.py`, `video_quality_metrics.py` |
+| Grounded-search POC | `poc_grounded_search.py` |
+| MCP servers (external service endpoints) | `mcp_servers/audio_edge/server.py`, `media_cloud/server.py`, `youtube_cloud/server.py` |
+| Video/quality audit of an uploaded video | `run_video_verifier.py`, `src/engine/youtube_video_verifier.py` |
+| Post-publish distribution (seed, Reddit, Shorts) | `src/engine/seed_distributor.py`, `active_thread_seeder.py`, `reddit_browser_poster.py`, `reddit_json_client.py`, `reddit_link_seeder.py`, `reddit_warmup.py`, `post_reddit_links.py`, `cleanup_pi.py`, `src/schemas/seed_distribution.py` |
+| Budget / quota ledgers | `src/engine/run_budget.py` |
+| Dashboard (Rust) | `rust_dashboard/` |
+| Tests | `run_tests.py`, `tests/test_hermetic_e2e.py` |
+| OAuth token for YouTube | `get_youtube_token.py` (token.json + client_secret.json) |
+| Deprecated (do not use) | `dashboard_server.py` (replaced by Rust dashboard) |
+
 ## Commands
 - Activate venv first: `source venv/bin/activate`
 - `--offline` uses canned topic candidates instead of live RSS — it is NOT a full dry-run. It does NOT skip RAG (Tavily/Firecrawl), the LLM (aborts if unavailable), visuals (fal/Replicate), Pi TTS, or publish. Those each need their own flag or a mock: `--dummy-frames` (synthetic visuals, no fal/Replicate), `--till-upload` (no publish). The truly hermetic/no-network path is `tests/test_hermetic_e2e.py` (stub agents mock LLM/RAG/TTS/visuals/publisher).
@@ -35,7 +65,7 @@ Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPS
 
 ## Architecture (where things live)
 - `src/agents/` — sequential A2A agents wired by `orchestrator.py`: `fact_retriever` -> `story_designer` -> `observer` (quality gates + bounded 3-revision **surgical per-shot repair** loop, driving the Observer's `REVISE_SCRIPT` message with state_hash enforcement) -> `media_producer` -> `publisher`. `orchestrator.run_pipeline()` is the single entrypoint.
-- `src/engine/` — stateless/stateful helpers (RAG, TOPSIS, quality_verifier, llm_client, channel_phase_manager, etc.). Random leaf files; no surprises here.
+- `src/engine/` — stateless/stateful helpers (RAG, TOPSIS, quality_verifier, llm_client, channel_phase_manager, etc.). See the "Where to look" table above for which file owns which concern; otherwise random leaf files; no surprises here.
 - `src/schemas/` — pydantic models (`state.py`, `a2a.py`); `GlobalState` is the checkpoint schema.
 - `mcp_servers/` — three standalone FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi), `media_cloud` (fal/flux visuals + ffmpeg, port 8001), `youtube_cloud` (upload/quota, port 8002). Only `audio_edge` has a committed systemd unit (`kokoro_tts.service`, port 8000, Pi); `media_cloud`/`youtube_cloud` run via `uvicorn.run` (no committed unit; `deploy.sh` only restarts `kokoro_tts`). Add new model/http endpoints here, not in `src/engine`.
 
