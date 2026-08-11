@@ -1,4 +1,6 @@
 import uuid
+import os
+import json
 import datetime
 from typing import Dict, Any, Optional
 from src.schemas.state import GlobalState, UploadMetadata
@@ -37,6 +39,44 @@ class PublisherAgent:
 
     def __init__(self, name: str = "Publisher"):
         self.name = name
+
+    def _trigger_pi_warmup(self, title: str, state: GlobalState) -> bool:
+        """SSH to the Pi edge node and run the no-link Reddit warmup for the
+        just-published video, fire-and-forget so publish never blocks. Reads Pi
+        connection config from env (mirrors sync_to_pi.sh defaults). Enabled by
+        default; set REDDIT_PI_WARMUP_ON_PUBLISH=0 to disable. Non-fatal."""
+        import subprocess
+        if os.getenv("REDDIT_PI_WARMUP_ON_PUBLISH", "1").strip().lower() in ("0", "false", "no"):
+            return False
+        pi_host = os.getenv("PI5_IP", "100.108.116.100")
+        pi_user = os.getenv("PI5_USER", "jeevanjoshi")
+        pi_dir = os.getenv("PI5_TARGET_DIR", "/home/jeevanjoshi/buzzdropfeedv2")
+        count = int(os.getenv("REDDIT_WARMUP_COUNT", "3"))
+        title_json = json.dumps(title).replace('"', '\\"')
+        py = (
+            f"cd {pi_dir} && source venv/bin/activate && "
+            f"python reddit_warmup.py --count {count}"
+        )
+        if title:
+            py += f' --title "{title_json}"'
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20",
+               f"{pi_user}@{pi_host}", py]
+        try:
+            devnull = open(os.devnull, "w")
+            import threading
+            def _run():
+                try:
+                    subprocess.run(cmd, stdout=devnull, stderr=devnull, timeout=600)
+                except Exception as e:
+                    print(f"[PiWarmup] background trigger failed: {e}")
+                finally:
+                    devnull.close()
+            threading.Thread(target=_run, daemon=True).start()
+            print("[PiWarmup] launched on the Pi in background (fire-and-forget).")
+            return True
+        except Exception as e:
+            print(f"[PiWarmup] trigger setup failed: {e}")
+            return False
 
     async def publish_video(self, state: GlobalState, daily_uploads: int = 0) -> UploadMetadata:
         """
@@ -250,6 +290,16 @@ class PublisherAgent:
             await active_thread_seeder.seed_active_discussions(state, youtube_url)
         except Exception as e:
             print(f"[ActiveThreadSeeder] Notice: {e}")
+
+        # 5c. No-link warmup on the Pi (residential IP) to build Reddit account
+        # trust. The main pipeline runs on OCI where Reddit is IP-blocked, so we
+        # instruct the Pi edge node to run reddit_warmup.py for the published
+        # video. Non-fatal: failures never affect the publish result.
+        try:
+            if _is_real_video_id(video_id):
+                self._trigger_pi_warmup(title, state)
+        except Exception as e:
+            print(f"[PiWarmup] Notice: {e}")
 
         # Record to persistent deduplication history so future runs skip this topic
         from src.engine.topic_deduplicator import topic_deduplicator

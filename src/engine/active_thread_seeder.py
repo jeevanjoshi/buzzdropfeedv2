@@ -3,6 +3,8 @@ import logging
 from typing import List, Dict, Any, Optional
 from src.schemas.state import GlobalState
 from src.engine.llm_client import LLMClient
+from src.engine.reddit_json_client import RedditJsonClient
+from src.engine.reddit_browser_poster import RedditBrowserPoster
 
 logger = logging.getLogger("CSVG_PIPELINE")
 
@@ -111,9 +113,15 @@ class ActiveThreadSeederEngine:
     uses the LLM to write custom context-aware replies, and submits them.
     """
     def __init__(self):
-        self.seeders = {
-            "reddit": RedditSeeder()
-        }
+        has_praw = os.getenv("REDDIT_CLIENT_ID") and not os.getenv("REDDIT_CLIENT_ID").startswith("xxxx")
+        self.browser_poster = RedditBrowserPoster()
+        # Browser automation is the primary backend (renders where .json is blocked).
+        if has_praw:
+            self.seeders = {"reddit": RedditSeeder()}
+        elif self.browser_poster.has_accounts():
+            self.seeders = {"reddit": self.browser_poster}
+        else:
+            self.seeders = {"reddit": RedditJsonClient()}
         self.llm_client = None
         self.warmup_mode = os.getenv("ACTIVE_SEEDER_WARMUP", "0").strip().lower() in ("1", "true", "yes")
 
@@ -146,8 +154,8 @@ class ActiveThreadSeederEngine:
 
         # 2. Gather candidates from active seeders
         reddit_seeder = self.seeders.get("reddit")
-        if not reddit_seeder or not reddit_seeder.is_available():
-            logger.info("[ActiveThreadSeeder] Reddit credentials not configured. Skipping active thread seeding.")
+        if not reddit_seeder:
+            logger.info("[ActiveThreadSeeder] No Reddit seeder available. Skipping active thread seeding.")
             return
 
         candidates = []
@@ -179,7 +187,7 @@ class ActiveThreadSeederEngine:
         )
 
         # 3. Load full comment context
-        comments_context = reddit_seeder.get_comments_context(target_thread["submission_obj"], max_comments=3)
+        comments_context = self._get_comments_context(reddit_seeder, target_thread)
 
         # 4. Invoke LLM to generate context-aware response
         verified_facts_str = ""
@@ -243,11 +251,46 @@ class ActiveThreadSeederEngine:
         logger.info(f"[ActiveThreadSeeder] LLM generated reply (Reasoning: '{reasoning}'):\n{comment_text}")
 
         # 5. Post reply
-        success = reddit_seeder.post_reply(target_thread["id"], comment_text)
+        success = self._post_reply(target_thread, comment_text)
         if success:
             logger.info(f"[ActiveThreadSeeder] Active thread comment successfully posted!")
         else:
             logger.warning(f"[ActiveThreadSeeder] Failed to post reply to Reddit.")
+
+    def _get_comments_context(self, seeder, target_thread: Dict[str, Any]) -> str:
+        """Loads top comment context from whichever seeder backend is active."""
+        if hasattr(seeder, "get_comments_context"):
+            try:
+                ctx = seeder.get_comments_context(
+                    target_thread.get("subreddit"), target_thread.get("id"), max_comments=3
+                )
+                if ctx:
+                    return ctx
+            except Exception:
+                pass
+            submission_obj = target_thread.get("submission_obj")
+            if submission_obj is not None:
+                try:
+                    return seeder.get_comments_context(submission_obj, max_comments=3)
+                except Exception:
+                    pass
+        return ""
+
+    def _post_reply(self, target_thread: Dict[str, Any], comment_text: str) -> bool:
+        """Posts via Playwright browser automation (falls back to PRAW if creds exist)."""
+        seeder = self.seeders.get("reddit")
+        if isinstance(seeder, (RedditBrowserPoster, RedditJsonClient)):
+            if not self.browser_poster.has_accounts():
+                logger.warning("[ActiveThreadSeeder] No Reddit accounts configured for browser posting. Skipping post.")
+                return False
+            return self.browser_poster.post_reply(
+                thread_id=target_thread.get("id"),
+                subreddit=target_thread.get("subreddit"),
+                permalink=target_thread.get("permalink"),
+                text=comment_text,
+            )
+        # Legacy PRAW path (requires REDDIT_CLIENT_ID/CLIENT_SECRET).
+        return seeder.post_reply(target_thread["id"], comment_text)
 
 
 active_thread_seeder = ActiveThreadSeederEngine()

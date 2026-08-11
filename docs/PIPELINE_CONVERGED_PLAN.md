@@ -151,11 +151,11 @@ Instead of posting generic drafts to a blank/inactive profile timeline, the pipe
 4. **Natural Citation:** Naturally appends the YouTube video URL at the end of the comment as a source/reference (e.g., *"I put together a full visual animated breakdown on this topic here: [YouTube Link]"*).
 5. **Publish Reply:** Submits the reply directly to the active thread under your bot account.
 
-### Implementation Checklist:
-- Create `src/engine/active_thread_seeder.py` to handle search, context processing, LLM reply generation, and Reddit posting (via `praw`).
-- Add credentials in `.env` (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `REDDIT_USER_AGENT`).
-- Wire the seeder into `src/agents/publisher.py` after the main upload succeeds (executed as a non-fatal step, similar to other seed dispatches).
-- Ensure safety gates: limit bot posts to a cooldown to prevent bans; filter out subreddits with strict bot rules; ensure the generated text matches the tone of the thread.
+### Implementation status:
+- **Implemented.** `src/engine/active_thread_seeder.py` handles search, context processing, LLM reply generation, and Reddit posting through a backend chain: PRAW (when `REDDIT_CLIENT_ID` is set) → `RedditBrowserPoster` (Playwright/Chromium, the primary path since datacenter IPs are blocked from Reddit) → read-only `RedditJsonClient` (public `.json` endpoints, discovery/context only). See AGENTS.md "Seed Traffic Seeding & Distribution Pipeline" for the full live-verified flow, account rotation, Pi warm-up, and the generic link seeder.
+- `reddit_accounts.json` (gitignored) holds the browser-account pool; PRAW creds in `.env` (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `REDDIT_USER_AGENT`) are now optional.
+- Seeding dispatches from `src/agents/publisher.py` after the main upload succeeds (non-fatal step, like the other seed dispatches).
+- Safety gates implemented: per-account daily caps, per-thread dedup, per-subreddit permissiveness learning, shadowban-streak account retirement, and RAM/process resource guards.
 
 ### 7.1 Design Decisions & Parameters:
 The active thread reply bot is configured with the following parameters:

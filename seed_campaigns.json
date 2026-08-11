@@ -1,0 +1,11 @@
+{
+  "exclude_video_ids": [
+    "2vbhX-3dtpM"
+  ],
+  "settings": {
+    "niche_max_subscribers": 150000,
+    "posts_per_video_per_run": 1,
+    "min_keyword_match": 1,
+    "comment_style": "friendly"
+  }
+}
