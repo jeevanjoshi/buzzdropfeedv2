@@ -3,7 +3,11 @@ import json
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 def main():
-    scopes = ["https://www.googleapis.com/auth/youtube.upload"]
+    scopes = [
+        "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube.readonly",
+    ]
     client_secret_path = "client_secret.json"
     token_path = "token.json"
 

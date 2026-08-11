@@ -705,6 +705,12 @@ class MediaProducerAgent:
                         }, timeout=aiohttp.ClientTimeout(total=300)) as resp:
                             if resp.status != 200:
                                 raise Exception(f"TTS Synthesis failed over HTTP: {await resp.text()}")
+                            tts_json = await resp.json()
+                            if tts_json.get("engine") == "synthetic_wav_fallback":
+                                raise RuntimeError(
+                                    f"Edge TTS degraded to synthetic_wav_fallback (toner, not speech) for {shot_key}: "
+                                    f"Pi edge has no Kokoro model. Aborting rather than shipping fake audio."
+                                )
                         # 2. Download the synthesized wav file with retries
                         for attempt in range(3):
                             try:
@@ -747,7 +753,14 @@ class MediaProducerAgent:
                     print(f"Edge Audio Service Exception (falling back to local synthesis): {e}")
 
             if not audio_generated:
-                await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path, speed=tts_speed))
+                tts_result = await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path, speed=tts_speed))
+                engine = (tts_result or {}).get("engine") if isinstance(tts_result, dict) else None
+                if engine == "synthetic_wav_fallback":
+                    raise RuntimeError(
+                        f"Local TTS degraded to synthetic_wav_fallback (toner, not speech) for {shot_key}: "
+                        f"Pi edge audio unreachable ({audio_edge_url}) and local Kokoro unavailable. "
+                        f"Aborting run rather than shipping fake audio."
+                    )
                 await align_subtitles_whisper(WhisperRequest(audio_path=wav_path, output_ass_path=ass_path, original_text=tts_narration))
 
             # Gate 2 Early Validation: WAV must exist and be > 1KB before proceeding
@@ -762,6 +775,18 @@ class MediaProducerAgent:
                 raise RuntimeError(
                     f"Gate 3 Early Fail: Subtitle file for {shot_key} is missing or empty ({ass_path}). "
                     f"Check Whisper alignment service."
+                )
+            # Whisper degraded: alignment failure silently emits a single dummy 5s
+            # "NARRATION" dialogue line. That means no real word timestamps -> subtitles
+            # are fake; hard fail.
+            with open(ass_path, "r", encoding="utf-8", errors="replace") as _ass_f:
+                _ass_txt = _ass_f.read()
+            _d = [l for l in _ass_txt.splitlines() if l.strip().startswith("Dialogue:")]
+            if len(_d) == 1 and "NARRATION" in _d[0]:
+                raise RuntimeError(
+                    f"Gate 3 Early Fail: Subtitle alignment degraded for {shot_key} "
+                    f"(placeholder NARRATION line, no real word timestamps in {ass_path}). "
+                    f"Whisper unavailable (Pi edge or local model) — aborting rather than shipping fake subtitles."
                 )
 
             asset_paths.audio[shot_key] = wav_path
