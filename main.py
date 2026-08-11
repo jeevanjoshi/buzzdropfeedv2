@@ -56,7 +56,7 @@ NOTES
   - Not a real --help parser: shown only when --help / -h appears in argv.
   - Semantic gates (USE_SEMANTIC_GATES) and soft-approval (ALLOW_SOFT_APPROVAL)
     are env-only (.env), not CLI flags.
-  - See README.md and debugging_060820260057.md for run_production.sh flags.
+  - See AGENTS.md for run_production.sh flags.
 """)
 
 

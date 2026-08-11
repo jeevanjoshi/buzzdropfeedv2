@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """POC: Google Search Grounded research pass for CSVG.
 
-Runs the two-stage design from ``debugging_060820260057.md`` (section
-"EXPLORED 2026-08-06"): a Gemini ``googleSearch``-grounded research call that
+Runs the two-stage grounded-research design (see ``grounded_search.py``
+docstring): a Gemini ``googleSearch``-grounded research call that
 emits a cited fact list (stage 1), then feeds a RAG-pack-shaped corpus
 (stage 2) that the existing ``assess_corpus_sufficiency`` / ``story_designer``
 can consume unchanged.

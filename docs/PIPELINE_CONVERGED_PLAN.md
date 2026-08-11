@@ -1,8 +1,10 @@
-# CSVG Converged Implementation Plan — Documentary gate + revenue-weighted dynamic region
+# CSVG Converged Implementation Plan — Single Source of Truth
 
 _Status: ratified · supersedes the earlier fragmented plans (opportunity-score, RAG-alignment,
-publish-integrity, script-quality, stabilization, media-quality upgrades). Updated after each
-implementation pass so it stays the single source of truth._
+publish-integrity, script-quality, stabilization, media-quality upgrades). Last updated 2026-08-11.
+This document is the **single source of truth** for architecture, design decisions and feature
+status. Legend: **SHIPPED & VERIFIED** / **PLANNED — NEXT PASS** / **NOT FEASIBLE / DEFERRED**.
+Operational quick-reference (commands, flags, tests, env, conventions) lives in `AGENTS.md`._
 
 ## 0. Goal
 
@@ -15,38 +17,13 @@ implementation pass so it stays the single source of truth._
    topic affinity + per-market RPM + events, then passed downstream to story design, visuals and
    the revenue forecast (`state.region` / `state.region_market` / `state.region_reason`).
 
-## 1. Shipped & verified (part of the converged plan)
+---
 
-| Area | Where | What |
-|---|---|---|
-| Contextual chapters | `src/engine/chapters.py`, `src/agents/story_designer.py`, `.publisher.py` | Per-act chapter labels derived from the shot narrations (LLM + deterministic fallback), stored on `SEOMetadata.act_titles`, reused at publish. |
-| Niche thumbnails + correct stock art | `src/agents/media_producer.py` | Company-aware ticker resolution (Meta→META…), private-company guard, narration-grounded fallback moves (no fabricated prices), clean chart titles, topic-fused thumbnail scene. |
-| Region-optimized cron | `cron_publish.sh` | Up to TWO publishes/day behind the $2,000/month goal; launch bands [11:00-12:20] & [13:30-14:30] UTC backed out of the ~1h50m runtime; guards (no double-run, daily cap `CSVG_MAX_DAILY_PUBLISHES=4`, cooldown 90m) → up to 2/day; journal `logs/cron_publish.log`. |
-| Dynamic region plumbing | `src/engine/region_intelligence.py`, `fact_retriever.py`, `monetization_optimizer.py`, `orchestrator.py` | (topic, market) picked in the fact retriever; `state.region/region_market/region_reason` flow downstream; `run_production.sh`/`main.py` default to dynamic. |
+## 1. SHIPPED & VERIFIED
 
-### GROWTH phase (pre-YPP) — gap closures
+### 1.1 Storability gate (documentary potential)
 
-The channel goal is $2,000/month (REVENUE phase), but GROWTH is the step before:
-it must convert viewers into subscribers + watch-hours to unlock YPP. Closed gaps:
-
-- **Shorts were generated but never published** — `micro_content_producer` already cut
-  9:16 vertical 30-45s clips, but nothing uploaded them (`UploadMetadata.shorts_video_id`
-  was never set). Added `mcp_servers/youtube_cloud` `/tools/upload_short` (same OAuth
-  resumable insert + `#Shorts` tag + EU-AI-act disclosure), and the publisher now **uploads
-  the Shorts in GROWTH phase** (non-fatal, quota-shared) — the #1 discovery/subscriber lever
-  for a pre-YPP channel while the long-form master stays the monetized asset.
-- **Pinned comment was phase-agnostic** — GROWTH now pushes subscribe + watch-time in the
-  pinned comment; later phases keep the pure engagement question.
-- **Description had no subscribe CTA in GROWTH** — appends a subscribe/bell + daily-series
-  line so discovery metadata converts viewers into subs.
-- **Resolved — GROWTH is discovery-led.** Pre-YPP the channel earns $0 in ads, so the
-  GROWTH TOPSIS vector leads with novelty + trend (IDI 0.25 / TVS 0.25) for watch-time and
-  subscriber growth, with regional revenue secondary (0.15); REVENUE/SCALE keep regional
-  revenue at the single highest weight. Unlocks YPP faster → monetizes sooner.
-
-## 2. Storability gate (this change)
-
-New module `src/engine/documentary_potential.py` (deterministic-first, offline).
+`src/engine/documentary_potential.py` (deterministic-first, offline).
 
 - `score_documentary_potential(candidate) -> {score 0..1, verdict, direct_hits, depth_hits, has_data, reason}`:
   - baseline 0.5; −0.18 per **direct-news** pattern (announce/unveil/launch/introduce, wins/scores/Q-results, price ticks, price-target/rating notes, "today announced / will be available" phrases); −0.10 for thin text (<30 words), +0.10 for rich text.
@@ -60,7 +37,7 @@ TOPSIS. Culled topics are logged (`[FactRetriever] CULLED (direct news, no doc p
 **All-culled → SHIP BEST-WITH-WARNING**: the highest documentary-scoring survivor is retained with
 a loud log line (no abort; the downstream RAG-sufficiency gate still guards factual depth).
 
-## 3. Revenue-weighted region (this change)
+### 1.2 Revenue-weighted dynamic region
 
 `src/engine/region_intelligence.py` — selection score per (topic, market):
 
@@ -89,7 +66,7 @@ secondary): `[0.25,0.05,0.25,0.10,0.10,0.05,0.05,0.15]`.
 `TopicCandidate.regional_revenue_usd` carries each candidate's best-market forecast (or the
 fixed-region forecast in `--global`/`--india` mode).
 
-## 4. Selection order (fact retriever)
+### 1.3 Selection order (fact retriever)
 
 1. RSS fetch (+ World Bank enrichment).
 2. Tool-topic synthesis + strict demand gate.
@@ -102,12 +79,7 @@ fixed-region forecast in `--global`/`--india` mode).
 9. Persist `state.region` (l2) / `state.region_market` / `state.region_reason`; forecast for the
    winner's market; A2A payload includes `regional_revenue_usd`.
 
-## 5. Configuration (env, defaults)
-
-`DOCUMENTARY_POTENTIAL_FLOOR=0.35` · `DOCUMENTARY_LLM_CROSSCHECK=0` · `REGION_WEIGHT_REVENUE=0.55` ·
-`REGION_REVENUE_REFERENCE_USD=16`.
-
-### Revenue-goal alignment ($2,000/month — single source of truth)
+### 1.4 Revenue-goal alignment ($2,000/month — single source of truth)
 
 Everything scales from one model in `channel_phase_manager.py` (derived, never
 hardcoded):
@@ -132,58 +104,262 @@ Note: the per-video revenue gate only binds in REVENUE/SCALE (post-YPP). During
 GROWTH the pipeline optimises watch-time/novelty with revenue still wired as the
 strongest TOPSIS criterion, so it is YPP-ready the moment the channel unlocks.
 
-## 6. Validation
+### 1.5 GROWTH phase (pre-YPP)
 
-- `python run_tests.py` — 18 hermetic cases incl. `STORABILITY_GATE` (probe/scandal documentary,
-  press-release blip culled, evergreen pass-through, all-culled→best-warning) and
+The channel goal is $2,000/month (REVENUE phase), but GROWTH is the step before:
+it must convert viewers into subscribers + watch-hours to unlock YPP.
+
+- **Shorts published** — `micro_content_producer` cuts 9:16 vertical 30-45s clips;
+  `mcp_servers/youtube_cloud` `/tools/upload_short` (same OAuth resumable insert +
+  `#Shorts` tag + EU-AI-act disclosure) uploads them in GROWTH phase (non-fatal,
+  quota-shared) — the #1 discovery/subscriber lever pre-YPP (`UploadMetadata.shorts_video_id`).
+- **Phase-aware pinned comment** — GROWTH pushes subscribe + watch-time; later phases keep
+  the pure engagement question.
+- **Subscribe CTA in description** (GROWTH) — appends a subscribe/bell + daily-series line.
+- **GROWTH is discovery-led.** Pre-YPP the channel earns $0 in ads, so the GROWTH TOPSIS
+  vector leads with novelty + trend (IDI 0.25 / TVS 0.25) for watch-time/subscriber growth,
+  regional revenue secondary (0.15); REVENUE/SCALE keep regional revenue highest. Unlocks
+  YPP faster → monetizes sooner.
+- **Region-optimized cron** (`cron_publish.sh`) — up to TWO publishes/day behind the $2,000/month
+  goal; launch bands [11:00-12:20] & [13:30-14:30] UTC backed out of the ~1h50m runtime; guards
+  (no double-run, `CSVG_MAX_DAILY_PUBLISHES=4`, cooldown 90) → up to 2/day; journal
+  `logs/cron_publish.log`. Installed in crontab at `20 11` / `50 13` UTC.
+- **Contextual chapters** (`src/engine/chapters.py`) — per-act chapter labels derived from
+  shot narrations (LLM + deterministic fallback), stored on `SEOMetadata.act_titles`, reused
+  at publish.
+- **Niche thumbnails + stock art** (`media_producer.py`) — company-aware ticker resolution,
+  private-company guard, narration-grounded fallback moves (no fabricated prices), clean chart
+  titles, topic-fused thumbnail scene.
+
+### 1.6 Seed Traffic Seeding & Distribution
+
+Post-publish distribution to seed early traffic, boost CTR and jumpstart YT recommendation.
+
+1. **Instant Pinned Comment** — `/tools/insert_pinned_comment` right after publication
+   (GROWTH variant pushes subscribe + watch-time).
+2. **Micro-Content Clips** — extracts 30-60s acts, crops to 9:16
+   (`crop=ih*9/16:ih`), renders independent Clips for Shorts/Reels/TikTok; in GROWTH phase
+   published as YouTube Shorts (`/tools/upload_short`, `#Shorts`).
+3. **SeedDistributor** — tailored draft templates for Reddit, HN, LinkedIn, X, TikTok, Instagram,
+   Pinterest, Telegram, Medium grounded in the run's verified facts (never canned filler);
+   dispatches a rich embed to Slack/Discord webhooks with copyable markdown.
+4. **Semantic relevance** — cosine similarity between thread topics and video content via the
+   resident MiniLM (`seed_distributor._seed_embedder`, cached under `.hf_cache`); only
+   subreddits ≥ `SEED_RELEVANCE_THRESHOLD` (default 0.50) are seeded; TF-IDF char-n-gram
+   fallback at floor 0.30 when MiniLM unavailable.
+5. **Active Thread Reply Bot** (`ActiveThreadSeeder`) — injects helpful comments into highly
+   active discussions from the last 24h; LLM writes context-aware replies containing verified
+   facts + a natural YouTube citation at the end. Backend chain: PRAW (`REDDIT_CLIENT_ID` set)
+   → Playwright browser poster → read-only `.json` client. Soft warm-up toggle
+   (`ACTIVE_SEEDER_WARMUP=1`).
+6. **Browser-driven Reddit engagement** (`RedditBrowserPoster`) — Playwright Chromium poster
+   for the Pi that works where `.json`/PRAW are IP-blocked; real Chrome-derived binary
+   (`REDDIT_CHROMIUM_PATH`), persisted login sessions (`logs/reddit_sessions/`), rotated
+   gitignored account pool (`reddit_accounts.json`), RAM/process resource guards so bursts
+   can't OOM the Pi's 4GB, old.reddit form posting, best-effort visibility verification,
+   learns per-subreddit permissiveness, retires shadowbanned accounts
+   (`REDDIT_RETIRE_AFTER_UNVERIFIED`, default 3). State in `logs/reddit_rotation_state.json`.
+   `RedditJsonClient` is a throttled, OAuth-free fallback for discovery/comment context only.
+7. **Pi edge warm-up on publish** (`_trigger_pi_warmup`) — fire-and-forget SSH to the Pi to run
+   `reddit_warmup.py`: low-volume, NO-LINK informative comments from per-domain banks to build
+   account trust. Env: `REDDIT_PI_WARMUP_ON_PUBLISH` (default 1), `REDDIT_WARMUP_COUNT` (default 3).
+   Non-fatal.
+8. **Generic link seeder** (`reddit_link_seeder.py`) — reads ALL published videos from
+   `logs/state_*.json` (minus `exclude_video_ids` in `seed_campaigns.json`), discovers active
+   threads per topic, matches each to the most relevant published video (keyword overlap +
+   learned sub permissiveness + sub size), posts genuine on-topic link comments into niche
+   subreddits (cap `REDDIT_LINK_MAX_PER_RUN` default 1; skips subs > `niche_max_subscribers`
+   default 150k). `post_reddit_links.py` is a one-off ops variant; `cleanup_pi.py` prunes old
+   logs/media/state dirs on the Pi (`CSVG_KEEP_MEDIA_RUNS`, `CSVG_KEEP_STATE_FILES`).
+
+### 1.7 Semantic quality gates (Observer MiniLM backend)
+
+A frozen `all-MiniLM-L6-v2` sentence-encoder (torch/transformers, ~0.8 GB peak RAM) behind
+`src/engine/text_embeddings.py`, enabled via `USE_SEMANTIC_GATES=1`. On the Pi, or when deps
+are absent, every gate falls back to the original TF-IDF/NLTK logic — no regressions.
+
+- **Install & enable (master only):** `pip install -r requirements-master.txt`;
+  `.env`: `USE_SEMANTIC_GATES=1`, `HF_HOME`/`TRANSFORMERS_CACHE` → repo-local `.hf_cache/`
+  (gitignored, excluded from `sync_to_pi.sh`). Never install `requirements-master.txt` on the Pi.
+
+| Gate | Current (fallback) | Semantic (when ON) |
+|---|---|---|
+| Verbatim/paraphrase copy | ≥12-word substring match | MiniLM cosine sim ≥ 0.94 vs clean corpus = whole-sentence meaning copy. The 0.82–0.93 band is deliberately NOT flagged: fact-dense narration that must preserve names/numbers/dates can't paraphrase below ~0.85, so flagging it was a false positive (calibrated live: 27→13 flags) |
+| Keyword over-repetition | Exact-token blacklist | Semantic topic-membership: token vs topic anchor words (keywords + headline + summary); `chinese~china` = 0.68, `gadget~china` = 0.31; threshold 0.50 |
+| Sentence monotony / duplication | TF-IDF cos ≥ 0.82 | MiniLM pairwise similarity ≥ 0.82; one-batch-encode, precomputed matrix |
+| Quality score | N/A | Paraphrase diversity = 1 − mean pairwise sentence sim; used for best-draft retention across revisions |
+
+- **Soft approval** (`orchestrator.py`) — after the bounded 3-revision loop, style-class
+  violations are **non-blocking** when `ALLOW_SOFT_APPROVAL=1` (default). Hard invariants
+  (fact/temporal audit, revenue/audience gate, runtime, shot count, quality gates 1–7) still
+  abort. Set `ALLOW_SOFT_APPROVAL=0` to restore all-or-nothing.
+- **Model persistence** — loads lazily on first use, stays resident for process lifetime;
+  `release()` frees weights (~50 MB) but torch stays imported. Resident is the default
+  (4–6 runs/day).
+- **Clean RAG** (`rag_retriever.py` + `story_designer.py`) — `_strip_boilerplate()` strips
+  ad/credit/nav junk (SKIP ADVERTISEMENT, Video by, Listen ·, Subscribe, etc.) from
+  deep-crawled articles before they enter the fact corpus and snippet padding pool; the same
+  junk filter (`_SNIPPET_JUNK_RE`) protects the story designer's RAG snippets. Removes the
+  "verbatim NYT boilerplate in Shot #15" class of false positives at the source.
+- **Thresholds** (shared `text_embeddings.py`): `COPY_SEMANTIC_HARD_THRESHOLD = 0.94`
+  (whole-sentence meaning copy; the verbatim gate); `COPY_SEMANTIC_THRESHOLD = 0.82` (legacy
+  lower bound, API compatibility only); `TOPIC_MEMBER_SEMANTIC_THRESHOLD = 0.50`.
+- **Anti-verbatim writer** (`story_designer.py`) — the writer self-corrects BEFORE the Observer
+  audits, in two layers: (1) **LLM polish prompt** (`_polish_script`) detects narration
+  sentences that are whole-sentence meaning copies (sim ≥ 0.94) and demands a structurally
+  different rewrite; a standing ANTI-VERBATIM rule forbids mirroring source wording. (2)
+  **Local WordNet dissolve** (`_dissolve_verbatim_copies`) — deterministic, no-LLM, offline
+  pass that swaps local NLTK WordNet synonyms in any remaining ≥0.94 sentence until below
+  threshold, protecting proper nouns/numbers/dates/currency; a no-op when WordNet or the
+  semantic backend is unavailable (never fails/hangs, never hits the network).
+  Net effect: the validator stops flagging fact-dense rephrases (27→13 live) and true copies
+  dissolve, so the 3-revision loop converges (was 25→27→32).
+
+### 1.8 Fail-fast TTS & subtitle integrity
+
+When the Pi edge (`AUDIO_EDGE_URL`) is unreachable **and** no real neural TTS is available
+locally, the run **aborts immediately on the first shot** instead of silently shipping
+placeholder audio (`src/agents/media_producer.py`):
+
+- **Toner wav** (`engine == "synthetic_wav_fallback"` from either the remote edge response or
+  the local `synthesize_tts` fallback) → `RuntimeError`. The tone (1%-amplitude repeating beep)
+  is NOT speech and used to pass Gate 2 (wav >1KB) silently; now it fails fast so the checkpoint
+  stays resume-safe.
+- **Whisper-degraded subtitles** — a single dummy `NARRATION` `Dialogue:` line (written when
+  Whisper alignment fails with no real word timestamps) → Gate 3 early `RuntimeError`.
+- **Resume safety** — the run keeps its `SCRIPT_APPROVED` checkpoint, so once the Pi is back you
+  can `--resume` the same pipeline_id to regenerate media; only a *real* local Kokoro
+  (`kokoro_onnx`) fallback is ever allowed to continue offline.
+
+### 1.9 Ops & reliability
+
+- **Detached-child absolute-path launch** (`run_production.sh`) — the detached child is launched
+  via `${SCRIPT_DIR}/$(basename "$0")`, NOT `$0`: under cron `$0` is a bare filename and `$PATH`
+  has no repo dir, so `nohup`'s execvp silently `exit 127`'d (no log, no process; child stderr
+  used to go to `/dev/null`). Child stderr now appends to its `LOG_FILE` so any spawn failure is
+  always visible.
+- **OAuth scope regularization** (`get_youtube_token.py`) — grants
+  `youtube` / `youtube.upload` / `youtube.readonly` so `channels.list` probes and future
+  playlist/comment writes work; YouTube health-check probe passes.
+- **Pre-flight health check** (`run_production.sh` → `healthcheck.py`) — env keys, ffmpeg/ffprobe,
+  LLM availability, Pi audio-edge reachability, YouTube upload quota + competitor-demand budget,
+  RAG fact-source keys, BGM + disk space; **aborts before launch** if any required check fails.
+  Optional `--probe-llm`/`--probe-yt` do a real 1-token LLM call and token-refresh `channels.list`.
+
+### 1.10 Architecture & hosts
+
+- `src/agents/` — sequential A2A agents wired by `orchestrator.py`: `fact_retriever` →
+  `story_designer` → `observer` (quality gates + bounded 3-revision **surgical per-shot repair**
+  loop, state_hash enforcement) → `media_producer` → `publisher`. `orchestrator.run_pipeline()`
+  is the single entrypoint.
+- `src/engine/` — stateless/stateful helpers (RAG, TOPSIS, quality_verifier, llm_client,
+  channel_phase_manager, documentary_potential, region_intelligence, text_embeddings…).
+- `src/schemas/` — pydantic models (`state.py`, `a2a.py`); `GlobalState` is the checkpoint schema.
+- `mcp_servers/` — three FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi, port
+  8000, committed `kokoro_tts.service`), `media_cloud` (fal/flux visuals + ffmpeg, port 8001),
+  `youtube_cloud` (upload/quota/comment, port 8002). Add new model/http endpoints here, not in
+  `src/engine`.
+- **Distributed layout:** master pipeline (agents, media_cloud, youtube_cloud) on the OCI cloud
+  host; audio/TTS (`audio_edge`, Kokoro, Whisper) on a Raspberry Pi 5 edge node via
+  `AUDIO_EDGE_URL`/`LLAMA_CPP_URL`; `deploy.sh` git-clones/reset-hards to both nodes and restarts
+  services; `sync_to_pi.sh` rsyncs the working tree (excludes logs/media/venv/`rust_dashboard/
+  target/`).
+- **Dashboard (Rust)** — `rust_dashboard/` (std-only, `cargo build --release`), run as
+  `csvg_rust_dashboard.service` (port 8080, `CSVG_ROOT` env). Self-contained SPA
+  (`web/index.html` via `include_str!`) + `/api/status`, `/api/logs`, `/api/published`,
+  `/api/budget`, `/api/runs`, `/health`. Minimal JSON parser in `src/json.rs`; built per-node
+  (OCI x86 build not pushed to Pi; `deploy.sh` builds on the Pi). Replaces the deprecated Python
+  `dashboard_server.py`.
+- **Runtime/generated files** (gitignored, auto-created per run): `logs/state_<pipeline_id>.json`
+  (checkpoint/resume), `channel_stats.json` (phase GROWTH/REVENUE/SCALE), `published_topics.json`
+  (dedup), `yt_demand_pools.json` + `yt_demand_quota.json` (competitor-demand budget). Large fixed
+  assets `kokoro-v0.19.onnx` (~325MB) and `voices.bin` are gitignored and locally present.
+
+### 1.11 Validation
+
+- `python run_tests.py` — **19 hermetic cases** incl. `STORABILITY_GATE` (probe/scandal
+  documentary, press-release blip culled, evergreen pass-through, all-culled→best-warning),
   `REGION_REVENUE_DOMINATES` (rba→au, sensex→india, meta→us; ALPHA>BETA>GAMMA; revenue is the
-  highest TOPSIS weight in REVENUE & GROWTH; top-ranked by regional revenue).
+  highest TOPSIS weight in REVENUE & GROWTH), `REVENUE_GOAL_ALIGNMENT` (monthly=$2000, daily=2,
+  gate=$33.33, slots 11:20/13:50), GROWTH-path Shorts publishing, surgical revision loop,
+  stale-REVISE rejection, outline-first, routing, A2A alignment, SEO source filter, junk scrub,
+  term register, synonym guard, chapter timestamps, fake-upload abort.
 - `bash -n run_production.sh cron_publish.sh`.
 
-## 7. Active Thread Reply Bot (Comment Seeding Assistant)
+---
 
-Instead of posting generic drafts to a blank/inactive profile timeline, the pipeline will support an automated **active thread discussion-injection engine** (`src/engine/active_thread_seeder.py`) to maximize visibility by commenting on already popular, highly active, and relevant threads.
+## 2. PLANNED — NEXT PASS
 
-### Flow & Architecture:
-1. **Search Phase:** Post-publish, the seeder uses search queries (derived from the video's title + keywords) via APIs (like Reddit's Search API) to identify the top 3-5 active, relevant threads from the last 24 hours.
-2. **Context Retrieval:** Fetches the top-level posts/comments in those threads.
-3. **LLM Generation:** Sends the thread context + video facts to the LLM to write a custom, organic, context-aware reply that contributes genuinely to the discussion.
-4. **Natural Citation:** Naturally appends the YouTube video URL at the end of the comment as a source/reference (e.g., *"I put together a full visual animated breakdown on this topic here: [YouTube Link]"*).
-5. **Publish Reply:** Submits the reply directly to the active thread under your bot account.
+API-verified growth features (pre-YPP: drive watch-time + subs). All follow the existing
+non-fatal, quota-aware, env-gated patterns.
 
-### Implementation status:
-- **Implemented.** `src/engine/active_thread_seeder.py` handles search, context processing, LLM reply generation, and Reddit posting through a backend chain: PRAW (when `REDDIT_CLIENT_ID` is set) → `RedditBrowserPoster` (Playwright/Chromium, the primary path since datacenter IPs are blocked from Reddit) → read-only `RedditJsonClient` (public `.json` endpoints, discovery/context only). See AGENTS.md "Seed Traffic Seeding & Distribution Pipeline" for the full live-verified flow, account rotation, Pi warm-up, and the generic link seeder.
-- `reddit_accounts.json` (gitignored) holds the browser-account pool; PRAW creds in `.env` (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `REDDIT_USER_AGENT`) are now optional.
-- Seeding dispatches from `src/agents/publisher.py` after the main upload succeeds (non-fatal step, like the other seed dispatches).
-- Safety gates implemented: per-account daily caps, per-thread dedup, per-subreddit permissiveness learning, shadowban-streak account retirement, and RAM/process resource guards.
+### 2.1 Auto-playlist chaining (watch-time amplifier)
 
-### 7.1 Design Decisions & Parameters:
-The active thread reply bot is configured with the following parameters:
-1. **Target Platforms:** Reddit with an abstract interface prepared to support additional social media platforms later.
-2. **Search Scope:** Global search across all of Reddit using keyword matches (from video title + keywords) to locate active discussions from the last 24 hours.
-3. **Per-Run Rate Limit:** Maximum 1 comment reply posted per pipeline run.
-4. **LLM Routing:** Uses the default fast model (`google/gemini-2.5-flash`) for creating context-aware replies.
-5. **No-Link Soft Mode (Warm-Up Mode):** Enabled via environmental variable `ACTIVE_SEEDER_WARMUP=1` (or default `0` off) to post comments without the URL to safely warm up new accounts.
+- **`mcp_servers/youtube_cloud/server.py`** — `POST /tools/upsert_playlist_add_video`:
+  `playlists.list(mine=true, part=snippet)` (the API has **no title filter** → match
+  `snippet.title` client-side against env `YOUTUBE_PLAYLIST_TITLE`, default
+  `LumenLoop AI Documentaries`); if missing, `playlists.insert` (body requires
+  `snippet.title`); then `playlistItems.insert` with `snippet.resourceId`
+  (`kind=youtube#video`, `videoId`) — **do NOT set `snippet.position`** (throws
+  `manualSortRequired` unless the playlist uses manual sort). Scopes `youtube` /
+  `youtube.force-ssl` (not `youtube.upload`). Quota: list 1 + insert 50 + item 50.
+- **`src/schemas/state.py`** — add `playlist_id` / `playlist_url` to `UploadMetadata`.
+- **`src/agents/publisher.py`** — after the real-video-id guard, non-fatal
+  `await upsert_playlist_add_video(...)`; env gate `YOUTUBE_AUTO_PLAYLIST` (default 1).
+- **Tests** — playlist side-effect gated off `demo_*` ids (like FAKE_UPLOAD_ABORTS); called
+  once on a real-id path.
 
-### 7.2 Configuration & Setup:
-Add the following keys to your `.env` file to configure the PRAW client:
-```env
-# ── Active Thread Comment Seeding Bot (Reddit PRAW) ──────────────────────
-REDDIT_CLIENT_ID=your-reddit-client-id
-REDDIT_CLIENT_SECRET=your-reddit-client-secret
-REDDIT_USERNAME=your-reddit-bot-username
-REDDIT_PASSWORD=your-reddit-bot-password
-REDDIT_USER_AGENT=CSVG-Bot/1.0
-ACTIVE_SEEDER_WARMUP=0
-```
+### 2.2 Burned-in subscribe end-card (subscriber conversion at peak intent)
 
-#### Registering a Reddit Script App:
-1. Navigate to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) on your bot account.
-2. Scroll to the bottom and click **create another app...**
-3. Choose **script** (vital for backend integrations).
-4. Set name, description, and redirect URI (`http://localhost:8080`).
-5. Save the app. Use the string under "personal use script" for `REDDIT_CLIENT_ID` and the "secret" field for `REDDIT_CLIENT_SECRET`.
+- **`src/agents/media_producer.py`** — in the ffmpeg assembly path (moviepy path skipped),
+  append a rendered subscribe clip to the master concat list: 1920x1080 ffmpeg `drawtext`
+  ("SUBSCRIBE 🔔 new documentary every day") over a color fade; duration from env
+  `CSVG_END_CARD_SECONDS` (default 6, `0` disables). Zero API cost / no quota.
+- **Tests** — concat list includes the end-card entry when enabled; total ≈ sum(shots) + card.
 
-## 8. Out of scope
+### 2.3 YouTube comment-reply bot (comment velocity → dwell)
 
-Feed changes (global high-RPM feeds stay), RAG-sufficiency gate (exists), cron mechanics (built).
+- **`mcp_servers/youtube_cloud/server.py`** — `POST /tools/list_comments`
+  (`commentThreads.list` on `videoId`, `textFormat=plainText`, quota 1) and
+  `POST /tools/reply_comment` (`comments.insert` with body `snippet.textOriginal` +
+  `snippet.parentId` — **replies use `comments.insert`, NOT `commentThreads.insert`**,
+  quota 50). Scope `youtube.force-ssl`.
+- **`src/engine/youtube_engagement.py`** (mirrors `active_thread_seeder.py`) — fetch recent
+  top-level comments, filter out own channel, cap `YOUTUBE_REPLY_MAX` (default 3), LLM-grounded
+  replies from `state.verified_facts` (reuse the reply-generation prompt pattern).
+- **`src/agents/publisher.py`** — non-fatal `await reply_to_viewers(...)` after the pinned-comment
+  block; env gate `YOUTUBE_REPLY_BOT` (default 1).
+- **Tests** — ≤ cap replies; self-comments skipped; gated off `demo_*` ids.
+
+*Note:* the on-disk `token.json` scopes (`youtube`, `youtube.upload`, `youtube.readonly`)
+satisfy these writes via the broad `youtube` scope; new endpoints must load credentials with the
+`youtube.force-ssl` scope string (as `insert_pinned_comment` already does), not the
+`youtube.upload`-scoped uploads loader.
+
+---
+
+## 3. NOT FEASIBLE / DEFERRED
+
+### Not feasible
+
+- **RLHF/DPO on the writer** — treating the Observer as a reward signal to fine-tune the
+  generative model requires an open model; Gemini is **not fine-tunable** and training is too
+  heavy for 2-vCPU/12 GB.
+- **Feed-set changes** (replacing global high-RPM feeds) — a monetization/quality invariant;
+  blocked/promo/advertorial content must stay filtered out of RSS and RAG candidates.
+
+### Deferred
+
+- **Supervised reward classifier** — accumulate accepted-vs-rejected scripts and fine-tune a
+  small DistilBERT to predict pass/fail; needs ~hundreds of labeled samples (not enough run data
+  yet). Revisit after more runs.
+- **Online threshold calibration for semantic gates** — record `{scores, verdict}` per run and
+  nudge thresholds so false rejections trend to zero; deterministic, no training infra — cheap
+  once more run data accumulates.
+- **Channel trailer rotation** — set the newest documentary as the channel trailer via
+  `channels.update(brandingSettings.channel.trailer)`; low yield at 0 subs, add post-GROWTH.
+
+### Already exists (no action)
+
+- **RAG-sufficiency gate** — guards factual depth before story design.
+- **Cron mechanics** — `cron_publish.sh` + guards built and installed (`20 11` / `50 13` UTC).

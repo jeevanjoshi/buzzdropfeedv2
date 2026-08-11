@@ -11,8 +11,7 @@ documented two-stage integration:
 
 Only enabled when ``GOOGLE_CLOUD_PROJECT`` + ADC credentials are present; the
 OpenRouter / scraper path in ``rag_retriever`` remains the non-grounded
-fallback. See http://.../grounding-with-google-search and
-``debugging_060820260057.md`` (section "EXPLORED 2026-08-06").
+fallback. See the "Grounded search" notes in the source history.
 """
 
 import os
