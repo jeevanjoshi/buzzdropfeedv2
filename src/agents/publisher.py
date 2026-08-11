@@ -243,6 +243,14 @@ class PublisherAgent:
         except Exception as e:
             print(f"[SeedDistributor] Notice: {e}")
 
+        # 5b. Active Thread Comment/Reply Seeding (Discussion Injection)
+        try:
+            from src.engine.active_thread_seeder import active_thread_seeder
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+            await active_thread_seeder.seed_active_discussions(state, youtube_url)
+        except Exception as e:
+            print(f"[ActiveThreadSeeder] Notice: {e}")
+
         # Record to persistent deduplication history so future runs skip this topic
         from src.engine.topic_deduplicator import topic_deduplicator
         topic_headline = state.selected_topic.headline if state.selected_topic else title

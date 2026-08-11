@@ -18,6 +18,10 @@ class CommunitySeedPackage(BaseModel):
     blog_article_markdown: Optional[str] = None
     linkedin_post_draft: Optional[str] = None
     x_thread_draft: List[str] = Field(default_factory=list)
+    tiktok_caption: Optional[str] = None
+    instagram_caption: Optional[str] = None
+    pinterest_draft: Optional[str] = None
+    telegram_post: Optional[str] = None
 
 
 class DiscordEmbedField(BaseModel):

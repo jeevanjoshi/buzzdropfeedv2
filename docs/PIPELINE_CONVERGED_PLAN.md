@@ -140,6 +140,50 @@ strongest TOPSIS criterion, so it is YPP-ready the moment the channel unlocks.
   highest TOPSIS weight in REVENUE & GROWTH; top-ranked by regional revenue).
 - `bash -n run_production.sh cron_publish.sh`.
 
-## 7. Out of scope
+## 7. Active Thread Reply Bot (Comment Seeding Assistant)
+
+Instead of posting generic drafts to a blank/inactive profile timeline, the pipeline will support an automated **active thread discussion-injection engine** (`src/engine/active_thread_seeder.py`) to maximize visibility by commenting on already popular, highly active, and relevant threads.
+
+### Flow & Architecture:
+1. **Search Phase:** Post-publish, the seeder uses search queries (derived from the video's title + keywords) via APIs (like Reddit's Search API) to identify the top 3-5 active, relevant threads from the last 24 hours.
+2. **Context Retrieval:** Fetches the top-level posts/comments in those threads.
+3. **LLM Generation:** Sends the thread context + video facts to the LLM to write a custom, organic, context-aware reply that contributes genuinely to the discussion.
+4. **Natural Citation:** Naturally appends the YouTube video URL at the end of the comment as a source/reference (e.g., *"I put together a full visual animated breakdown on this topic here: [YouTube Link]"*).
+5. **Publish Reply:** Submits the reply directly to the active thread under your bot account.
+
+### Implementation Checklist:
+- Create `src/engine/active_thread_seeder.py` to handle search, context processing, LLM reply generation, and Reddit posting (via `praw`).
+- Add credentials in `.env` (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `REDDIT_USER_AGENT`).
+- Wire the seeder into `src/agents/publisher.py` after the main upload succeeds (executed as a non-fatal step, similar to other seed dispatches).
+- Ensure safety gates: limit bot posts to a cooldown to prevent bans; filter out subreddits with strict bot rules; ensure the generated text matches the tone of the thread.
+
+### 7.1 Design Decisions & Parameters:
+The active thread reply bot is configured with the following parameters:
+1. **Target Platforms:** Reddit with an abstract interface prepared to support additional social media platforms later.
+2. **Search Scope:** Global search across all of Reddit using keyword matches (from video title + keywords) to locate active discussions from the last 24 hours.
+3. **Per-Run Rate Limit:** Maximum 1 comment reply posted per pipeline run.
+4. **LLM Routing:** Uses the default fast model (`google/gemini-2.5-flash`) for creating context-aware replies.
+5. **No-Link Soft Mode (Warm-Up Mode):** Enabled via environmental variable `ACTIVE_SEEDER_WARMUP=1` (or default `0` off) to post comments without the URL to safely warm up new accounts.
+
+### 7.2 Configuration & Setup:
+Add the following keys to your `.env` file to configure the PRAW client:
+```env
+# ── Active Thread Comment Seeding Bot (Reddit PRAW) ──────────────────────
+REDDIT_CLIENT_ID=your-reddit-client-id
+REDDIT_CLIENT_SECRET=your-reddit-client-secret
+REDDIT_USERNAME=your-reddit-bot-username
+REDDIT_PASSWORD=your-reddit-bot-password
+REDDIT_USER_AGENT=CSVG-Bot/1.0
+ACTIVE_SEEDER_WARMUP=0
+```
+
+#### Registering a Reddit Script App:
+1. Navigate to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) on your bot account.
+2. Scroll to the bottom and click **create another app...**
+3. Choose **script** (vital for backend integrations).
+4. Set name, description, and redirect URI (`http://localhost:8080`).
+5. Save the app. Use the string under "personal use script" for `REDDIT_CLIENT_ID` and the "secret" field for `REDDIT_CLIENT_SECRET`.
+
+## 8. Out of scope
 
 Feed changes (global high-RPM feeds stay), RAG-sufficiency gate (exists), cron mechanics (built).

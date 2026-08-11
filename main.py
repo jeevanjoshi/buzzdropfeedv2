@@ -72,7 +72,7 @@ def main():
     renderer = "ffmpeg"
     crossfade = 0.5
     pad_after_narration = None
-    rag_mode = "scraper"
+    rag_mode = "hybrid"
 
     state = None
     if len(sys.argv) > 1:

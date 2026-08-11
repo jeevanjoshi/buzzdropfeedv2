@@ -234,6 +234,36 @@ class SeedDistributorEngine:
             f"Watch the full visual breakdown and data source files here: {youtube_url} (3/3)"
         ]
 
+        tiktok_caption = (
+            f"🔍 {title}\n\n"
+            f"{summary[:150]}... \n\n"
+            f"Watch the full breakdown on YouTube! Link in bio. 🎥✨\n"
+            f"#finance #money #investing #education #datapack #insights"
+        )
+
+        instagram_caption = (
+            f"📊 {title}\n\n"
+            f"{summary[:200]}...\n\n"
+            f"👉 Tap the link in our bio to watch the complete visual analysis on YouTube!\n\n"
+            f"#business #technology #investing #data #stockmarket #globalfinance"
+        )
+
+        pinterest_draft = (
+            f"Board Idea: Finance & Technology Infographics\n"
+            f"Pin Title: {title[:95]}\n"
+            f"Pin Description: {summary[:450]}\n"
+            f"Destination Link: {youtube_url}"
+        )
+
+        telegram_post = (
+            f"📢 **{title}**\n\n"
+            f"{summary}\n\n"
+            f"💡 *Key Takeaways:*\n"
+            f"{takeaway_lines[0]}\n"
+            f"{takeaway_lines[1]}\n\n"
+            f"🔗 Watch the full documentary breakdown here: {youtube_url}"
+        )
+
         return CommunitySeedPackage(
             pipeline_id=pipeline_id,
             video_title=title,
@@ -243,7 +273,11 @@ class SeedDistributorEngine:
             hn_post_draft=hn_post,
             blog_article_markdown=blog_markdown,
             linkedin_post_draft=linkedin_post,
-            x_thread_draft=x_thread
+            x_thread_draft=x_thread,
+            tiktok_caption=tiktok_caption,
+            instagram_caption=instagram_caption,
+            pinterest_draft=pinterest_draft,
+            telegram_post=telegram_post
         )
 
     async def dispatch_webhook_notification(self, package: CommunitySeedPackage) -> bool:
@@ -274,6 +308,34 @@ class SeedDistributorEngine:
             fields.append({
                 "name": "🐦 X/Twitter Thread Draft",
                 "value": f"```text\n{x_str[:300]}...\n```",
+                "inline": False
+            })
+
+        if package.tiktok_caption:
+            fields.append({
+                "name": "🎵 TikTok Caption",
+                "value": f"```text\n{package.tiktok_caption[:300]}...\n```",
+                "inline": False
+            })
+
+        if package.instagram_caption:
+            fields.append({
+                "name": "📸 Instagram Caption",
+                "value": f"```text\n{package.instagram_caption[:300]}...\n```",
+                "inline": False
+            })
+
+        if package.pinterest_draft:
+            fields.append({
+                "name": "📌 Pinterest Pin Draft",
+                "value": f"```text\n{package.pinterest_draft[:300]}...\n```",
+                "inline": False
+            })
+
+        if package.telegram_post:
+            fields.append({
+                "name": "✈️ Telegram Post",
+                "value": f"```text\n{package.telegram_post[:300]}...\n```",
                 "inline": False
             })
 
@@ -309,6 +371,14 @@ class SeedDistributorEngine:
                     if package.x_thread_draft:
                         x_flat = "\n".join(package.x_thread_draft)
                         slack_text += f"*X Thread Draft:*\n```\n{x_flat[:200]}...\n```\n"
+                    if package.tiktok_caption:
+                        slack_text += f"*TikTok Caption:*\n```\n{package.tiktok_caption[:200]}...\n```\n"
+                    if package.instagram_caption:
+                        slack_text += f"*Instagram Caption:*\n```\n{package.instagram_caption[:200]}...\n```\n"
+                    if package.pinterest_draft:
+                        slack_text += f"*Pinterest Pin:*\n```\n{package.pinterest_draft[:200]}...\n```\n"
+                    if package.telegram_post:
+                        slack_text += f"*Telegram Post:*\n```\n{package.telegram_post[:200]}...\n```\n"
 
                     slack_payload = {"text": slack_text}
                     async with session.post(self.slack_webhook, json=slack_payload) as resp:
@@ -320,5 +390,3 @@ class SeedDistributorEngine:
             return False
 
 seed_distributor = SeedDistributorEngine()
-
-
