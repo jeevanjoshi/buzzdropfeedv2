@@ -244,8 +244,14 @@ if [ "${1:-}" != "--no-detach" ]; then
     elif [[ "$*" == *"--global"* ]]; then
         REGION_FWD="--global"
     fi
-    setsid nohup "$0" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${TAIL_ARG} ${RAG_ARG} ${REGION_FWD} \
-        < /dev/null > /dev/null 2>&1 &
+    # Use an ABSOLUTE path for the detached child: under cron $PATH does NOT
+    # contain the repo dir, and $0 arrives as a bare filename (cron_publish.sh
+    # runs us via `bash run_production.sh`). `nohup` resolves a bare name via
+    # $PATH (execvp), so `"$0"` silently died with exit 127 and NO log — the
+    # child never launched. Also keep the child's early stderr APPENDED to the
+    # log file instead of /dev/null so a spawn failure is always visible.
+    setsid nohup "${SCRIPT_DIR}/$(basename "$0")" --no-detach ${RESUME_ARG} ${RENDERER_ARG} ${CROSSFADE_ARG} ${TAIL_ARG} ${RAG_ARG} ${REGION_FWD} \
+        < /dev/null >> "${LOG_FILE}" 2>&1 &
     PID=$!
     echo "[SUCCESS] Pipeline successfully spawned in background (PID: ${PID})."
     echo "[LOGS] Real-time logs: tail -f ${LOG_FILE}"
