@@ -1,7 +1,7 @@
 # CSVG Converged Implementation Plan — Single Source of Truth
 
 _Status: ratified · supersedes the earlier fragmented plans (opportunity-score, RAG-alignment,
-publish-integrity, script-quality, stabilization, media-quality upgrades). Last updated 2026-08-11.
+publish-integrity, script-quality, stabilization, media-quality upgrades). Last updated 2026-08-13.
 This document is the **single source of truth** for architecture, design decisions and feature
 status. Legend: **SHIPPED & VERIFIED** / **PLANNED — NEXT PASS** / **NOT FEASIBLE / DEFERRED**.
 Operational quick-reference (commands, flags, tests, env, conventions) lives in `AGENTS.md`._
@@ -335,6 +335,88 @@ non-fatal, quota-aware, env-gated patterns.
 satisfy these writes via the broad `youtube` scope; new endpoints must load credentials with the
 `youtube.force-ssl` scope string (as `insert_pinned_comment` already does), not the
 `youtube.upload`-scoped uploads loader.
+
+### 2.4 Targeted discussion-injection seeding (Tier 1–3)
+
+The growth goal is maximum views + subscribers → YPP → $2,000/month ad revenue. Broadcasting
+multi-social posts into feeds yields low-RPM views and dilutes the viewer segment pre-YPP; the
+high-leverage move is injecting value into **live, on-topic discussions/groups** the video is
+intended for. The pipeline already does this on Reddit (`ActiveThreadSeeder` +
+`SeedDistributor` semantic gate); this section extends that pattern. **100% automation — no
+manual posting, no bots/channels set up by hand** — all email/password auth uses the Reddit
+account-pool + Playwright pattern.
+
+**Decisions:** Reddit scoping is **soft by default** (prefer relevant groups; global fallback
+only as last resort) — `ACTIVE_SEEDER_STRICT_SCOPE=1` makes it strict-skip. All tiers planned
+now; code lands in a later pass. Per-run budget = ≤1 post per platform.
+
+**Shared foundation**
+- `src/engine/seed_account_pool.py` (new) — generalize `RedditRotationState` +
+  `reddit_accounts.json`: `{username/email, password, daily_cap, warmup, extra:{}}` +
+  `settings {min_delay_seconds, max_delay_seconds, retire_on_shadowban, visibility_check_enabled}`.
+  Pools live in the gitignored `seed_accounts/` dir (`reddit.json`, `quora.json`,
+  `telegram.json`; keep `reddit_accounts.json` working via back-compat). Per-platform
+  `logs/<platform>_rotation_state.json` (daily caps, retirement, per-target permissiveness,
+  posted-URL dedup). Shared memory/process resource guards so concurrent seeds can't OOM the Pi.
+- `BasePlatformSeeder` (`active_thread_seeder.py:12`) stays the interface: extend with
+  `post_answer(...)` / `post_message(...)` where needed.
+- Fan-out: single `seed_all_platforms(state, youtube_url)` in `publisher.py` (all non-fatal,
+  ≤1 post each): Reddit active-reply (scoped) → Quora answer (gated) → Telegram group post
+  (gated) → existing Reddit link-seeder + warmup.
+- Account onboarding: `get_seed_account.py` (new) verifies login by automation, persists the
+  session, runs a NO-LINK warm-up (mirror `reddit_warmup.py`). Creation of accounts (captcha/2FA)
+  stays manual; everything after credential entry is automated.
+
+**Tier 1 — Reddit scoping (soft; high value, low effort)**
+- `seed_active_discussions(state, youtube_url, target_subreddits=None)`; publisher computes
+  `seed_distributor.select_target_subreddits(state)` once and passes it.
+- Search **in scope first**: PRAW `reddit.subreddit("+".join(subs)).search(query,
+  time_filter="day")`; `RedditJsonClient.search_active_threads` filters `subreddit in scoped_subs`.
+- **Thread-level relevance ranking:** score each candidate thread `title+selftext` vs video text
+  via `seed_distributor._semantic_relevance` (MiniLM ≥ 0.50 / TF-IDF fallback ≥ 0.30); sort by
+  score desc, tie-break `num_comments`. Pick the top scoped thread.
+- **Soft fallback:** no qualifying scoped thread → loud warning + today's global
+  highest-comments pick (preserves current behavior). `ACTIVE_SEEDER_STRICT_SCOPE=1` → skip.
+- Tests (hermetic): off-topic 500-comment thread loses to on-topic 40-comment scoped thread;
+  soft mode falls back globally when nothing qualifies; strict mode posts nothing; `_post_reply`
+  never out-of-scope in strict.
+
+**Tier 2 — Quora (medium effort)**
+- `src/engine/quora_seeder.py` — `QuoraSeeder(BasePlatformSeeder)`:
+  `search_active_questions(topic)` (Quora search, title + keywords),
+  `get_question_context(question)` (question + top answers so the LLM won't repeat them),
+  MiniLM relevance gate (question vs video text), `_build_answer(...)` → LLM (route `generate`)
+  answering with `state.verified_facts[:3]` + one natural credit line
+  (`*covered the data + visuals in a video here: <link>*`), `QUORA_REPLY_MAX=1`.
+- `src/engine/quora_browser_poster.py` — clone of `RedditBrowserPoster` driving
+  `seed_accounts/quora.json`; Playwright → www.quora.com, email/password login, DOM answer
+  post, visibility check, retire on ban. Env `QUORA_CHROMIUM_PATH` (default `/usr/bin/chromium`).
+- Gated by `QUORA_SEEDER_ENABLED` (default 0 until an account is onboarded).
+- Tests: gated off → 0 posts; ≤1 answer; answer contains a verified fact + link; off-topic
+  question skipped; account-pool shape equals `reddit_accounts.json`.
+
+**Tier 3 — Telegram on-topic groups (low-medium; no bots, no manual setup)**
+- `src/engine/telegram_seeder.py` — `TelegramSeeder(BasePlatformSeeder)`, **browser-only**
+  (web.telegram.org; no Bot API, no BotFather, no manual channel invites):
+  `search_active_groups(topic)` (public-group/channel search matching keywords, recent context
+  where visible), MiniLM gate vs video text, `_build_message(...)` reuses
+  `seed_distributor.telegram_post` (shortened, verified fact + YT link), `TELEGRAM_REPLY_MAX=1`.
+- `src/engine/telegram_browser_poster.py` — Reddit-pattern browser poster;
+  `seed_accounts/telegram.json` login; group-join via public link then post; session persistence;
+  daily caps + retirement.
+- Gated by `TELEGRAM_SEEDER_ENABLED` (default 0).
+- **Risk note:** Telegram Web login is phone/QR-based in many regions — email/password parity may
+  not hold on every account. Fallback: persist an already-logged-in session in the pool
+  (`session` field, refreshed by automation) so zero manual per-post action is still required.
+  Verify login realism at implementation time with a real account.
+- Tests: gated; ≤1 message; content carries verified fact + link; account-pool parity.
+
+**Env additions (`example.env`):** `ACTIVE_SEEDER_STRICT_SCOPE` (default `0`),
+`QUORA_SEEDER_ENABLED` / `TELEGRAM_SEEDER_ENABLED` (default `0`), `QUORA_REPLY_MAX` /
+`TELEGRAM_REPLY_MAX` (default `1`), `QUORA_CHROMIUM_PATH`.
+
+**Verification:** full suite (19 + new cases) green, `bash -n`, no dangling config refs.
+Execution order: T1 ships alone first (no accounts needed) → T2 → T3.
 
 ---
 
