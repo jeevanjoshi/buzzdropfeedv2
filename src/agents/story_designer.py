@@ -844,34 +844,38 @@ class StoryDesignerAgent:
                 prompt += """
 
                 Requirements:
-                1. Exactly 18 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict) — 3 shots per act.
-                2. Return a JSON object with key "shots" containing an array of 18 shot objects.
-                3. Each shot object MUST contain:
-                   - "shot_id": integer 1 to 18
-                   - "act_index": integer 1 to 6
-                   - "narration_text": string of 90-105 words deeply explaining facts from the RAG pack
-                   - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
-                   - "visual_type": string classification of the visual format. Choose EXACTLY one of:
-                     * "standard_image" (default photorealistic cinematic scenes)
-                     * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
-                     * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
-                     * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
-                4. No Spoken/Visual Citations: Do NOT explicitly name or verbally attribute the sources, publishers, or web links in the spoken narration or screen visual prompts (e.g. do not say 'According to Wired', 'Reuters reports', 'as shown by TechCrunch'). Present the facts directly and naturally in the storytelling without these spoken citations. The sources will be captured in the description instead.
-                5. Strict Temporal Grounding: Frame current developments within {current_month_year}; treat any pre-2026/historical-tagged fact as PAST background only, never as a current event.
-                5b. NO ACRONYMS: Never use acronyms or initialisms in narration. Spell EVERY abbreviation out to its most appropriate full term for the sentence's context the first time it appears (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product', 'IPO' → 'initial public offering', 'ROI' → 'return on investment', 'CEO' → 'chief executive officer'). Proper-noun company/person names that are themselves initialisms (NASA, IBM, CNN, NYSE) may remain. NEVER emit a bare all-caps shorthand.
-                6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
-                7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
-                8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
-                9. STORYTELLING INTEGRATION: Seamlessly blend real-world facts from the RAG pack into a single, cohesive narrative arc. Do not output raw scrapped snippets verbatim; rephrase them using rich, evocative English prose.
-                10. CREATIVE CTA INTEGRATION: The final shot must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
-                STATISTIC-SHOT CHART SPEC (IMPORTANT):
-                For ANY shot whose narration makes a numeric/statistical claim (percentages, growth figures, valuations, market-cap shifts), set its "visual_type" to "matplotlib_chart" AND add a "chart_spec" object: {{"title": "<short title>", "labels": ["<desc1>","<desc2>",...], "values": [<number>,<number>,...], "unit": "%" or "$" or "₹" or "B" etc, "chart_type": "bar" or "line"}}. The numbers in "values" MUST be the real figures from the RAG pack — never invent or round-away numbers. Prefer "bar" for discrete comparisons (e.g. market share, YoY %), "line" for trends over time. Include 2-6 values. If a shot has no numeric claim, omit "chart_spec".
-                """
+                 1. Exactly 18 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict) — 3 shots per act.
+                    - For Shot 1 (Act 1 Hook): Target 75-85 words. It MUST start with an immediate, high-stakes hook in the first 10 words (e.g. a specific anomaly, conflict, or metric) and strictly avoid generic cliches or slow metaphors (like 'In a world...', 'The landscape resembles...', 'The year is...').
+                    - For all other body shots (2-17): Target 90-105 words deeply explaining facts from the RAG pack.
+                    - For Shot 18 (Act 6 Outro): Target 75-85 words.
+                 2. Return a JSON object with key "shots" containing an array of 18 shot objects.
+                 3. Each shot object MUST contain:
+                    - "shot_id": integer 1 to 18
+                    - "act_index": integer 1 to 6
+                    - "narration_text": string matching the word length targets specified in Requirement 1.
+                    - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
+                    - "visual_type": string classification of the visual format. Choose EXACTLY one of:
+                      * "standard_image" (default photorealistic cinematic scenes)
+                      * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
+                      * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
+                      * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
+                 4. No Spoken/Visual Citations: Do NOT explicitly name or verbally attribute the sources, publishers, or web links in the spoken narration or screen visual prompts (e.g. do not say 'According to Wired', 'Reuters reports', 'as shown by TechCrunch'). Present the facts directly and naturally in the storytelling without these spoken citations. The sources will be captured in the description instead.
+                 5. Strict Temporal Grounding: Frame current developments within {current_month_year}; treat any pre-2026/historical-tagged fact as PAST background only, never as a current event.
+                 5b. NO ACRONYMS: Never use acronyms or initialisms in narration. Spell EVERY abbreviation out to its most appropriate full term for the sentence's context the first time it appears (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product', 'IPO' → 'initial public offering', 'ROI' → 'return on investment', 'CEO' → 'chief executive officer'). Proper-noun company/person names that are themselves initialisms (NASA, IBM, CNN, NYSE) may remain. NEVER emit a bare all-caps shorthand.
+                 6. LINGUISTIC DIVERSITY & STYLISTIC DYNAMICS: Every shot must use distinct sentence structures, rhythms, and vocabulary. Avoid robotic templates or academic summaries. Blend narrative storytelling, punchy declarations, analogies, and rhetorical pacing. Do not start sentences with repetitive structures.
+                 7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
+                 8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
+                 9. STORYTELLING INTEGRATION: Seamlessly blend real-world facts from the RAG pack into a single, cohesive narrative arc. Do not output raw scrapped snippets verbatim; rephrase them using rich, evocative English prose.
+                 10. CREATIVE CTA INTEGRATION: The final shot must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
+                 STATISTIC-SHOT CHART SPEC (IMPORTANT):
+                 For ANY shot whose narration makes a numeric/statistical claim (percentages, growth figures, valuations, market-cap shifts), set its "visual_type" to "matplotlib_chart" AND add a "chart_spec" object: {{"title": "<short title>", "labels": ["<desc1>","<desc2>",...], "values": [<number>,<number>,...], "unit": "%" or "$" or "₹" or "B" etc, "chart_type": "bar" or "line"}}. The numbers in "values" MUST be the real figures from the RAG pack — never invent or round-away numbers. Prefer "bar" for discrete comparisons (e.g. market share, YoY %), "line" for trends over time. Include 2-6 values. If a shot has no numeric claim, omit "chart_spec".
+                 """
                 system_prompt = (
                     f"You are a master documentary director and creative storyteller specializing in {category} in {current_year}. "
                     "CRITICAL RULES: "
                     "1. STYLISTIC EXCELLENCE (Vox/Netflix Documentary Style): Write in a gripping, cinematic, and narrative-first tone. "
                     "Never write dry summaries or list scraped facts line-by-line. Instead, weave facts into a suspenseful, unfolding human story. "
+                    "For Shot 1, the narration MUST open directly with a high-tension hook, question, or critical statistic in the first sentence. Avoid all slow background clichés. "
                     "2. NO SPOKEN CITATIONS: Do NOT verbally cite, name, or attribute any publication or website (e.g. 'According to The New York Times', 'Wired shows', etc.) in the narration or visual prompts. Present all news and facts naturally without naming the publisher. Do not use phrases like 'as reported by', 'according to', or the names of news agencies in the script. "
                     "3. CREATIVE ANALOGIES: Translate complex data, metrics, or technical mechanisms into vivid metaphors and simple physical analogies. "
                     "3b. NO ACRONYMS: Spell out every acronym/initialism to its most contextually-appropriate full term on first mention (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product'). The narration must ship ZERO bare all-caps shorthand; only proper-noun initialisms (NASA, IBM, NYSE, CNN) may remain. "
@@ -885,12 +889,12 @@ class StoryDesignerAgent:
                 repair_hint = ""
                 if attempt > 1:
                     repair_hint = (
-                        "\n\n\u26a0\ufe0f CRITICAL REPAIR INSTRUCTION (PREVIOUS DRAFT FAILED VALIDATION):\n"
+                        "\n\n⚠️ CRITICAL REPAIR INSTRUCTION (PREVIOUS DRAFT FAILED VALIDATION):\n"
                         "Your previous draft did NOT meet the HARD requirements: it either contained fewer than 12 shots, "
-                        "had narration_text under 85 words, the total fell below 1,500 words, or the JSON was "
-                        "truncated/incomplete. Produce EXACTLY 18 shot objects, each narration_text between 90 and 105 "
-                        "words, so the script total exceeds 1,500 words. Return ONLY one complete, valid JSON object with "
-                        "a single 'shots' key. Do NOT truncate or omit any shot.\n"
+                        "had narration_text under 75 words, the total fell below 1,500 words, or the JSON was "
+                        "truncated/incomplete. Produce EXACTLY 18 shot objects. Shot 1 and Shot 18 must be 75-85 words, "
+                        "and all other shots between 90 and 105 words, so the script total exceeds 1,500 words. "
+                        "Return ONLY one complete, valid JSON object with a single 'shots' key. Do NOT truncate or omit any shot.\n"
                     )
                     prompt += repair_hint
                 llm_result = self.llm_client.generate_json(prompt, system_prompt, route="generate")
