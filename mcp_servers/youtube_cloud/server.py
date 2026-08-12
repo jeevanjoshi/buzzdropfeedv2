@@ -166,7 +166,7 @@ def _load_credentials():
     token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
     credentials = None
     if os.path.exists(token_path):
-        credentials = Credentials.from_authorized_user_file(token_path, ["https://www.googleapis.com/auth/youtube.upload"])
+        credentials = Credentials.from_authorized_user_file(token_path)
         if credentials and credentials.expired and credentials.refresh_token:
             credentials.refresh(Request())
     if not credentials:
@@ -232,7 +232,7 @@ async def insert_pinned_comment(req: InsertCommentRequest):
             from google.auth.transport.requests import Request
             from googleapiclient.discovery import build
 
-            credentials = Credentials.from_authorized_user_file(token_path, ["https://www.googleapis.com/auth/youtube.force-ssl"])
+            credentials = Credentials.from_authorized_user_file(token_path)
             if credentials and credentials.expired and credentials.refresh_token:
                 credentials.refresh(Request())
 

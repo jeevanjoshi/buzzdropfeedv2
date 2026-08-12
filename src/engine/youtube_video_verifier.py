@@ -362,11 +362,7 @@ Return the response as a valid JSON object matching this schema:
             from google.auth.transport.requests import Request
             from googleapiclient.discovery import build
 
-            YOUTUBE_SCOPES = [
-                "https://www.googleapis.com/auth/youtube.upload",
-                "https://www.googleapis.com/auth/youtube.readonly",
-            ]
-            creds = Credentials.from_authorized_user_file(token_path, YOUTUBE_SCOPES)
+            creds = Credentials.from_authorized_user_file(token_path)
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             if not creds or not creds.valid:

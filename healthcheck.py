@@ -246,8 +246,7 @@ def check_youtube(probe: bool = True):
             from google.oauth2.credentials import Credentials
             from google.auth.transport.requests import Request as GAuthRequest
             from googleapiclient.discovery import build
-            creds = Credentials.from_authorized_user_file(
-                token_file, ["https://www.googleapis.com/auth/youtube.upload"])
+            creds = Credentials.from_authorized_user_file(token_file)
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(GAuthRequest())
             yt = build("youtube", "v3", credentials=creds)
