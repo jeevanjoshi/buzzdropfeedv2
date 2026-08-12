@@ -274,6 +274,7 @@ placeholder audio (`src/agents/media_producer.py`):
   (checkpoint/resume), `channel_stats.json` (phase GROWTH/REVENUE/SCALE), `published_topics.json`
   (dedup), `yt_demand_pools.json` + `yt_demand_quota.json` (competitor-demand budget). Large fixed
   assets `kokoro-v0.19.onnx` (~325MB) and `voices.bin` are gitignored and locally present.
+- **LLM Client Routing & Fallbacks:** The `LLMClient` supports native Google Cloud Vertex AI (using ADC), native Gemini AI Studio (using `GEMINI_API_KEY`), cloud OpenRouter (using `OPENROUTER_API_KEY`), and local `llama.cpp` (using `LLAMA_CPP_URL`). The provider is configured via `PREFERRED_LLM_PROVIDER` in `.env` (values: `google`/`vertex`, `gemini`, `cloud`, or `local`). If a provider fails or isn't configured, the client automatically cascades through the fallback chain (Vertex AI → Gemini AI Studio → OpenRouter → Local llama.cpp) to guarantee run execution without using template fallbacks. The client dynamically respects `LLM_MODEL` configured in `.env`.
 
 ### 1.11 Validation
 

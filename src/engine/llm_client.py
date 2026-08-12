@@ -26,11 +26,11 @@ class LLMClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "google/gemini-2.5-flash",
+        model: Optional[str] = None,
         llama_cpp_url: Optional[str] = None
     ):
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-        self.model = model
+        self.model = model or os.getenv("LLM_MODEL") or "google/gemini-2.5-flash"
         self.llama_cpp_url = (llama_cpp_url or os.getenv("LLAMA_CPP_URL", "http://localhost:8080")).rstrip("/")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -86,7 +86,9 @@ class LLMClient:
         return self.is_llama_cpp_available()
 
     def is_cloud_llm_available(self) -> bool:
-        return bool(self.api_key and len(self.api_key) > 5)
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        gcp_project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        return bool((self.api_key and len(self.api_key) > 5) or (gemini_key and len(gemini_key) > 5) or gcp_project)
 
     def is_available(self) -> bool:
         """
@@ -324,12 +326,151 @@ class LLMClient:
                 # this model exhausted its tries -> move to next fallback model
             return None
 
+        def try_vertex_api() -> Optional[Dict[str, Any]]:
+            if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+                return None
+            try:
+                from google import genai
+                from google.genai import types as genai_types
+            except ImportError:
+                print("[LLMClient] google-genai SDK not installed, Vertex AI unavailable.")
+                return None
+
+            models = self._model_chain(self.model, route=route)
+            for model in models:
+                native_model = model
+                if "/" in model:
+                    parts = model.split("/")
+                    if parts[0] == "google":
+                        native_model = parts[1]
+                    else:
+                        continue
+
+                for retry_idx in range(3):
+                    backoff = 2 * (retry_idx + 1)
+                    t0 = time.time()
+                    try:
+                        print(f"[LLMClient] Invoking Google Cloud Vertex AI ({native_model}) [try {retry_idx + 1}/3]...")
+                        client = genai.Client(http_options=genai_types.HttpOptions(api_version="v1"))
+                        
+                        config = genai_types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.7,
+                        )
+                        if system_prompt:
+                            config.system_instruction = system_prompt
+                        
+                        response = client.models.generate_content(
+                            model=native_model,
+                            contents=prompt,
+                            config=config
+                        )
+                        latency_ms = int((time.time() - t0) * 1000)
+                        content = getattr(response, "text", "") or ""
+
+                        parsed = self._clean_and_parse_json(content)
+                        if parsed is not None:
+                            logger.info(
+                                "LLM_CALL",
+                                f"Vertex AI {native_model} OK, len {len(content)}",
+                                component="LLM_CLIENT",
+                                extra_data={"api": "vertex_ai", "model": native_model,
+                                            "latency_ms": latency_ms, "prompt": _trunc(prompt),
+                                            "system_prompt": _trunc(system_prompt, 800),
+                                            "response": _trunc(content, 4000), "retry": retry_idx + 1}
+                            )
+                            return parsed
+
+                        logger.warning("LLM_CALL", f"JSON parse failed from Vertex '{native_model}'",
+                                       component="LLM_CLIENT",
+                                       extra_data={"model": native_model, "prompt": _trunc(prompt),
+                                                   "response": _trunc(content, 1000)})
+                        time.sleep(backoff)
+                    except Exception as e:
+                        logger.error("LLM_CALL", f"Vertex AI Exception ({native_model}): {e}",
+                                     component="LLM_CLIENT",
+                                     extra_data={"api": "vertex_ai", "model": native_model, "error": str(e)})
+                        time.sleep(backoff)
+            return None
+
+        def try_gemini_api() -> Optional[Dict[str, Any]]:
+            gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            if not gemini_key:
+                return None
+            try:
+                from google import genai
+                from google.genai import types as genai_types
+            except ImportError:
+                print("[LLMClient] google-genai SDK not installed, native Gemini unavailable.")
+                return None
+
+            models = self._model_chain(self.model, route=route)
+            for model in models:
+                native_model = model
+                if "/" in model:
+                    parts = model.split("/")
+                    if parts[0] == "google":
+                        native_model = parts[1]
+                    else:
+                        continue
+
+                for retry_idx in range(3):
+                    backoff = 2 * (retry_idx + 1)
+                    t0 = time.time()
+                    try:
+                        print(f"[LLMClient] Invoking Native Gemini API ({native_model}) [try {retry_idx + 1}/3]...")
+                        client = genai.Client(api_key=gemini_key, vertexai=False, enterprise=False)
+                        
+                        config = genai_types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.7,
+                        )
+                        if system_prompt:
+                            config.system_instruction = system_prompt
+                        
+                        response = client.models.generate_content(
+                            model=native_model,
+                            contents=prompt,
+                            config=config
+                        )
+                        latency_ms = int((time.time() - t0) * 1000)
+                        content = getattr(response, "text", "") or ""
+
+                        parsed = self._clean_and_parse_json(content)
+                        if parsed is not None:
+                            logger.info(
+                                "LLM_CALL",
+                                f"Native Gemini {native_model} OK, len {len(content)}",
+                                component="LLM_CLIENT",
+                                extra_data={"api": "gemini_native", "model": native_model,
+                                            "latency_ms": latency_ms, "prompt": _trunc(prompt),
+                                            "system_prompt": _trunc(system_prompt, 800),
+                                            "response": _trunc(content, 4000), "retry": retry_idx + 1}
+                            )
+                            return parsed
+
+                        logger.warning("LLM_CALL", f"JSON parse failed from native '{native_model}'",
+                                       component="LLM_CLIENT",
+                                       extra_data={"model": native_model, "prompt": _trunc(prompt),
+                                                   "response": _trunc(content, 1000)})
+                        time.sleep(backoff)
+                    except Exception as e:
+                        logger.error("LLM_CALL", f"Native Gemini Exception ({native_model}): {e}",
+                                     component="LLM_CLIENT",
+                                     extra_data={"api": "gemini_native", "model": native_model, "error": str(e)})
+                        time.sleep(backoff)
+            return None
+
         # Execute according to user preference
-        if preferred_provider == "cloud":
-            result = try_cloud_api() or try_local_llama_cpp()
+        if preferred_provider in ("vertex", "google"):
+            result = try_vertex_api() or try_gemini_api() or try_cloud_api() or try_local_llama_cpp()
+        elif preferred_provider == "gemini":
+            result = try_gemini_api() or try_vertex_api() or try_cloud_api() or try_local_llama_cpp()
+        elif preferred_provider == "cloud":
+            result = try_cloud_api() or try_vertex_api() or try_gemini_api() or try_local_llama_cpp()
         else:
-            # Default: try local llama.cpp first, fallback to cloud
-            result = try_local_llama_cpp() or try_cloud_api()
+            # Default: try local llama.cpp first, fallback to Vertex AI, then native Gemini AI Studio, then cloud OpenRouter
+            result = try_local_llama_cpp() or try_vertex_api() or try_gemini_api() or try_cloud_api()
 
         # A real (paid/local) LLM response was produced — bill it to the run budget.
         if result is not None:

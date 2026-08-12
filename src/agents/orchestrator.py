@@ -624,7 +624,7 @@ class OrchestratorAgent:
 
             if "ffmpeg" in err_str or "command failed" in err_str:
                 fix_hint = "FFmpeg binary error. Ensure FFmpeg is installed via 'sudo apt install ffmpeg' or system PATH."
-            elif "fal_key" in err_str or "fal" in err_str:
+            elif "fal_key" in err_str or "fal.ai" in err_str or "fal-client" in err_str:
                 fix_hint = "Fal.ai API key missing or invalid. Set FAL_KEY in your .env file."
             elif "quota" in err_str or "1600" in err_str:
                 fix_hint = "YouTube Data API daily quota limit reached (10,000 units). Wait for daily quota reset or use secondary channel API key."
