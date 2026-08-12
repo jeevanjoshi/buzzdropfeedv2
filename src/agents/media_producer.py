@@ -682,6 +682,25 @@ class MediaProducerAgent:
             else:
                 tts_speed = 1.0
 
+            # Voice configuration per act (voice variety/documentary style)
+            region_val = state.selected_topic.region if (state.selected_topic and hasattr(state.selected_topic, 'region')) else "all"
+            if region_val == "india":
+                # For India: Use af_sarah as primary, but vary with am_adam for serious analysis acts
+                if shot.act_index in (2, 3, 5):
+                    tts_voice = "am_adam"
+                else:
+                    tts_voice = "af_sarah"
+            else:
+                # For Global/US:
+                if shot.act_index in (1, 6):
+                    tts_voice = "af_bella"     # Female US - primary host
+                elif shot.act_index in (2, 5):
+                    tts_voice = "am_adam"      # Male US - serious/analytical co-host
+                elif shot.act_index == 3:
+                    tts_voice = "am_michael"   # Male US - technical analyst
+                else:
+                    tts_voice = "af_nicole"    # Female US - bright/clear analyst
+
             # Paths
             wav_path = os.path.join(audio_dir, f"{shot_key}.wav")
             ass_path = os.path.join(sub_dir, f"{shot_key}.ass")
@@ -694,11 +713,11 @@ class MediaProducerAgent:
             if audio_edge_url:
                 try:
                     import aiohttp
-                    region_val = state.selected_topic.region if (state.selected_topic and hasattr(state.selected_topic, 'region')) else "all"
                     async with aiohttp.ClientSession() as session:
                         # 1. Synthesize TTS remotely
                         async with session.post(f"{audio_edge_url}/tools/synthesize_tts", json={
                             "text": tts_narration,
+                            "voice": tts_voice,
                             "output_path": wav_path,
                             "region": region_val,
                             "speed": tts_speed
@@ -753,7 +772,7 @@ class MediaProducerAgent:
                     print(f"Edge Audio Service Exception (falling back to local synthesis): {e}")
 
             if not audio_generated:
-                tts_result = await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path, speed=tts_speed))
+                tts_result = await synthesize_tts(TTSRequest(text=tts_narration, voice=tts_voice, output_path=wav_path, speed=tts_speed))
                 engine = (tts_result or {}).get("engine") if isinstance(tts_result, dict) else None
                 if engine == "synthetic_wav_fallback":
                     raise RuntimeError(
