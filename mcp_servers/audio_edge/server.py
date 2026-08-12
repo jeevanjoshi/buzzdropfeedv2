@@ -38,6 +38,9 @@ def sanitize_tts_text(text: str) -> str:
                   text, flags=re.IGNORECASE)
     text = re.sub(r'\$(\d+)', r'\1 dollars', text)
 
+    # Expand decimals to words, e.g. 3.5 -> 3 point 5, 0.2 -> 0 point 2
+    text = re.sub(r'\b(\d+)\.(\d+)\b', r'\1 point \2', text)
+
     # Expand large numbers to text (e.g. 5000000 -> 5 million)
     def num_repl(match):
         num_str = match.group(1).replace(",", "")
@@ -181,7 +184,7 @@ PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Montserrat,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,2,2,10,10,50,1
+Style: Default,Montserrat,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,2,2,660,660,50,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

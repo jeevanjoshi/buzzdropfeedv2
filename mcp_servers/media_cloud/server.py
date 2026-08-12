@@ -31,6 +31,8 @@ class KenBurnsRequest(BaseModel):
     # 1.5 is framing-safe (never shows less than ~2/3 of the image); the real
     # fix for "more motion" is shorter shots, not a bigger zoom.
     zoom_target: float = 1.5
+    disable_motion: bool = False
+    audio_delay: float = 0.0
     output_mp4_path: str
 
 
@@ -553,46 +555,56 @@ async def generate_dynamic_chart(req: ChartRequest):
             plt.style.use('dark_background')
             fig, ax = plt.subplots(figsize=(16, 9), dpi=120)
 
+            # Sleek modern dark container style
+            fig.patch.set_facecolor('#090d16')
+            ax.set_facecolor('#090d16')
+
+            # Hide unnecessary borders for minimalist floating aesthetic
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['left'].set_visible(False)
+            ax.spines['bottom'].set_color('#30363d')
+            ax.spines['bottom'].set_linewidth(1.5)
+
+            def format_val(val, unit):
+                if not unit:
+                    return f"{val:g}"
+                unit = unit.strip()
+                if unit in ("$", "₹", "£", "€"):
+                    return f"{unit}{val:g}"
+                return f"{val:g}{unit}" if unit.startswith("%") else f"{val:g} {unit}"
+
             if ctype == "bar":
-                colors = ['#00ffcc', '#ff0055', '#ffcc00', '#39d353', '#00aaff', '#ff8800']
-                bars = ax.bar(labels, values, color=colors[:len(values)], width=0.6)
+                # Modern uniform cyan theme for bar charts instead of messy rainbow
+                bars = ax.bar(labels, values, color='#00e5ff', width=0.5, edgecolor='#00ffd8', linewidth=1.5, alpha=0.85)
                 ax.set_xlabel("", fontsize=18)
                 for bar, val in zip(bars, values):
-                    ax.annotate(f"{val:g} {req.unit_symbol}", (bar.get_x() + bar.get_width() / 2.0, val),
-                                textcoords="offset points", xytext=(0, 8),
-                                ha='center', fontsize=16, color='yellow', fontweight='bold')
+                    ax.annotate(format_val(val, req.unit_symbol), (bar.get_x() + bar.get_width() / 2.0, val),
+                                textcoords="offset points", xytext=(0, 10),
+                                ha='center', fontsize=14, color='white', fontweight='semibold')
             else:
-                ax.plot(labels, values, color='#00ffcc', linewidth=5, marker='o',
-                        markersize=12, markerfacecolor='#ff0055')
+                # Modern hollow marker line chart with premium area glow fill
+                ax.plot(labels, values, color='#00e5ff', linewidth=4, marker='o',
+                        markersize=10, markerfacecolor='#090d16', markeredgecolor='#00e5ff', markeredgewidth=3)
+                ax.fill_between(labels, values, color='#00e5ff', alpha=0.12)
                 for x, y in zip(labels, values):
-                    ax.annotate(f"{y:g} {req.unit_symbol}", (x, y), textcoords="offset points",
-                                xytext=(0, 15), ha='center', fontsize=16, color='yellow', fontweight='bold')
+                    ax.annotate(format_val(y, req.unit_symbol), (x, y), textcoords="offset points",
+                                xytext=(0, 15), ha='center', fontsize=14, color='white', fontweight='semibold')
 
-            ax.set_title(chart_title, fontsize=24, color='white', pad=25, fontweight='bold')
-            ax.set_ylabel(f"Value ({req.unit_symbol})", fontsize=20, color='#00ffcc', labelpad=15, fontweight='bold')
-            ax.tick_params(axis='both', which='major', labelsize=15, colors='white')
-            ax.grid(True, color='#333333', linestyle='--', linewidth=1.5)
-
-            fig.patch.set_facecolor('#0d1117')
-            ax.set_facecolor('#0d1117')
+            ax.set_title(chart_title, fontsize=26, color='white', pad=30, fontweight='bold', family='sans-serif')
+            ax.set_ylabel(f"Value ({req.unit_symbol})" if req.unit_symbol else "Value", fontsize=16, color='#8b949e', labelpad=15, fontweight='semibold')
+            ax.tick_params(axis='both', which='major', labelsize=14, colors='#8b949e')
+            plt.setp(ax.get_xticklabels(), rotation=20, ha='right')  # Rotate labels to prevent cluttering
+            ax.grid(True, color='#1f2937', linestyle='-', linewidth=1)
 
             plt.savefig(chart_png, bbox_inches='tight', facecolor=fig.get_facecolor())
             plt.close(fig)
 
-            # Convert chart PNG to 16:9 zooming MP4 clip. The zoom is spread
-            # across the ENTIRE shot (d = full duration frames, rate computed so
-            # the target is reached only on the last frame) — the old fixed
-            # d=125 capped the zoom after 5s and snapped back to 1.0, causing a
-            # visible repeat/jitter on data-chart shots. A gentle 1.06 max keeps
-            # axis labels/annotations legible while the chart still reads as alive.
-            dur_frames = max(int(req.duration * 25), 25)
-            z_target = 1.06
-            z_step = (z_target - 1.0) / dur_frames
+            # Convert chart PNG to 16:9 static looped video (no Ken Burns motion for charts)
             cmd = [
                 "ffmpeg", "-y", "-loop", "1", "-i", chart_png,
                 "-vf", ("scale=1920:1080:force_original_aspect_ratio=decrease,"
-                        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
-                        f"zoompan=z='min(zoom+{z_step:.6f},{z_target})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={dur_frames}:s=1920x1080,fps=25,format=yuv420p"),
+                        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p"),
                 "-t", str(req.duration), "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 req.output_mp4_path
             ]
@@ -646,50 +658,60 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
         # seconds — that's why only the intro looked animated). The pan likewise
         # traverses the full duration. Both give clear, smooth motion for every
         # static-image shot.
-        pan_n = max(nb_frames - 1, 1)
-        prog = f"min(on/{pan_n},1)"
-        z_target = float(getattr(req, "zoom_target", 1.5) or 1.5)
-        if z_target < 1.1:
-            z_target = 1.1
-        elif z_target > 1.6:
-            z_target = 1.6   # never over-crop: keeps >= ~62% of the image framed
-        z_step = (z_target - 1.0) / nb_frames   # tiny per-frame increment over full shot
-        direction = (req.direction or "left_to_right").lower()
-        cx = "iw/2-(iw/zoom/2)"
-        cy = "ih/2-(ih/zoom/2)"
-        if direction in ("right_to_left",):
-            xexpr = f"iw*(1-1/zoom)*(1-{prog})"
-            yexpr = cy
-        elif direction == "top_to_bottom":
-            xexpr = cx
-            yexpr = f"ih*(1-1/zoom)*{prog}"
-        elif direction == "bottom_to_top":
-            xexpr = cx
-            yexpr = f"ih*(1-1/zoom)*(1-{prog})"
-        else:  # left_to_right (default)
-            xexpr = f"iw*(1-1/zoom)*{prog}"
-            yexpr = cy
+        if getattr(req, "disable_motion", False):
+            zoompan = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+                       "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p")
+        else:
+            pan_n = max(nb_frames - 1, 1)
+            prog = f"min(on/{pan_n},1)"
+            z_target = float(getattr(req, "zoom_target", 1.5) or 1.5)
+            if z_target < 1.1:
+                z_target = 1.1
+            elif z_target > 1.6:
+                z_target = 1.6   # never over-crop: keeps >= ~62% of the image framed
+            z_step = (z_target - 1.0) / nb_frames   # tiny per-frame increment over full shot
+            direction = (req.direction or "left_to_right").lower()
+            cx = "iw/2-(iw/zoom/2)"
+            cy = "ih/2-(ih/zoom/2)"
+            if direction in ("right_to_left",):
+                xexpr = f"iw*(1-1/zoom)*(1-{prog})"
+                yexpr = cy
+            elif direction == "top_to_bottom":
+                xexpr = cx
+                yexpr = f"ih*(1-1/zoom)*{prog}"
+            elif direction == "bottom_to_top":
+                xexpr = cx
+                yexpr = f"ih*(1-1/zoom)*(1-{prog})"
+            else:  # left_to_right (default)
+                xexpr = f"iw*(1-1/zoom)*{prog}"
+                yexpr = cy
 
-        # A smooth Ken Burns needs a FINER SOURCE than the output. ffmpeg's zoompan
-        # steps in integer pixels; on a 1920-wide source the sub-pixel zoom/pan at
-        # the start of the shot rounds to whole pixels and causes visible shaking.
-        # Upscaling 8x before zoompan (then downscaling to the 1920x1080 output)
-        # makes the motion smooth — this is the "scale=8000:-1" smoothing trick
-        # (Bannerbear). Measured via optical-flow acceleration: old=0.131 jitter,
-        # 4x=0.045, 8x=0.026 (lower is smoother).
-        hi_w = 15360
-        hi_h = 8640
-        zoompan = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
-                   "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
-                   f"scale={hi_w}:{hi_h},"  # upsample to finer grid for smooth motion
-                   f"zoompan=z='min(zoom+{z_step:.6f},{z_target})':x='{xexpr}':y='{yexpr}':d={nb_frames}:s=1920x1080,fps=25,format=yuv420p")
+            # A smooth Ken Burns needs a FINER SOURCE than the output. ffmpeg's zoompan
+            # steps in integer pixels; on a 1920-wide source the sub-pixel zoom/pan at
+            # the start of the shot rounds to whole pixels and causes visible shaking.
+            # Upscaling 8x before zoompan (then downscaling to the 1920x1080 output)
+            # makes the motion smooth — this is the "scale=8000:-1" smoothing trick
+            # (Bannerbear). Measured via optical-flow acceleration: old=0.131 jitter,
+            # 4x=0.045, 8x=0.026 (lower is smoother).
+            hi_w = 15360
+            hi_h = 8640
+            zoompan = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+                       "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+                       f"scale={hi_w}:{hi_h},"  # upsample to finer grid for smooth motion
+                       f"zoompan=z='min(zoom+{z_step:.6f},{z_target})':x='{xexpr}':y='{yexpr}':d={nb_frames}:s=1920x1080,fps=25,format=yuv420p")
+
+        audio_filter = "apad"
+        delay_val = float(getattr(req, "audio_delay", 0.0) or 0.0)
+        if delay_val > 0:
+            delay_ms = int(delay_val * 1000)
+            audio_filter = f"adelay={delay_ms},apad"
 
         if has_audio:
             # Pad audio with silence up to `dur` and cap total length with -t, so the
             # clip is EXACTLY `dur` (narration fully audible + trailing hold). This
             # makes the concatenated timeline match ffprobe-measured durations exactly.
             cmd.extend([
-                "-filter_complex", f"[0:v]{zoompan}[v];[1:a]apad[a]",
+                "-filter_complex", f"[0:v]{zoompan}[v];[1:a]{audio_filter}[a]",
                 "-map", "[v]", "-map", "[a]",
                 "-t", str(dur),
                 "-c:v", "libx264",
@@ -751,8 +773,8 @@ def _probe_dur(path: str) -> float:
         return 0.0
 
 
-def _bgm_duck_filter(narration_stream: str, bgm_stream: str) -> str:
-    """Build the narration + sidechain-ducked-BGM mix filter.
+def _bgm_duck_filter(narration_stream: str, bgm_stream: str, total_duration: float = None) -> str:
+    """Build the narration + sidechain-ducked-BGM mix filter with smooth fade-in and fade-out.
 
     Music rides down under narration (sidechain keyed on the voice) and swells
     back in the pauses. Env-tunable without code edits:
@@ -761,15 +783,23 @@ def _bgm_duck_filter(narration_stream: str, bgm_stream: str) -> str:
       - BGM_SIDECHAIN_RATIO      sidechain compression ratio (default 12)
     Emits a stream named ``[a]`` ready for ffmpeg's ``-map [a]``.
     """
-    bgm_vol = os.getenv("BGM_VOLUME", "0.45")
+    bgm_vol = os.getenv("BGM_VOLUME", "0.15")
     sc_thresh = os.getenv("BGM_SIDECHAIN_THRESHOLD", "0.02")
     sc_ratio = os.getenv("BGM_SIDECHAIN_RATIO", "12")
+    
+    fade_str = ""
+    if total_duration and total_duration > 1.5:
+        st = max(0.0, total_duration - 1.5)
+        fade_str = f",afade=t=in:ss=0:d=0.3,afade=t=out:st={st:.3f}:d=1.5"
+    else:
+        fade_str = ",afade=t=in:ss=0:d=0.3"
+
     return (
         f"{bgm_stream}volume={bgm_vol}[bgm];"
         f"{narration_stream}highpass=f=80,equalizer=f=6000:width_type=q:width=2:g=-3,loudnorm=I=-16:TP=-1.5:LRA=7,asplit=2[voice][sc];"
         f"[bgm][sc]sidechaincompress=threshold={sc_thresh}:ratio={sc_ratio}:attack=120:release=1000[duck];"
         f"[voice][duck]amix=inputs=2:duration=first,alimiter=limit=0.9:level=false,"
-        f"loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+        f"loudnorm=I=-14:TP=-1.5:LRA=11{fade_str}[a]"
     )
 
 
@@ -833,10 +863,17 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
         parts.append(f"{cur}format=yuv420p[v]")
 
     # Voice + sidechain-ducked BGM, or narration only.
+    total_dur = prefix[-1] - (n - 1) * cf
     if has_bgm:
-        parts.append(_bgm_duck_filter(cura, f"[{n}:a]"))
+        parts.append(_bgm_duck_filter(cura, f"[{n}:a]", total_duration=total_dur))
     else:
-        parts.append(f"{cura}acopy[a]")
+        fade_str = ""
+        if total_dur and total_dur > 1.5:
+            st = max(0.0, total_dur - 1.5)
+            fade_str = f",afade=t=in:ss=0:d=0.3,afade=t=out:st={st:.3f}:d=1.5"
+        else:
+            fade_str = ",afade=t=in:ss=0:d=0.3"
+        parts.append(f"{cura}acopy{fade_str}[a]")
 
     cmd = ["ffmpeg", "-y"]
     for p in clip_paths:
@@ -891,6 +928,9 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
             sub_path_escaped = req.subtitle_path.replace(":", "\\:").replace("'", "'\\''")
             vf_filter += f",ass='{sub_path_escaped}'"
 
+        clip_paths = _read_concat_paths(req.concat_list_path)
+        total_dur = sum(_probe_dur(p) for p in clip_paths) if clip_paths else None
+
         has_bgm = False
         if req.bgm_path and os.path.exists(req.bgm_path) and os.path.getsize(req.bgm_path) > 1000:
             has_bgm = True
@@ -900,17 +940,24 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
                 "-stream_loop", "-1", "-i", req.bgm_path,
-                "-filter_complex", f"[0:v]{vf_filter}[v];" + _bgm_duck_filter("[0:a]", "[1:a]"),
+                "-filter_complex", f"[0:v]{vf_filter}[v];" + _bgm_duck_filter("[0:a]", "[1:a]", total_duration=total_dur),
                 "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",
                 req.output_video_path
             ]
         else:
+            fade_str = ""
+            if total_dur and total_dur > 1.5:
+                st = max(0.0, total_dur - 1.5)
+                fade_str = f"afade=t=in:ss=0:d=0.3,afade=t=out:st={st:.3f}:d=1.5"
+            else:
+                fade_str = "afade=t=in:ss=0:d=0.3"
             cmd = [
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
-                "-vf", vf_filter,
+                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]{fade_str}[a]",
+                "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",
                 req.output_video_path

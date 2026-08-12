@@ -288,6 +288,15 @@ placeholder audio (`src/agents/media_producer.py`):
   term register, synonym guard, chapter timestamps, fake-upload abort.
 - `bash -n run_production.sh cron_publish.sh`.
 
+### 1.12 Media Polish: Audios, Subtitles, and Modern Charts
+
+- **Subtitle Wrapping for Shorts Aspect Ratio:** Restricts subtitle text boundaries to the center 600px safe zone (`MarginL=660, MarginR=660` relative to `PlayResX=1920`) in both `mcp_servers/audio_edge/server.py` and `src/agents/media_producer.py` so they wrap properly and don't clip when center-cropped to vertical 9:16 Shorts.
+- **Intro Audio Delay & Subtitle Sync:** Prepends a 0.5s start delay (`adelay=500` filter) to the first shot's audio and shifts its subtitle timestamps by 0.5s in the master subtitle merge function to prevent an abrupt voice jump on play, keeping narration aligned with visuals.
+- **Audio Fade In & Out:** Applies a 0.3s audio fade-in and a 1.5s audio fade-out to the final output video mix (both BGM and narration streams) in `mcp_servers/media_cloud/server.py` to ensure smooth audio transitions at the start and end of the video.
+- **Modern Minimalist Matplotlib Charts:** Completely restyled visual data charts inside `mcp_servers/media_cloud/server.py` using a premium dark background (`#090d16`), clean annotations, a uniform sky-cyan (`#00e5ff`) color scheme (no cluttering rainbow colors), area glow fill under line trends, smart label prefix/suffix formatting, and 20-degree x-axis label rotation to prevent overlapping.
+- **Static Outro & Chart Frames:** Added `disable_motion` to `KenBurnsRequest` so the final outro screen and all dynamic data charts render as high-quality static looped video clips instead of applying the Ken Burns pan-and-zoom effect, improving readability of text and graphs.
+- **TTS Decimal Pronunciation:** Expanded decimal points in numbers (e.g. `3.5` -> `3 point 5`) inside `sanitize_tts_text` before passing text to Kokoro TTS to ensure natural fluid speech.
+
 ---
 
 ## 2. PLANNED — NEXT PASS

@@ -314,7 +314,7 @@ PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Montserrat,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,2,2,10,10,50,1
+Style: Default,Montserrat,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,2,2,660,660,50,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -337,7 +337,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         s = sec % 60
         return f"{h}:{m:02d}:{s:05.2f}"
 
-    for ass_path, shot_dur in zip(ass_paths, shot_durations):
+    for idx, (ass_path, shot_dur) in enumerate(zip(ass_paths, shot_durations)):
         if os.path.exists(ass_path):
             with open(ass_path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
@@ -347,6 +347,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     if len(parts) == 10:
                         t_start = parse_ass_time(parts[1]) + current_offset
                         t_end = parse_ass_time(parts[2]) + current_offset
+                        if idx == 0:
+                            t_start += 0.5
+                            t_end += 0.5
                         parts[1] = format_ass_time(t_start)
                         parts[2] = format_ass_time(t_end)
                         dialogue_lines.append(",".join(parts))
@@ -782,6 +785,8 @@ class MediaProducerAgent:
                     )
                 await align_subtitles_whisper(WhisperRequest(audio_path=wav_path, output_ass_path=ass_path, original_text=tts_narration))
 
+
+
             # Gate 2 Early Validation: WAV must exist and be > 1KB before proceeding
             if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1000:
                 raise RuntimeError(
@@ -824,6 +829,8 @@ class MediaProducerAgent:
                       f"falling back to estimate {audio_dur:.1f}s")
             # Final shot timeline length = spoken audio + trailing hold (never cuts narration).
             shot_timeline_dur = max(audio_dur + tail, MIN_SHOT_DUR)
+            if shot.shot_id == 1:
+                shot_timeline_dur += 0.5
 
             # Stage 8 Quality-by-Design: Alternate Ken Burns pan direction for optical flow continuity
             ken_burns_direction = "left_to_right" if shot.shot_id % 2 == 1 else "right_to_left"
@@ -1071,7 +1078,9 @@ class MediaProducerAgent:
                     audio_path=wav_path,
                     duration=shot_timeline_dur,
                     output_mp4_path=mp4_path,
-                    direction=ken_burns_direction  # optical flow continuity
+                    direction=ken_burns_direction,  # optical flow continuity
+                    disable_motion=is_last_shot,     # disable motion on outro!
+                    audio_delay=0.5 if shot.shot_id == 1 else 0.0
                 ))
 
             # Mix narration audio with the specialized visual MP4 if applicable.
