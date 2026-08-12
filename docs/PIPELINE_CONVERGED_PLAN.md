@@ -230,6 +230,7 @@ placeholder audio (`src/agents/media_producer.py`):
 - **Resume safety** — the run keeps its `SCRIPT_APPROVED` checkpoint, so once the Pi is back you
   can `--resume` the same pipeline_id to regenerate media; only a *real* local Kokoro
   (`kokoro_onnx`) fallback is ever allowed to continue offline.
+- **Dynamic Voice Rotation** — To break vocal monotony and improve average view percentage (AVP), the pipeline dynamically rotates Kokoro TTS voices across the script's 6 acts. For global/US markets, it assigns a primary female narrator (`af_bella` for Act 1/6), a deep, serious male co-host (`am_adam` for Act 2/5), a technical analyst (`am_michael` for Act 3), and a bright female analyst (`af_nicole` for Act 4). For the India market, it rotates between a primary female Indian voice (`af_sarah`) and serious male analytical segments (`am_adam`).
 
 ### 1.9 Ops & reliability
 
