@@ -1204,6 +1204,68 @@ def case_revenue_goal_alignment():
     return ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
 
 
+def case_synthetic_topic_deduplication():
+    from src.agents.fact_retriever import FactRetrieverAgent
+    from src.engine.topic_deduplicator import topic_deduplicator
+
+    # Set up mock history in topic_deduplicator
+    original_history = topic_deduplicator.load_published_history()
+
+    test_headline = "Cursor vs Windsurf for building AI agents in 2026"
+    topic_deduplicator.save_published_history([
+        {
+            "headline": test_headline,
+            "summary": "A detailed comparison of Cursor and Windsurf.",
+            "keywords": ["cursor", "windsurf"],
+            "published_at": "2026-08-12T18:24:00Z"
+        }
+    ])
+
+    try:
+        agent = FactRetrieverAgent()
+
+        # Candidate 1: Identical to the published one (should be gated / culled)
+        spec_dup = {
+            "headline": "Cursor vs Windsurf for building AI agents in 2026",
+            "summary": "A detailed comparison of Cursor and Windsurf.",
+            "keywords": ["cursor", "windsurf"],
+            "demand_query": "cursor vs windsurf"
+        }
+
+        # Candidate 2: Completely novel topic (should pass)
+        spec_novel = {
+            "headline": "How to build local AI agents using Ollama and Python",
+            "summary": "A guide on orchestrating local models.",
+            "keywords": ["ollama", "python"],
+            "demand_query": "local ai agents ollama"
+        }
+
+        # Mock precise_topic_demand so both return measurable results
+        from src.engine.youtube_topic_demand import youtube_topic_demand
+        orig_demand = youtube_topic_demand.precise_topic_demand
+        youtube_topic_demand.precise_topic_demand = lambda q: {
+            "competitor_30d_avg_views": 10000,
+            "video_count": 5,
+            "views_per_hour": 150
+        }
+
+        try:
+            kept = agent._measure_and_gate_synthetic([spec_dup, spec_novel])
+
+            ok_dup_culled = not any(c.headline == test_headline for c in kept)
+            ok_novel_kept = any(c.headline == "How to build local AI agents using Ollama and Python" for c in kept)
+
+            passed = ok_dup_culled and ok_novel_kept
+            record("SYNTHETIC_TOPIC_DEDUPLICATION", passed,
+                   f"dup_culled={ok_dup_culled}, novel_kept={ok_novel_kept}, kept_count={len(kept)}")
+            return passed
+        finally:
+            youtube_topic_demand.precise_topic_demand = orig_demand
+    finally:
+        # Restore original history
+        topic_deduplicator.save_published_history(original_history)
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1225,6 +1287,7 @@ def main():
     case_storability_gate()
     case_region_revenue_dominates()
     case_revenue_goal_alignment()
+    case_synthetic_topic_deduplication()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

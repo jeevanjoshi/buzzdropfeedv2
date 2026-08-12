@@ -217,6 +217,14 @@ class FactRetrieverAgent:
             except Exception as e:
                 print(f"[FactRetriever] Synthetic candidate skipped ({e}).")
                 continue
+
+            # ── Persistent Topic Deduplication Gate (Cross-Run Check) ────────
+            from src.engine.topic_deduplicator import topic_deduplicator
+            is_dup, sim_score, matched_title = topic_deduplicator.check_topic_similarity(cand.headline, cand.summary)
+            if is_dup:
+                print(f"[FactRetriever] Synthetic topic CULLED (duplicate/similar to '{matched_title}', sim={sim_score:.4f}): '{cand.headline[:80]}'")
+                continue
+
             demand_query = getattr(cand, "demand_query", "") or cand.headline[:120]
             demand = None
             try:
@@ -422,6 +430,14 @@ class FactRetrieverAgent:
         # so an underserved-but-strong topic can surface first. Silent
         # fall-through on quota/API failure keeps the TOPSIS ordering.
         ranked_candidates = self._apply_precise_shortlist(ranked_candidates)
+
+        # In the GROWTH phase, prioritize synthesized evergreen topics to build a
+        # stable, long-term search-driven subscriber base (per the "one evergreen
+        # video a day" strategy), rather than short-lived current affairs/news.
+        if channel_phase == "GROWTH":
+            evergreens = [c for c in ranked_candidates if str(getattr(c, "candidate_id", "")).startswith("narrow-synth-")]
+            others = [c for c in ranked_candidates if not str(getattr(c, "candidate_id", "")).startswith("narrow-synth-")]
+            ranked_candidates = evergreens + others
 
         # Apply pre-filtering using Audience and Revenue Gates
         # High-RPM enforcement: if any genuinely-classified (non-general, non-blocked)

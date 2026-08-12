@@ -279,11 +279,12 @@ placeholder audio (`src/agents/media_producer.py`):
 
 ### 1.11 Validation
 
-- `python run_tests.py` — **19 hermetic cases** incl. `STORABILITY_GATE` (probe/scandal
+- `python run_tests.py` — **20 hermetic cases** incl. `STORABILITY_GATE` (probe/scandal
   documentary, press-release blip culled, evergreen pass-through, all-culled→best-warning),
   `REGION_REVENUE_DOMINATES` (rba→au, sensex→india, meta→us; ALPHA>BETA>GAMMA; revenue is the
   highest TOPSIS weight in REVENUE & GROWTH), `REVENUE_GOAL_ALIGNMENT` (monthly=$2000, daily=2,
-  gate=$33.33, slots 11:20/13:50), GROWTH-path Shorts publishing, surgical revision loop,
+  gate=$33.33, slots 11:20/13:50), `SYNTHETIC_TOPIC_DEDUPLICATION` (ensuring synthesized tool-topics
+  undergo full similarity gates), GROWTH-path Shorts publishing, surgical revision loop,
   stale-REVISE rejection, outline-first, routing, A2A alignment, SEO source filter, junk scrub,
   term register, synonym guard, chapter timestamps, fake-upload abort.
 - `bash -n run_production.sh cron_publish.sh`.
@@ -296,6 +297,11 @@ placeholder audio (`src/agents/media_producer.py`):
 - **Modern Minimalist Matplotlib Charts:** Completely restyled visual data charts inside `mcp_servers/media_cloud/server.py` using a premium dark background (`#090d16`), clean annotations, a uniform sky-cyan (`#00e5ff`) color scheme (no cluttering rainbow colors), area glow fill under line trends, smart label prefix/suffix formatting, and 20-degree x-axis label rotation to prevent overlapping.
 - **Static Outro & Chart Frames:** Added `disable_motion` to `KenBurnsRequest` so the final outro screen and all dynamic data charts render as high-quality static looped video clips instead of applying the Ken Burns pan-and-zoom effect, improving readability of text and graphs.
 - **TTS Decimal Pronunciation:** Expanded decimal points in numbers (e.g. `3.5` -> `3 point 5`) inside `sanitize_tts_text` before passing text to Kokoro TTS to ensure natural fluid speech.
+
+### 1.13 Semantic Topic Deduplication
+
+- **High-Quality Semantic Novelty Checks:** `calculate_semantic_novelty_index` in `src/engine/text_embeddings.py` utilizes the active MiniLM SentenceTransformer semantic embedding backend when `USE_SEMANTIC_GATES=1` is configured. This provides a deep semantic cosine-similarity comparison against past published topics, falling back gracefully to a stop-word-filtered TF-IDF vectorizer when the neural backend is unavailable.
+- **Synthesized Topic Gating:** The topic deduplication similarity check is applied directly inside `_measure_and_gate_synthetic` within `src/agents/fact_retriever.py` before querying the YouTube API for demand stats. This prevents synthesized evergreen tool-topics from bypassing the deduplication checks and ensures they are culled if they are semantically similar to any topic in `published_topics.json`.
 
 ---
 

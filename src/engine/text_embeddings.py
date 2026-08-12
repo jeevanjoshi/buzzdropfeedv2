@@ -192,6 +192,15 @@ def calculate_semantic_novelty_index(
     if not past_published_texts:
         return 1.0  # Completely novel
 
+    if semantic_embedder.available:
+        try:
+            max_sim = semantic_max_similarity(candidate_text, past_published_texts)
+            if max_sim is not None:
+                idi_score = 1.0 - max_sim
+                return float(np.round(max(0.0, idi_score), 4))
+        except Exception:
+            pass
+
     try:
         corpus = [candidate_text] + past_published_texts
         vectorizer = TfidfVectorizer(stop_words='english')

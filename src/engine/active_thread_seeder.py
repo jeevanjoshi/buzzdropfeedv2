@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from src.schemas.state import GlobalState
 from src.engine.llm_client import LLMClient
@@ -161,7 +162,7 @@ class ActiveThreadSeederEngine:
         candidates = []
         for query in search_queries:
             logger.info(f"[ActiveThreadSeeder] Searching Reddit for '{query}'...")
-            found = reddit_seeder.search_active_threads(query, limit=5)
+            found = await asyncio.to_thread(reddit_seeder.search_active_threads, query, limit=5)
             if found:
                 candidates.extend(found)
                 # Break early if we have found threads
@@ -251,7 +252,7 @@ class ActiveThreadSeederEngine:
         logger.info(f"[ActiveThreadSeeder] LLM generated reply (Reasoning: '{reasoning}'):\n{comment_text}")
 
         # 5. Post reply
-        success = self._post_reply(target_thread, comment_text)
+        success = await asyncio.to_thread(self._post_reply, target_thread, comment_text)
         if success:
             logger.info(f"[ActiveThreadSeeder] Active thread comment successfully posted!")
         else:
