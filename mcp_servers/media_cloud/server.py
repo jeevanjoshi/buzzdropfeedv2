@@ -534,8 +534,7 @@ async def generate_dynamic_chart(req: ChartRequest):
         os.makedirs(os.path.dirname(os.path.abspath(req.output_mp4_path)), exist_ok=True)
         chart_png = req.output_mp4_path.replace(".mp4", "_chart.png")
 
-        current_month_year = datetime.datetime.now(datetime.timezone.utc).strftime("%B %Y").upper()
-        chart_title = f"{req.title.upper()} ({current_month_year})"
+        chart_title = req.title.upper()
 
         try:
             import matplotlib.pyplot as plt
@@ -787,19 +786,19 @@ def _bgm_duck_filter(narration_stream: str, bgm_stream: str, total_duration: flo
     sc_thresh = os.getenv("BGM_SIDECHAIN_THRESHOLD", "0.02")
     sc_ratio = os.getenv("BGM_SIDECHAIN_RATIO", "12")
     
-    fade_str = ""
+    bgm_fade = ""
     if total_duration and total_duration > 1.5:
         st = max(0.0, total_duration - 1.5)
-        fade_str = f",afade=t=in:ss=0:d=0.3,afade=t=out:st={st:.3f}:d=1.5"
+        bgm_fade = f",afade=t=in:ss=0:d=0.3,afade=t=out:st={st:.3f}:d=1.5"
     else:
-        fade_str = ",afade=t=in:ss=0:d=0.3"
+        bgm_fade = ",afade=t=in:ss=0:d=0.3"
 
     return (
-        f"{bgm_stream}volume={bgm_vol}[bgm];"
+        f"{bgm_stream}volume={bgm_vol}{bgm_fade}[bgm];"
         f"{narration_stream}highpass=f=80,equalizer=f=6000:width_type=q:width=2:g=-3,loudnorm=I=-16:TP=-1.5:LRA=7,asplit=2[voice][sc];"
         f"[bgm][sc]sidechaincompress=threshold={sc_thresh}:ratio={sc_ratio}:attack=120:release=1000[duck];"
         f"[voice][duck]amix=inputs=2:duration=first,alimiter=limit=0.9:level=false,"
-        f"loudnorm=I=-14:TP=-1.5:LRA=11{fade_str}[a]"
+        f"loudnorm=I=-14:TP=-1.5:LRA=11[a]"
     )
 
 
@@ -852,7 +851,7 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
         )
     cura = "[a0]"
     for i in range(1, n):
-        parts.append(f"{cura}[a{i}]acrossfade=d={cf:.3f}:c1=tri:c2=tri[ax{i}]")
+        parts.append(f"{cura}[a{i}]acrossfade=d={cf:.3f}:c1=nofade:c2=nofade[ax{i}]")
         cura = f"[ax{i}]"
 
     # Burn subtitles on the final composited video stream.
@@ -867,13 +866,7 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
     if has_bgm:
         parts.append(_bgm_duck_filter(cura, f"[{n}:a]", total_duration=total_dur))
     else:
-        fade_str = ""
-        if total_dur and total_dur > 1.5:
-            st = max(0.0, total_dur - 1.5)
-            fade_str = f",afade=t=in:ss=0:d=0.3,afade=t=out:st={st:.3f}:d=1.5"
-        else:
-            fade_str = ",afade=t=in:ss=0:d=0.3"
-        parts.append(f"{cura}acopy{fade_str}[a]")
+        parts.append(f"{cura}acopy[a]")
 
     cmd = ["ffmpeg", "-y"]
     for p in clip_paths:
@@ -947,16 +940,10 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
                 req.output_video_path
             ]
         else:
-            fade_str = ""
-            if total_dur and total_dur > 1.5:
-                st = max(0.0, total_dur - 1.5)
-                fade_str = f"afade=t=in:ss=0:d=0.3,afade=t=out:st={st:.3f}:d=1.5"
-            else:
-                fade_str = "afade=t=in:ss=0:d=0.3"
             cmd = [
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
-                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]{fade_str}[a]",
+                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]acopy[a]",
                 "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",

@@ -685,25 +685,6 @@ class MediaProducerAgent:
             else:
                 tts_speed = 1.0
 
-            # Voice configuration per act (voice variety/documentary style)
-            region_val = state.selected_topic.region if (state.selected_topic and hasattr(state.selected_topic, 'region')) else "all"
-            if region_val == "india":
-                # For India: Use af_sarah as primary, but vary with am_adam for serious analysis acts
-                if shot.act_index in (2, 3, 5):
-                    tts_voice = "am_adam"
-                else:
-                    tts_voice = "af_sarah"
-            else:
-                # For Global/US:
-                if shot.act_index in (1, 6):
-                    tts_voice = "af_bella"     # Female US - primary host
-                elif shot.act_index in (2, 5):
-                    tts_voice = "am_adam"      # Male US - serious/analytical co-host
-                elif shot.act_index == 3:
-                    tts_voice = "am_michael"   # Male US - technical analyst
-                else:
-                    tts_voice = "af_nicole"    # Female US - bright/clear analyst
-
             # Paths
             wav_path = os.path.join(audio_dir, f"{shot_key}.wav")
             ass_path = os.path.join(sub_dir, f"{shot_key}.ass")
@@ -716,11 +697,11 @@ class MediaProducerAgent:
             if audio_edge_url:
                 try:
                     import aiohttp
+                    region_val = state.selected_topic.region if (state.selected_topic and hasattr(state.selected_topic, 'region')) else "all"
                     async with aiohttp.ClientSession() as session:
                         # 1. Synthesize TTS remotely
                         async with session.post(f"{audio_edge_url}/tools/synthesize_tts", json={
                             "text": tts_narration,
-                            "voice": tts_voice,
                             "output_path": wav_path,
                             "region": region_val,
                             "speed": tts_speed
@@ -775,7 +756,7 @@ class MediaProducerAgent:
                     print(f"Edge Audio Service Exception (falling back to local synthesis): {e}")
 
             if not audio_generated:
-                tts_result = await synthesize_tts(TTSRequest(text=tts_narration, voice=tts_voice, output_path=wav_path, speed=tts_speed))
+                tts_result = await synthesize_tts(TTSRequest(text=tts_narration, output_path=wav_path, speed=tts_speed))
                 engine = (tts_result or {}).get("engine") if isinstance(tts_result, dict) else None
                 if engine == "synthetic_wav_fallback":
                     raise RuntimeError(
@@ -1045,27 +1026,21 @@ class MediaProducerAgent:
                         if img is not None:
                             h, w, c = img.shape
                             overlay = img.copy()
-                            cv2.rectangle(overlay, (0, h - 220), (w, h), (11, 14, 20), -1)
+                            cv2.rectangle(overlay, (0, h - 150), (w, h), (11, 14, 20), -1)
                             alpha = 0.75
                             cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
                             
                             text_1 = "LIKE & SUBSCRIBE TO THE CHANNEL"
-                            text_2 = "Drop your thoughts in the comments below!"
                             
                             font = cv2.FONT_HERSHEY_SIMPLEX
                             font_scale_1 = 1.6
-                            font_scale_2 = 1.1
                             thickness_1 = 4
-                            thickness_2 = 3
                             
                             size_1 = cv2.getTextSize(text_1, font, font_scale_1, thickness_1)[0]
-                            size_2 = cv2.getTextSize(text_2, font, font_scale_2, thickness_2)[0]
                             
                             x_1 = int((w - size_1[0]) / 2)
-                            x_2 = int((w - size_2[0]) / 2)
                             
-                            cv2.putText(img, text_1, (x_1, h - 130), font, font_scale_1, (0, 255, 204), thickness_1, cv2.LINE_AA)
-                            cv2.putText(img, text_2, (x_2, h - 60), font, font_scale_2, (255, 255, 255), thickness_2, cv2.LINE_AA)
+                            cv2.putText(img, text_1, (x_1, h - 65), font, font_scale_1, (0, 255, 204), thickness_1, cv2.LINE_AA)
                             
                             cv2.imwrite(img_path, img)
                             print(f"[MediaProducer] Outro static text overlay successfully applied to {img_path}")

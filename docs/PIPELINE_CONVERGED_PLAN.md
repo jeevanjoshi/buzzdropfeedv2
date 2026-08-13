@@ -230,7 +230,9 @@ placeholder audio (`src/agents/media_producer.py`):
 - **Resume safety** — the run keeps its `SCRIPT_APPROVED` checkpoint, so once the Pi is back you
   can `--resume` the same pipeline_id to regenerate media; only a *real* local Kokoro
   (`kokoro_onnx`) fallback is ever allowed to continue offline.
-- **Dynamic Voice Rotation** — To break vocal monotony and improve average view percentage (AVP), the pipeline dynamically rotates Kokoro TTS voices across the script's 6 acts. For global/US markets, it assigns a primary female narrator (`af_bella` for Act 1/6), a deep, serious male co-host (`am_adam` for Act 2/5), a technical analyst (`am_michael` for Act 3), and a bright female analyst (`af_nicole` for Act 4). For the India market, it rotates between a primary female Indian voice (`af_sarah`) and serious male analytical segments (`am_adam`).
+- **Narrator Voice Integrity & Transitions** — `acrossfade` curves at shot/act boundaries use `nofade` to prevent audio volume dips from cutting off the start of the next shot's narration. Fades (0.3s in, 1.5s out) are applied only on the background music (`bgm_stream`) rather than the final mixed master to keep the voice clear from start to end.
+- **Evergreen Chart Titles** — Dynamic chart title generation omits the dynamic month/year date context to keep the charts evergreen and always relevant.
+- **Streamlined Outro Overlay** — The final frame outro visual overlay renders only "LIKE & SUBSCRIBE TO THE CHANNEL" on a smaller banner, omitting the comments CTA which is already delivered in the voice track.
 
 ### 1.9 Ops & reliability
 
