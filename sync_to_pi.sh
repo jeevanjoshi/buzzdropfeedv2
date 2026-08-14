@@ -33,9 +33,20 @@ rsync -avz --delete \
     --exclude 'auth_url.txt' \
     --exclude '.hf_cache/' \
     --exclude '.huggingface/' \
+    --exclude '.mypy_cache/' \
+    --exclude '.ruff_cache/' \
     --exclude 'sentence_transformers/' \
     --exclude 'rust_dashboard/target/' \
     -e ssh \
     ./ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/"
 
 echo "Sync completed successfully!"
+
+# Rebuild Rust dashboard only when explicitly requested (to avoid killing dashboard during live runs)
+if [[ " $* " == *" --dashboard "* ]] || [[ " $* " == *" --build "* ]] || [ "${CSVG_BUILD_DASHBOARD:-0}" = "1" ]; then
+    echo "Rebuilding Rust dashboard and restarting services on Raspberry Pi 5..."
+    ssh -o StrictHostKeyChecking=no "${PI5_USER}@${PI5_IP}" \
+        'export PATH="$HOME/.cargo/bin:$PATH"; cd /home/jeevanjoshi/buzzdropfeedv2/rust_dashboard && cargo build --release && sudo systemctl restart csvg_rust_dashboard.service' 2>/dev/null && \
+        echo "✓ Rust dashboard recompiled and csvg_rust_dashboard.service restarted on Pi." || \
+        echo "Notice: Rust dashboard build skipped."
+fi

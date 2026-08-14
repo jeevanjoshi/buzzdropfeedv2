@@ -168,6 +168,7 @@
   .seg { flex:1; height:5px; border-radius:3px; background:rgba(255,255,255,.06); }
   .seg.filled { background:linear-gradient(90deg,#3b82f6,#8b5cf6,#22d3ee); }
   .seg.current { animation:pulse 1.6s infinite; }
+  .seg.failed { background: #ef4444 !important; box-shadow: 0 0 8px rgba(239, 68, 68, 0.6); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
   /* Grid & Metric Cards */
@@ -423,12 +424,64 @@ function paintStatus(){
 }
 
 function stageTracker(stage){
+  const isRunning = DATA.status && DATA.status.is_running;
+  const latestRun = (DATA.status && DATA.status.latest_run) || (DATA.budget && DATA.budget.latest) || {};
+  const isCompleted = stage === 'PUBLISHED_SUCCESS' || stage === 'DONE';
+  const isFailed = !isRunning && !isCompleted && (latestRun.status === 'failed' || (stage && stage !== 'NOT_STARTED' && stage !== 'INITIALIZATION'));
+
   const idx = STAGE_IDX[stage] ?? -1;
-  const color = stage ? (stage.startsWith('PUBLISHED') ? '#34d399' : stage.startsWith('MEDIA')||stage.startsWith('QUALITY') ? '#a78bfa' : '#60a5fa') : '#fbbf24';
-  let segs = STAGES.slice(1).map((s,i) => '<div class="seg'+(i<=idx?' filled':'')+(i===idx?' current':'')+'"></div>').join('');
-  return `<div class="stage"><span class="lbl">Pipeline Stage</span>
-    <span class="badge" style="color:${color};border-color:${color}55;background:${color}1c">${esc(stage||'NOT_STARTED')}</span>
-    <span class="hb" id="hb">heartbeat: —</span><div class="prog">${segs}</div></div>`;
+  let color = '#fbbf24';
+  let badgeText = esc(stage || 'NOT_STARTED');
+  let badgeIcon = '';
+
+  if (isCompleted) {
+    color = '#34d399';
+    badgeText = 'PUBLISHED_SUCCESS';
+    badgeIcon = '✓ ';
+  } else if (isFailed) {
+    color = '#f87171';
+    badgeText = `FAILED AT: ${esc(stage || 'UNKNOWN')}`;
+    badgeIcon = '⚠️ ';
+  } else if (isRunning) {
+    color = stage ? (stage.startsWith('PUBLISHED') ? '#34d399' : stage.startsWith('MEDIA')||stage.startsWith('QUALITY') ? '#a78bfa' : '#60a5fa') : '#fbbf24';
+    badgeText = `${esc(stage || 'INITIALIZATION')} (In Progress...)`;
+    badgeIcon = '⏳ ';
+  }
+
+  let segs = STAGES.slice(1).map((s,i) => {
+    let cls = 'seg';
+    if (i <= idx) cls += ' filled';
+    if (i === idx) {
+      if (isFailed) cls += ' failed';
+      else if (isRunning) cls += ' current';
+    }
+    return `<div class="${cls}"></div>`;
+  }).join('');
+
+  const failBanner = isFailed ? `
+    <div style="border: 1px solid rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.08); padding: 12px 16px; margin-top: 14px; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; width: 100%;">
+      <div style="display:flex; align-items:center; gap: 10px;">
+        <span style="font-size: 20px;">⚠️</span>
+        <div>
+          <div style="font-weight: 700; color: #f87171; font-size: 13px;">Last Pipeline Run Halted at Stage: ${esc(stage)}</div>
+          <div style="color: var(--muted); font-size: 11.5px; margin-top: 2px;">The run was stopped or hit an error. Click <b>Resume Selected</b> to resume from this checkpoint.</div>
+        </div>
+      </div>
+      <button class="btn btn-purple" onclick="$('#btn-resume-run')?.click()" style="padding: 6px 14px; font-size: 12px; white-space: nowrap;">${ICONS.resume} Quick Resume</button>
+    </div>
+  ` : '';
+
+  return `<div class="stage">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; width:100%;">
+      <div>
+        <span class="lbl" style="margin-right:8px;">Pipeline Stage</span>
+        <span class="badge" style="color:${color};border-color:${color}55;background:${color}1c; font-weight:600;">${badgeIcon}${badgeText}</span>
+      </div>
+      <span class="hb" id="hb" style="margin:0;">heartbeat: —</span>
+    </div>
+    <div class="prog" style="margin-top:10px;">${segs}</div>
+    ${failBanner}
+  </div>`;
 }
 
 function statCards(){
@@ -489,7 +542,7 @@ function budgetPanel(){
   <div class="panel"><h3>Recent per-run budget</h3>
     <div class="table-wrapper">
       <table><thead><tr>
-        <th>Run / status</th><th class="r">Est. $</th><th class="r">YT units</th><th>Stage</th><th></th>
+        <th>Run / status</th><th class="r">Est. $</th><th class="r">YT units</th><th>Stage</th><th>Categories</th>
       </tr></thead><tbody>${rows}</tbody></table>
     </div>
   </div>`;
@@ -524,19 +577,33 @@ function runRow(r){
     : st==='in_progress' ? '<span class="tag warn">running</span>'
     : '<span class="tag">'+esc(r.status||'—')+'</span>';
     
-  const cats = r.categories ? Object.entries(r.categories).map(([k,c]) => `
+  const catEntries = r.categories ? Object.entries(r.categories) : [];
+  const catBadges = catEntries.filter(([_, c]) => (c.est_usd || 0) > 0 || (c.yt_units || 0) > 0).map(([k, c]) => {
+    const cost = (c.est_usd || 0) > 0 ? money(c.est_usd) : '';
+    const yt = (c.yt_units || 0) > 0 ? `${num(c.yt_units, 0)}u` : '';
+    const label = [cost, yt].filter(Boolean).join(' · ');
+    return `<span style="display:inline-block; font-size:10px; font-weight:600; padding:1px 5px; border-radius:4px; margin:1px 3px 1px 0; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); color:var(--text);">${esc(k)}: <span style="color:var(--cyan);">${label}</span></span>`;
+  }).join('');
+
+  const catDetails = catEntries.map(([k,c]) => `
     <div style="display:flex; justify-content:space-between; gap:10px; border-bottom:1px solid rgba(255,255,255,0.03); padding:4px 0;">
       <span style="color:var(--text); font-weight:600;">${esc(k)}</span>
-      <span style="color:var(--muted);">${money(c.est_usd||0)} · ${num(c.yt_units||0,0)}u</span>
+      <span style="color:var(--muted);">${money(c.est_usd||0)} · ${num(c.yt_units||0,0)}u · ${num(c.calls||0,0)} calls</span>
     </div>
-  `).join('') : '';
+  `).join('');
   
+  const catCell = catEntries.length ? `
+    <div>
+      <div>${catBadges || '<span class="muted" style="font-size:11px;">$0 (stub)</span>'}</div>
+      <details style="font-size:11px; margin-top:3px;"><summary style="cursor:pointer; color:var(--cyan); font-weight:600;">breakdown</summary><div style="margin-top:6px; background:rgba(0,0,0,0.25); padding:6px 10px; border-radius:6px; border:1px solid var(--border);">${catDetails}</div></details>
+    </div>` : '<span class="muted">—</span>';
+
   return `<tr>
     <td><div class="mono">${esc(r.pipeline_id||'—')}</div><div class="meta muted">${esc(r.started_at||r.finished_at||'')}</div></td>
     <td class="r">${money((r.totals&&r.totals.est_usd)||0)}</td>
     <td class="r" title="est $/unit">${num((r.totals&&r.totals.yt_units)||0,0)}</td>
     <td>${esc((stage||'').slice(0,32))} ${sttag}</td>
-    <td style="max-width:200px;">${cats?'<details style="font-size:11px;"><summary style="cursor:pointer; color:var(--cyan); font-weight:600;">categories</summary><div style="margin-top:6px; background:rgba(0,0,0,0.25); padding:6px 10px; border-radius:6px; border:1px solid var(--border);">${cats}</div></details>':''}</td>
+    <td style="max-width:240px;">${catCell}</td>
   </tr>`;
 }
 
@@ -617,7 +684,12 @@ function liveLogs(){
 
 function seedingPanel(){
   const s = DATA.seeding;
-  
+  const isSeederRunning = (DATA.seeding && DATA.seeding.is_running) || false;
+  const triggerDisabled = isSeederRunning ? 'disabled style="opacity: 0.45; cursor: not-allowed;"' : '';
+  const stopSeederStyle = isSeederRunning 
+    ? 'padding:10px 20px; background: #ef4444; color: #fff; border: 1px solid #dc2626; cursor: pointer; box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);' 
+    : 'padding:10px 20px; background: rgba(239, 68, 68, 0.08); color: #888; border: 1px solid rgba(255, 255, 255, 0.05); opacity: 0.35; cursor: not-allowed;';
+
   const triggerHtml = `
     <div class="panel" style="margin-bottom: 20px;">
       <h3>${ICONS.bolt} Trigger Reddit Seeding Campaign</h3>
@@ -635,8 +707,8 @@ function seedingPanel(){
         </div>
 
         <div class="btn-group">
-          <button class="btn btn-primary" id="btn-trigger-seeding" style="padding:10px 20px;">${ICONS.play} Run Link Seeder</button>
-          <button class="btn btn-danger" id="btn-stop-seeding" style="padding:10px 20px; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4);">${ICONS.stop} Stop Seeder</button>
+          <button class="btn btn-primary" id="btn-trigger-seeding" ${triggerDisabled} style="padding:10px 20px;">${ICONS.play} Run Link Seeder</button>
+          <button class="btn btn-danger" id="btn-stop-seeding" ${!isSeederRunning ? 'disabled' : ''} style="${stopSeederStyle}">${ICONS.stop} Stop Seeder</button>
         </div>
       </div>
       <div id="seed-feedback" style="margin-top: 12px; font-size: 12.5px; font-family: var(--mono); min-height: 18px;"></div>
@@ -741,6 +813,14 @@ function controlPanel(){
   const isRunning = DATA.status && DATA.status.is_running;
   const disabled = isRunning ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : '';
   
+  const failedRuns = (DATA.runs || []).filter(r => r.execution_stage !== 'PUBLISHED_SUCCESS' && r.execution_stage !== 'DONE');
+  const hasFailedRuns = !isRunning && failedRuns.length > 0;
+  const resumeDisabled = !hasFailedRuns ? 'disabled style="opacity: 0.35; cursor: not-allowed;" title="' + (isRunning ? 'Pipeline is running' : 'No failed runs found to resume') + '"' : '';
+  
+  const stopStyle = isRunning 
+    ? 'background: #ef4444; color: #fff; border: 1px solid #dc2626; cursor: pointer; box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);' 
+    : 'background: rgba(239, 68, 68, 0.08); color: #888; border: 1px solid rgba(255, 255, 255, 0.05); opacity: 0.35; cursor: not-allowed;';
+
   return `
   <div class="panel" style="margin-bottom: 20px;">
     <h3>${ICONS.activity} OCI Pipeline Control Center</h3>
@@ -773,15 +853,15 @@ function controlPanel(){
 
       <div class="form-group" style="flex:1; min-width:180px;">
         <label class="lbl">Resume Target</label>
-        <select id="ctrl-resume-select" ${disabled} style="padding:10px 12px; font-size:13px;">
-          <option value="">Last Failed Run (Auto)</option>
+        <select id="ctrl-resume-select" ${resumeDisabled} style="padding:10px 12px; font-size:13px;">
+          <option value="">${hasFailedRuns ? 'Last Failed Run (Auto)' : 'No Failed Runs'}</option>
         </select>
       </div>
 
       <div class="btn-group">
         <button class="btn btn-primary" id="btn-start-run" ${disabled}>${ICONS.play} Start New Run</button>
-        <button class="btn btn-purple" id="btn-resume-run" ${disabled}>${ICONS.resume} Resume Selected</button>
-        <button class="btn btn-danger" id="btn-stop-run" ${!isRunning ? 'disabled' : ''} style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4);">${ICONS.stop} Stop Pipeline</button>
+        <button class="btn btn-purple" id="btn-resume-run" ${resumeDisabled}>${ICONS.resume} Resume Selected</button>
+        <button class="btn btn-danger" id="btn-stop-run" ${!isRunning ? 'disabled' : ''} style="${stopStyle}">${ICONS.stop} Stop Pipeline</button>
       </div>
     </div>
     <div id="ctrl-feedback" style="margin-top: 12px; font-size: 12.5px; font-family: var(--mono); min-height: 18px;"></div>
@@ -821,18 +901,15 @@ function controlPanel(){
 
 function bindControlEvents(){
   const isRunning = DATA.status && DATA.status.is_running;
-  if (isRunning) return;
-  
   const startBtn = $('#btn-start-run');
   const resumeBtn = $('#btn-resume-run');
+  const stopBtn = $('#btn-stop-run');
   const feedback = $('#ctrl-feedback');
   const resumeSelect = $('#ctrl-resume-select');
   
-  if(!startBtn || !resumeBtn) return;
-  
   if (resumeSelect && DATA.runs) {
     const incomplete = DATA.runs.filter(r => r.execution_stage !== 'PUBLISHED_SUCCESS' && r.execution_stage !== 'DONE');
-    resumeSelect.innerHTML = '<option value="">Last Failed Run (Auto)</option>';
+    resumeSelect.innerHTML = incomplete.length > 0 ? '<option value="">Last Failed Run (Auto)</option>' : '<option value="">No Failed Runs</option>';
     incomplete.forEach(r => {
       const pid = r.pipeline_id;
       const head = r.headline || 'Incomplete Run';
@@ -843,11 +920,42 @@ function bindControlEvents(){
       resumeSelect.appendChild(opt);
     });
   }
+
+  // ALWAYS bind stopBtn so user can abort running pipeline
+  if (stopBtn) {
+    stopBtn.addEventListener('click', async () => {
+      if (!isRunning) return;
+      if (!feedback) return;
+      if (!confirm('Are you sure you want to abort the running pipeline job on OCI/Pi?')) return;
+      feedback.style.color = 'var(--amber)';
+      feedback.textContent = 'Terminating pipeline processes...';
+      try {
+        const r = await fetch('/api/pipeline/stop', { method: 'POST' });
+        const res = await r.json();
+        if (res.success) {
+          feedback.style.color = 'var(--green)';
+          feedback.textContent = 'Pipeline execution terminated.';
+          if (DATA.status) DATA.status.is_running = false;
+          paint();
+          setTimeout(loadAll, 1500);
+        } else {
+          feedback.style.color = 'var(--red)';
+          feedback.textContent = 'Error: ' + (res.error || 'Failed to stop pipeline');
+        }
+      } catch(e) {
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Network error: ' + e.message;
+      }
+    });
+  }
+
+  if (isRunning) return; // Skip binding start/resume if running
+  if (!startBtn || !resumeBtn) return;
   
   const getParams = () => {
-    const region = $('#ctrl-region').value;
-    const rag = $('#ctrl-rag').value;
-    const renderer = $('#ctrl-renderer').value;
+    const region = $('#ctrl-region') ? $('#ctrl-region').value : '';
+    const rag = $('#ctrl-rag') ? $('#ctrl-rag').value : '';
+    const renderer = $('#ctrl-renderer') ? $('#ctrl-renderer').value : '';
     let params = [];
     if (region) params.push(`region=${region}`);
     if (rag) params.push(`rag=${rag}`);
@@ -898,30 +1006,6 @@ function bindControlEvents(){
       feedback.textContent = 'Network error: ' + e.message;
     }
   });
-
-  const stopBtn = $('#btn-stop-run');
-  if (stopBtn) {
-    stopBtn.addEventListener('click', async () => {
-      if (!confirm('Are you sure you want to abort the running pipeline job on OCI/Pi?')) return;
-      feedback.style.color = 'var(--amber)';
-      feedback.textContent = 'Terminating pipeline processes...';
-      try {
-        const r = await fetch('/api/pipeline/stop', { method: 'POST' });
-        const res = await r.json();
-        if (res.success) {
-          feedback.style.color = 'var(--green)';
-          feedback.textContent = 'Pipeline execution terminated.';
-          setTimeout(loadAll, 1500);
-        } else {
-          feedback.style.color = 'var(--red)';
-          feedback.textContent = 'Error: ' + (res.error || 'Failed to stop pipeline');
-        }
-      } catch(e) {
-        feedback.style.color = 'var(--red)';
-        feedback.textContent = 'Network error: ' + e.message;
-      }
-    });
-  }
 }
 
 function bindSeedingEvents(){
@@ -960,11 +1044,13 @@ function bindSeedingEvents(){
         if (res.success) {
           feedback.style.color = 'var(--green)';
           feedback.textContent = 'Reddit seeder started in background!';
+          if (DATA.seeding) DATA.seeding.is_running = true;
+          paint();
           if (outputBox && logBody) {
             outputBox.style.display = 'block';
-            logBody.textContent = 'Link Seeder launched on Raspberry Pi edge node...\nPolling execution logs...';
+            logBody.textContent = 'Link Seeder launched on Raspberry Pi edge node...\nStreaming logs...';
           }
-          setTimeout(loadAll, 2000);
+          setTimeout(loadAll, 1500);
         } else {
           feedback.style.color = 'var(--red)';
           feedback.textContent = 'Error: ' + (res.error || 'Failed to trigger seeder');
@@ -979,15 +1065,17 @@ function bindSeedingEvents(){
   if (stopSeederBtn) {
     stopSeederBtn.addEventListener('click', async () => {
       if (!feedback) return;
-      if (!confirm('Are you sure you want to stop the active seeding process on the Pi?')) return;
+      if (!confirm('Are you sure you want to stop all active Reddit seeding and warmup processes on the Pi?')) return;
       feedback.style.color = 'var(--amber)';
-      feedback.textContent = 'Terminating Reddit seeder...';
+      feedback.textContent = 'Terminating Reddit seeder & cleaning locks...';
       try {
         const r = await fetch('/api/seeding/stop', { method: 'POST' });
         const res = await r.json();
         if (res.success) {
           feedback.style.color = 'var(--green)';
-          feedback.textContent = 'Reddit seeding terminated.';
+          feedback.textContent = 'Reddit seeding terminated successfully.';
+          if (DATA.seeding) DATA.seeding.is_running = false;
+          paint();
           setTimeout(loadAll, 1500);
         } else {
           feedback.style.color = 'var(--red)';
@@ -1002,8 +1090,11 @@ function bindSeedingEvents(){
 }
 
 function renderOverview(){
+  const curStage = (DATA.status && (DATA.status.latest_stage || DATA.status.execution_stage))
+    || (DATA.runs && DATA.runs[0] && DATA.runs[0].execution_stage)
+    || 'INITIALIZATION';
   return `
-    ${stageTracker(DATA.status && DATA.status.execution_stage)}
+    ${stageTracker(curStage)}
     ${controlPanel()}
     ${statCards()}
     ${budgetPanel()}

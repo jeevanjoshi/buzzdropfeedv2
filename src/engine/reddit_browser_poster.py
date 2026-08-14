@@ -175,18 +175,34 @@ class RedditBrowserPoster:
             return None
         return {"server": raw}
 
-    def _pick_account(self) -> Optional[Dict[str, Any]]:
+    def _pick_account(self, contains_link: bool = False) -> Optional[Dict[str, Any]]:
         candidates = []
+        retired_count = 0
+        capped_count = 0
+        warmup_skipped_count = 0
         for acc in self.accounts:
             u = self._user_id(acc)
             if self.state.is_retired(u):
+                retired_count += 1
+                continue
+            if contains_link and acc.get("warmup", False):
+                warmup_skipped_count += 1
                 continue
             cap = acc.get("daily_cap", self.settings.get("default_daily_cap", 5))
             if self.state.used_today(u) >= cap:
+                capped_count += 1
                 continue
             candidates.append(acc)
         if not candidates:
-            logger.warning("[RedditBrowserPoster] No available account (retired or at daily cap).")
+            if warmup_skipped_count > 0 and capped_count == 0 and retired_count == 0:
+                logger.info(f"[RedditBrowserPoster] Account(s) in warmup mode (warmup=True). Link seeding skipped until account is marked warmup=False.")
+            elif capped_count > 0 and retired_count == 0:
+                cap_val = self.accounts[0].get("daily_cap", 5) if self.accounts else 5
+                logger.info(f"[RedditBrowserPoster] Account(s) reached daily post cap ({capped_count} account(s) at cap: {self.state.used_today(self._user_id(self.accounts[0]))}/{cap_val}). Will resume after midnight UTC.")
+            elif retired_count > 0 and capped_count == 0:
+                logger.warning(f"[RedditBrowserPoster] All account(s) marked retired ({retired_count} account(s)).")
+            else:
+                logger.warning(f"[RedditBrowserPoster] No available account ({capped_count} at daily cap, {retired_count} retired, {warmup_skipped_count} in warmup).")
             return None
         candidates.sort(key=lambda a: self.state.used_today(self._user_id(a)))
         return candidates[0]
@@ -370,8 +386,9 @@ class RedditBrowserPoster:
             logger.warning(f"[RedditBrowserPoster] Comment context scrape failed: {e}")
             return ""
 
-    def post_reply(self, thread_id: str, subreddit: str, permalink: str, text: str, force: bool = False) -> bool:
-        account = self._pick_account()
+    def post_reply(self, thread_id: str, subreddit: str, permalink: str, text: str, force: bool = False, contains_link: Optional[bool] = None) -> bool:
+        has_link = contains_link if contains_link is not None else bool("http://" in text or "https://" in text or "youtu.be" in text or "youtube.com" in text)
+        account = self._pick_account(contains_link=has_link)
         if not account:
             return False
         if not force and self.state.was_posted(thread_id):
@@ -486,7 +503,7 @@ class RedditBrowserPoster:
         try:
             import urllib.request
             import re
-            url = f"https://old.reddit.com/r/{subreddit}/comments/{thread_id}/"
+            url = f"https://old.reddit.com/r/{subreddit}/comments/{thread_id}/?sort=new"
             req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_UA})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 html = resp.read().decode("utf-8", errors="replace")

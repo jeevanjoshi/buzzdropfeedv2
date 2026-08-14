@@ -1188,7 +1188,7 @@ class MediaProducerAgent:
                     print(f"Warning: Stat chart render failed: {chart_err}. Falling through to normal flow.")
 
             # Check 1: Dynamic GIF visual asset retrieval
-            elif v_type == VisualType.GIF_STICKER or "[gif:" in prompt_lower or "animated gif" in prompt_lower or "gif sticker" in prompt_lower:
+            elif v_type in (VisualType.GIF_MEME, VisualType.GIF_STICKER) or "[gif:" in prompt_lower or "animated gif" in prompt_lower or "gif sticker" in prompt_lower:
                 match = re.search(r'\[gif:\s*([^\]]+)\]', prompt_lower)
                 gif_query = match.group(1).strip() if match else clean_narration[:40]
                 print(f"Processing AI dynamic GIF segment for {shot_key} (Query: '{gif_query}')")

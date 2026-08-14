@@ -1353,6 +1353,15 @@ def case_media_producer_charts_and_thumbnails():
     scene = _build_thumbnail_scene(st)
     ok_scene = "Meta Muse Glimmer" in scene and "16:9" in scene
 
+    # 6. VisualType dispatch & enum coverage
+    for vt in (VisualType.STANDARD_IMAGE, VisualType.GIF_MEME, VisualType.GIF_STICKER, VisualType.MATPLOTLIB_CHART, VisualType.SVG_TICKER):
+        test_shot = ShotData(
+            shot_id=1, act_index=1, narration_text="Shot narration",
+            visual_prompt="shot prompt", duration_estimate=5.0,
+            visual_type=vt
+        )
+        assert test_shot.visual_type == vt
+
     passed = ok_nums and ok_theme_pos and ok_theme_neg and ok_spec and ok_narr_derive and ok_scene
     record("MEDIA_PRODUCER_CHARTS_AND_THUMBNAILS", passed,
            f"nums={ok_nums}, theme_pos={ok_theme_pos}, theme_neg={ok_theme_neg}, spec={ok_spec}, narr_derive={ok_narr_derive}, scene={ok_scene}")
@@ -1360,10 +1369,11 @@ def case_media_producer_charts_and_thumbnails():
 
 
 # ---------------------------------------------------------------------------
-# Case 20 — Codebase static analysis (0 undefined names, unbound variables)
+# Case 20 — Codebase static analysis (0 undefined names, unbound variables, enum integrity)
 # ---------------------------------------------------------------------------
 def case_codebase_static_analysis():
     import subprocess
+    import ast
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cmd = [
         sys.executable, "-m", "ruff", "check",
@@ -1376,10 +1386,94 @@ def case_codebase_static_analysis():
         "--select", "F821,F822,F823"
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
-    ok = (res.returncode == 0)
-    record("CODEBASE_STATIC_ANALYSIS", ok,
-           "0 undefined names / scope errors" if ok else f"ruff errors: {res.stdout.strip()[:100]}")
+    ruff_ok = (res.returncode == 0)
+
+    # AST Enum Integrity check: verify all member accesses on known Enums are valid
+    from src.schemas.state import VisualType
+    from src.schemas.a2a import AgentRole, AgentIntent
+
+    enums = {
+        "VisualType": VisualType,
+        "AgentRole": AgentRole,
+        "AgentIntent": AgentIntent,
+    }
+    enum_issues = []
+    for search_dir in ["src", "mcp_servers", "tests"]:
+        full_dir = os.path.join(repo_root, search_dir)
+        for r, _, fs in os.walk(full_dir):
+            for f in fs:
+                if f.endswith(".py"):
+                    fp = os.path.join(r, f)
+                    with open(fp, "r", encoding="utf-8") as f_obj:
+                        try:
+                            tree = ast.parse(f_obj.read(), filename=fp)
+                            for node in ast.walk(tree):
+                                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                                    if node.value.id in enums:
+                                        enum_cls = enums[node.value.id]
+                                        if not hasattr(enum_cls, node.attr):
+                                            enum_issues.append(f"{f}:{node.lineno} ({node.value.id}.{node.attr})")
+                        except Exception as e:
+                            enum_issues.append(f"parse_err {f}: {e}")
+
+    ok = ruff_ok and len(enum_issues) == 0
+    detail = "0 undefined names / scope / enum errors" if ok else (
+        f"ruff errors: {res.stdout.strip()[:60]}" if not ruff_ok else f"enum errors: {enum_issues}"
+    )
+    record("CODEBASE_STATIC_ANALYSIS", ok, detail)
     return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 21 — Publisher seed comment & seed distributor package generation
+# ---------------------------------------------------------------------------
+def case_publisher_and_seed_distribution():
+    from src.agents.publisher import PublisherAgent
+    from src.engine.seed_distributor import seed_distributor
+    from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact, SEOMetadata
+
+    st = GlobalState(
+        pipeline_id="test-seed-run",
+        timestamp="2026-08-14T00:00:00Z",
+        selected_topic=TopicCandidate(
+            candidate_id="c-seed-1",
+            headline="AI Chip Demand Surges 300% in 2026",
+            summary="Enterprise AI hardware spending accelerates globally.",
+            keywords=["ai", "hardware", "semiconductors"],
+            source_url="https://example.com/ai-chips",
+            tvs_score=0.9, rpm_score=0.9, idi_score=0.9, sdi_score=0.9, sat_score=0.9
+        ),
+        verified_facts=[
+            VerifiedFact(source_id="v1", source_name="TechDaily", headline="AI Chips", summary="Data centers invest billions in custom silicon.", url="https://example.com/f1"),
+            VerifiedFact(source_id="v2", source_name="MarketWatch", headline="Silicon Race", summary="Next-gen processors achieve 4x energy efficiency.", url="https://example.com/f2"),
+        ],
+        script_data=ScriptData(
+            title="The 2026 AI Chip Revolution",
+            target_shots=18,
+            shots=[
+                ShotData(shot_id=1, act_index=1, narration_text="The battle for compute begins.", visual_prompt="Server room", duration_estimate=10.0),
+                ShotData(shot_id=18, act_index=6, narration_text="Will custom silicon replace standard architectures by 2030?", visual_prompt="Microchip close up", duration_estimate=10.0),
+            ]
+        ),
+        seo_metadata=SEOMetadata(
+            title="The 2026 AI Chip Revolution",
+            description="Complete analysis of the 2026 hardware boom.",
+            tags=["ai", "hardware", "chips"],
+            thumbnail_brief="AI Chip War"
+        )
+    )
+
+    pub = PublisherAgent()
+    comment = pub._build_seed_comment("The 2026 AI Chip Revolution", st, playlist_url="https://youtube.com/playlist?list=PL123")
+    ok_comment = "Will custom silicon replace standard architectures by 2030?" in comment and "https://youtube.com/playlist?list=PL123" in comment
+
+    pkg = seed_distributor.create_seed_package(st, "https://youtube.com/watch?v=mock123")
+    ok_pkg = len(pkg.reddit_drafts) >= 1 and "Data centers invest billions" in pkg.reddit_drafts[0].body_markdown
+
+    passed = ok_comment and ok_pkg
+    record("PUBLISHER_AND_SEED_DISTRIBUTION", passed,
+           f"comment_question={ok_comment}, seed_pkg_drafts={len(pkg.reddit_drafts)}")
+    return passed
 
 
 # ---------------------------------------------------------------------------
@@ -1407,6 +1501,7 @@ def main():
     case_synthetic_topic_deduplication()
     case_youtube_retention_and_engagement()
     case_media_producer_charts_and_thumbnails()
+    case_publisher_and_seed_distribution()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

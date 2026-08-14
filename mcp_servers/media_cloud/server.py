@@ -562,7 +562,7 @@ async def generate_dynamic_chart(req: ChartRequest):
 
             # Floating glassmorphic card container for depth perception
             ax = fig.add_axes([0.10, 0.16, 0.80, 0.64])
-            ax.set_facecolor('#0c1322')
+            ax.set_facecolor('#0a1526')
 
             # Clean borders
             for spine in ['top', 'right', 'left']:

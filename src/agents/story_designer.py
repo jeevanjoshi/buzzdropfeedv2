@@ -919,7 +919,7 @@ class StoryDesignerAgent:
                             vis = s.get("visual_prompt") or s.get("visual") or s.get("prompt") or f"Cinematic 16:9 widescreen visual for {headline}, 8k photorealistic."
                         
                             v_type_raw = s.get("visual_type") or "standard_image"
-                            if v_type_raw not in ["standard_image", "gif_meme", "matplotlib_chart", "svg_ticker"]:
+                            if v_type_raw not in ["standard_image", "gif_meme", "gif_sticker", "matplotlib_chart", "svg_ticker"]:
                                 v_type_raw = "standard_image"
 
                             # Grounded chart spec for stat shots: prefer the LLM's

@@ -94,7 +94,7 @@ class PublisherAgent:
         
         grounded_question = ""
         if act6_shots:
-            last_text = act6_shots[-1].narration or ""
+            last_text = getattr(act6_shots[-1], "narration_text", "") or getattr(act6_shots[-1], "narration", "")
             # Extract a question sentence if present in Act 6 narration
             questions = [sent.strip() for sent in last_text.split(".") if "?" in sent]
             if questions:

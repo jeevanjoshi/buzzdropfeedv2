@@ -88,6 +88,7 @@ from enum import Enum
 class VisualType(str, Enum):
     STANDARD_IMAGE = "standard_image"      # Flux.1 image with Ken Burns pan
     GIF_MEME = "gif_meme"                  # Reaction meme search from GIPHY/Tenor
+    GIF_STICKER = "gif_sticker"            # Reaction GIF/sticker asset
     MATPLOTLIB_CHART = "matplotlib_chart"  # Dynamic dark-mode line/bar chart
     SVG_TICKER = "svg_ticker"              # Glowing stock ticker/counter
 

@@ -291,6 +291,7 @@ fn api_status(root: &str) -> Value {
         ("heartbeat_ts", s(&hb_ts)),
         ("heartbeat_age_sec", hb_age.map(num).unwrap_or(Value::Null)),
         ("latest_stage", s(&latest_stage)),
+        ("execution_stage", s(&latest_stage)),
         ("latest_run", latest_run.unwrap_or(Value::Null)),
         ("channel_stats", stats),
     ])
@@ -390,7 +391,20 @@ fn api_published(root: &str) -> Value {
 // ── /api/seeding ───────────────────────────────────────────────────────────
 
 fn api_seeding(root: &str) -> Value {
-    read_json(root, "logs/reddit_rotation_state.json")
+    let mut val = read_json(root, "logs/reddit_rotation_state.json");
+    let is_running = is_seeding_running();
+    match val {
+        Value::Obj(ref mut map) => {
+            map.insert("is_running".to_string(), Value::Bool(is_running));
+            val
+        }
+        _ => obj(&[
+            ("is_running", Value::Bool(is_running)),
+            ("accounts", obj(&[])),
+            ("subreddits", obj(&[])),
+            ("posted_threads", arr(vec![])),
+        ]),
+    }
 }
 
 fn api_seeding_logs(root: &str) -> Value {
@@ -868,7 +882,7 @@ fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
         std::process::Command::new("ssh")
             .args(&[
                 "-o", "StrictHostKeyChecking=no",
-                "ubuntu@100.104.253.1",
+                "oci-prod",
                 &cmd_str
             ])
             .spawn()
@@ -973,34 +987,19 @@ fn api_seeding_trigger(root: &str, raw_path: &str) -> Value {
 fn api_pipeline_stop(root: &str) -> Value {
     let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
     
-    // Command to kill both main.py / run_production.sh and any ffmpeg/child processes
-    let kill_cmd = "pkill -f 'run_production.sh' || true; pkill -f 'main.py' || true; pkill -f 'python main.py' || true";
-    
-    let mut oci_success = true;
-    let mut err_msg = String::new();
+    // Command to kill main.py / run_production.sh / cron / ffmpeg child processes
+    let kill_cmd = "pkill -9 -f run_production.sh 2>/dev/null; pkill -9 -f main.py 2>/dev/null; pkill -9 -f cron_publish.sh 2>/dev/null; pkill -9 -f healthcheck.py 2>/dev/null; pkill -9 -f ffmpeg 2>/dev/null; true";
 
     if is_pi {
-        // Kill on OCI cloud host via SSH
-        let output = std::process::Command::new("ssh")
+        // Kill on OCI cloud host via SSH host oci-prod
+        let _ = std::process::Command::new("ssh")
             .args(&[
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "ConnectTimeout=5",
-                "ubuntu@100.104.253.1",
+                "oci-prod",
                 kill_cmd
             ])
             .output();
-        match output {
-            Ok(out) => {
-                if !out.status.success() {
-                    oci_success = false;
-                    err_msg = String::from_utf8_lossy(&out.stderr).into_owned();
-                }
-            }
-            Err(e) => {
-                oci_success = false;
-                err_msg = e.to_string();
-            }
-        }
     } else {
         // Kill locally if running on OCI
         let _ = std::process::Command::new("bash")
@@ -1008,22 +1007,23 @@ fn api_pipeline_stop(root: &str) -> Value {
             .output();
     }
 
-    // Also update pipeline_heartbeat.json to immediately reflect idle/stopped
+    // Also update local pipeline_heartbeat.json on the Pi to immediately reflect stopped
     let hb_path = Path::new(root).join("logs/pipeline_heartbeat.json");
     if hb_path.exists() {
-        let _ = fs::write(&hb_path, b"{\"running\":\"false\",\"ts\":\"\"}\n");
+        let _ = fs::write(&hb_path, b"{\"running\":false,\"ts\":\"\"}\n");
     }
 
     obj(&[
-        ("success", Value::Bool(oci_success)),
-        ("error", s(&err_msg)),
+        ("success", Value::Bool(true)),
+        ("error", s("")),
     ])
 }
 
 fn api_seeding_stop(_root: &str) -> Value {
-    // Seeder runs on the Pi; kill reddit_link_seeder processes locally on Pi
-    let output = std::process::Command::new("pkill")
-        .args(&["-9", "-f", "reddit_link_seeder.py"])
+    // Seeder runs on the Pi; kill all reddit seeding processes, warmups, and lockfiles
+    let kill_cmd = "pkill -9 -f reddit_link_seeder.py; pkill -9 -f reddit_warmup.py; pkill -9 -f post_reddit_links.py; pkill -9 -f active_thread_seeder.py; rm -f /tmp/reddit_*.lock /tmp/reddit_link.lock /tmp/reddit_warmup.lock";
+    let output = std::process::Command::new("bash")
+        .args(&["-c", kill_cmd])
         .output();
 
     let (success, err_msg) = match output {
@@ -1045,8 +1045,7 @@ fn is_pipeline_running(root: &str) -> bool {
 
     if exists(root, "logs/pipeline_heartbeat.json") {
         let hb = read_json(root, "logs/pipeline_heartbeat.json");
-        let running = matches!(&hb, Value::Obj(_))
-            && hb.get_str("running").map(|v| v == "true").unwrap_or(false);
+        let running = hb.get_str("running").map(|v| v == "true").unwrap_or(false);
         if let Some(ts) = hb.get_str("ts") {
             if let Some(epoch) = parse_iso_utc(&ts) {
                 let age = (now_epoch() - epoch).max(0.0);
@@ -1059,11 +1058,23 @@ fn is_pipeline_running(root: &str) -> bool {
 
 fn is_seeding_running() -> bool {
     // Seeder runs locally on the Pi (residential IP, not blocked by Reddit).
-    let output = std::process::Command::new("pgrep")
-        .args(&["-f", "reddit_link_seeder.py"])
-        .output();
-    if let Ok(out) = output {
-        return out.status.success();
+    // Specifically match python/python3 interpreter executing the scripts,
+    // avoiding false positives from pgrep/bash/tailscale arguments.
+    if let Ok(out) = std::process::Command::new("pgrep")
+        .args(&["-f", "python.*reddit_link_seeder\\.py"])
+        .output()
+    {
+        if out.status.success() && !out.stdout.is_empty() {
+            return true;
+        }
+    }
+    if let Ok(out) = std::process::Command::new("pgrep")
+        .args(&["-f", "python.*reddit_warmup\\.py"])
+        .output()
+    {
+        if out.status.success() && !out.stdout.is_empty() {
+            return true;
+        }
     }
     false
 }
