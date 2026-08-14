@@ -559,10 +559,10 @@ class ObserverAgent:
         # other scores (neither is safe to auto-produce unattended).
         if topic and getattr(topic, "audience_type", "") == "blocked":
             violations.append(
-                f"Audience Gate FAIL: Topic audience_type='blocked' "
-                f"(entertainment/gossip or YMYL medical). "
-                f"Highly demo/gamma Rx — hard blocked. "
-                f"Select a Tech/Finance/Science/Space/History/Business topic instead."
+                "Audience Gate FAIL: Topic audience_type='blocked' "
+                "(entertainment/gossip or YMYL medical). "
+                "Highly demo/gamma Rx — hard blocked. "
+                "Select a Tech/Finance/Science/Space/History/Business topic instead."
             )
             return False, violations  # Early exit — no point checking further
 

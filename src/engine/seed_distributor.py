@@ -191,13 +191,13 @@ class SeedDistributorEngine:
         takeaway_lines = [
             f"1. {fact_lines[0] if fact_lines else summary[:200]}",
             f"2. {risk_line}",
-            f"3. The shift is structural — data sources show a sustained move, not a one-off tick.",
+            "3. The shift is structural — data sources show a sustained move, not a one-off tick.",
         ]
 
         reddit_drafts = []
         for sub in subreddits:
             body = (
-                f"**Key Takeaways & Core Analysis:**\n\n"
+                "**Key Takeaways & Core Analysis:**\n\n"
                 + "\n".join(takeaway_lines)
                 + f"\n\n--- \n"
                 f"*I put together a full visual animated video breakdown with the raw source data here if you'd like to see the charts:* [{title}]({youtube_url})"
@@ -230,7 +230,7 @@ class SeedDistributorEngine:
 
         x_thread = [
             f"🧵 Analysis: {title}\n\n{summary[:180]} (1/3)",
-            f"Key metrics indicate growing institutional integration but highlights regulatory shifts on the horizon. (2/3)",
+            "Key metrics indicate growing institutional integration but highlights regulatory shifts on the horizon. (2/3)",
             f"Watch the full visual breakdown and data source files here: {youtube_url} (3/3)"
         ]
 
@@ -348,7 +348,7 @@ class SeedDistributorEngine:
                             "title": f"🚀 Seed Traffic Ready: {package.video_title}",
                             "url": package.youtube_url,
                             "color": 5814783,
-                            "description": f"Video uploaded successfully! Copy the drafts below to seed early traffic.",
+                            "description": "Video uploaded successfully! Copy the drafts below to seed early traffic.",
                             "fields": fields,
                             "footer": {"text": f"Pipeline ID: {package.pipeline_id}"}
                         }]

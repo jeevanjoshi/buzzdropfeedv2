@@ -185,7 +185,7 @@ class LLMClient:
                     print(f"[LLMClient] Local v1/chat/completions content length: {len(content)}")
                     parsed = self._clean_and_parse_json(content)
                     if parsed is not None:
-                        print(f"[LLMClient] Successfully parsed JSON from chat completions.")
+                        print("[LLMClient] Successfully parsed JSON from chat completions.")
                         return parsed
                     else:
                         print(f"[LLMClient] Failed to parse JSON from chat completions. Raw content starts with: {content[:150]}")
@@ -206,7 +206,7 @@ class LLMClient:
                     print(f"[LLMClient] Local /completion content length: {len(content)}")
                     parsed = self._clean_and_parse_json(content)
                     if parsed is not None:
-                        print(f"[LLMClient] Successfully parsed JSON from native completion.")
+                        print("[LLMClient] Successfully parsed JSON from native completion.")
                         return parsed
                     else:
                         print(f"[LLMClient] Failed to parse JSON from native completion. Raw content starts with: {content[:150]}")

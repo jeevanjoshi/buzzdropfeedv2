@@ -413,7 +413,28 @@ def check_media(strict: bool = False):
                        f"{label} {free_gb:.1f} GB free")
         except Exception:
             continue
-    return True
+def check_hermetic_suite() -> bool:
+    """
+    Executes the self-sufficient hermetic test suite (tests/test_hermetic_e2e.py)
+    which runs full codebase static integrity analysis (ruff) + all 23 pipeline
+    logic, regression, and A2A quality tests. Hard-fails before any external
+    network, quota, or media resources are consumed.
+    """
+    import subprocess
+    repo = os.path.dirname(os.path.abspath(__file__))
+    cmd = [sys.executable, "run_tests.py"]
+    try:
+        res = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=120)
+        if res.returncode == 0:
+            record("test", "hermetic test suite", _OK, "all tests passed (static integrity + 23 E2E cases)")
+            return True
+        else:
+            err_summary = res.stdout.strip().splitlines()[-4:] if res.stdout else [res.stderr.strip()]
+            record("test", "hermetic test suite", _FAIL, f"Suite failed: {' | '.join(err_summary)}")
+            return False
+    except Exception as e:
+        record("test", "hermetic test suite", _FAIL, f"Could not execute test suite: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +496,7 @@ def main(argv):
     print("=" * 62)
 
     checks = [
+        ("test", check_hermetic_suite),
         ("env", check_required_env),
         ("bin", check_binaries),
         ("llm", lambda: check_llm(probe=probe_llm)),
@@ -517,7 +539,7 @@ def main(argv):
         print(f"Audit log written: {audit_path}")
         print("Resolve the warnings (or drop --strict), then re-run.")
         return 2
-    print(f"HEALTH CHECK: PASSED — all required checks green"
+    print("HEALTH CHECK: PASSED — all required checks green"
           + (f" (+{len(warned)} advisory warning(s))" if warned else "")
           + ". Proceeding with production run.")
     print(f"Audit log written: {audit_path}")

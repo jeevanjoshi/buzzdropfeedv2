@@ -147,7 +147,7 @@ def main():
     os.makedirs(artifact_dir, exist_ok=True)
     out_path = args.out or os.path.join(artifact_dir, "youtube_audit_report.md")
 
-    print(f"=== Starting YouTube Quality Audit ===")
+    print("=== Starting YouTube Quality Audit ===")
     print(f"Video URL/ID: {args.video_url}")
     if args.topic:
         print(f"Target Topic (RAG): {args.topic}")
@@ -164,7 +164,7 @@ def main():
         
         # Generate beautiful markdown report
         generate_markdown_report(report, out_path)
-        print(f"=== Audit Completed Successfully ===")
+        print("=== Audit Completed Successfully ===")
         
     except Exception as e:
         print(f"ERROR running YouTube Video Verifier: {e}", file=sys.stderr)

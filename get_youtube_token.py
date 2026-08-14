@@ -66,7 +66,7 @@ def main():
         with open(token_path, "w") as f:
             json.dump(token_data, f, indent=2)
             
-        print(f"\nSUCCESS! token.json successfully created and saved.")
+        print("\nSUCCESS! token.json successfully created and saved.")
     except Exception as e:
         print(f"\nError exchanging code: {str(e)}")
 

@@ -81,6 +81,120 @@ def _has_numeric_claim(narration: str, min_matches: int = 2) -> bool:
     return bool(narration) and len(_NUMERIC_CLAIM_RE.findall(narration)) >= min_matches
 
 
+def _extract_chart_numbers(narration: str) -> List[float]:
+    """Extracts numeric values from a narration string for chart derivation."""
+    if not narration:
+        return []
+    nums = []
+    matches = re.finditer(
+        r'(?:[\$€¥₹]\s*)?([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|\b(?:billion|billions|crore|crores|million|millions|trillion|trillions|thousand|thousands|k|m|b|cr)\b)?',
+        narration,
+        re.IGNORECASE
+    )
+    scale_map = {
+        "k": 1e3, "thousand": 1e3, "thousands": 1e3,
+        "m": 1e6, "million": 1e6, "millions": 1e6,
+        "b": 1e9, "billion": 1e9, "billions": 1e9,
+        "cr": 1e7, "crore": 1e7, "crores": 1e7,
+        "trillion": 1e12, "trillions": 1e12
+    }
+    for m in matches:
+        raw_num = m.group(1).replace(",", "")
+        try:
+            val = float(raw_num)
+        except (ValueError, TypeError):
+            continue
+        scale = (m.group(2) or "").lower()
+        if scale in scale_map:
+            val *= scale_map[scale]
+        # Skip plain 4-digit years (e.g. 2024, 2026) if unscaled and without currency/% sign
+        if 1900 <= val <= 2099 and not m.group(2) and not ('$' in m.group(0) or '₹' in m.group(0) or '%' in m.group(0) or '€' in m.group(0) or '¥' in m.group(0)):
+            continue
+        nums.append(val)
+    return nums
+
+
+def _has_numeric_theme(prompt: str) -> bool:
+    """Checks if a visual prompt suggests a numeric / statistical chart theme."""
+    if not prompt:
+        return False
+    low = prompt.lower()
+    keywords = [
+        "chart", "graph", "metric", "metrics", "data", "statistic", "statistics",
+        "growth", "revenue", "valuation", "percentage", "market share", "shares",
+        "index", "numbers", "trend", "quarterly", "yoy", "inflation", "gdp"
+    ]
+    return any(k in low for k in keywords)
+
+
+def _derive_chart_data(
+    shot,
+    chart_spec: Dict[str, Any],
+    narration: str,
+    prompt: str,
+    facts: List[Any],
+) -> Tuple[List[str], List[float], str, str, str]:
+    """
+    Derives (labels, values, unit, title, chart_type) for a grounded chart visual.
+    Prefers shot.chart_spec; falls back to scanned numbers from narration or verified facts.
+    """
+    if chart_spec and chart_spec.get("values"):
+        values = [float(v) for v in chart_spec["values"]]
+        labels = [str(l) for l in (chart_spec.get("labels") or [])]
+        while len(labels) < len(values):
+            labels.append(f"Point {len(labels) + 1}")
+        labels = labels[:len(values)]
+        unit = str(chart_spec.get("unit") or chart_spec.get("unit_symbol") or "")
+        title = str(chart_spec.get("title") or "KEY METRICS")
+        ctype = str(chart_spec.get("chart_type") or ("bar" if len(values) <= 4 else "line"))
+        return labels, values, unit, title, ctype
+
+    # Scan narration for numbers
+    narr_nums = _extract_chart_numbers(narration)
+    unit = "%" if "%" in narration else ("$" if "$" in narration else ("₹" if "₹" in narration else ""))
+
+    # Title extraction
+    title = "KEY METRICS"
+    if "[chart:" in prompt.lower():
+        m = re.search(r'\[chart:\s*([^\]]+)\]', prompt, re.I)
+        if m:
+            title = m.group(1).strip().upper()
+    elif prompt:
+        words = [w for w in re.findall(r'[A-Za-z0-9]+', prompt) if w.lower() not in _QUERY_NOISE_WORDS]
+        if words:
+            title = " ".join(words[:4]).upper()
+
+    if len(narr_nums) >= 2:
+        values = narr_nums[:5]
+        labels = [f"Metric {i+1}" for i in range(len(values))]
+        ctype = "bar" if len(values) <= 4 else "line"
+        return labels, values, unit, title, ctype
+
+    # Fallback to facts
+    if facts:
+        fact_entries = []
+        for f in facts:
+            f_text = f"{getattr(f, 'headline', '')} {getattr(f, 'summary', '')}"
+            f_nums = _extract_chart_numbers(f_text)
+            if f_nums:
+                lbl = (getattr(f, 'headline', '') or getattr(f, 'source_name', '') or "Metric")[:20]
+                fact_entries.append((lbl, f_nums[0]))
+            if len(fact_entries) >= 5:
+                break
+        if len(fact_entries) >= 2:
+            labels = [e[0] for e in fact_entries]
+            values = [e[1] for e in fact_entries]
+            ctype = "bar"
+            return labels, values, unit, title, ctype
+
+    # If single number or trend needed: create a sensible 5-point progression around the number
+    base_val = narr_nums[0] if narr_nums else 100.0
+    labels = ["-4w", "-3w", "-2w", "-1w", "Now"]
+    values = [round(base_val * f, 2) for f in [0.92, 0.95, 0.94, 0.98, 1.0]]
+    return labels, values, unit, title, "line"
+
+
+
 # ── Company-aware ticker resolution ──────────────────────────────────────────
 # Live stock tickers/charts must show the ACTUAL company the story is about, not
 # a generic index fallback. ``_pick_symbol`` scans the topic's keywords, headline
@@ -1072,18 +1186,6 @@ class MediaProducerAgent:
                     is_specialized = True
                 except Exception as chart_err:
                     print(f"Warning: Stat chart render failed: {chart_err}. Falling through to normal flow.")
-                    await generate_dynamic_chart(ChartRequest(
-                        title=title[:48],
-                        labels=labels,
-                        values=values,
-                        unit_symbol=unit,
-                        chart_type=ctype,
-                        duration=shot_timeline_dur,
-                        output_mp4_path=mp4_path
-                    ))
-                    is_specialized = True
-                except Exception as chart_err:
-                    print(f"Warning: Stat chart render failed: {chart_err}. Falling through to normal flow.")
 
             # Check 1: Dynamic GIF visual asset retrieval
             elif v_type == VisualType.GIF_STICKER or "[gif:" in prompt_lower or "animated gif" in prompt_lower or "gif sticker" in prompt_lower:
@@ -1091,7 +1193,7 @@ class MediaProducerAgent:
                 gif_query = match.group(1).strip() if match else clean_narration[:40]
                 print(f"Processing AI dynamic GIF segment for {shot_key} (Query: '{gif_query}')")
                 try:
-                    await generate_dynamic_gif(DynamicGIFRequest(
+                    await fetch_reaction_gif_clip(GIFRequest(
                         query=gif_query,
                         duration=shot_timeline_dur,
                         output_mp4_path=mp4_path
@@ -1251,9 +1353,9 @@ class MediaProducerAgent:
                         "-i", temp_specialized_path,
                         "-i", wav_path,
                         "-filter_complex",
-                        f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-                        f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v];"
-                        f"[1:a]apad[a]",
+                        "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+                        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v];"
+                        "[1:a]apad[a]",
                         "-map", "[v]", "-map", "[a]",
                         "-t", f"{shot_timeline_dur:.3f}",
                         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
@@ -1283,10 +1385,12 @@ class MediaProducerAgent:
         asset_paths.measured_durations = list(shot_timings)
         asset_paths.crossfade_used = crossfade
 
+        exec_suffix = (getattr(state, "pipeline_id", "") or "csgv").strip() or "csgv"
+
         # Append burned-in subscribe end-card if configured (CSVG_END_CARD_SECONDS, default 6s)
         end_card_sec = float(os.getenv("CSVG_END_CARD_SECONDS", "6").strip() or 0.0)
         if end_card_sec > 0.0:
-            end_card_path = os.path.join(self.storage_dir, f"subscribe_endcard_{exec_suffix if 'exec_suffix' in locals() else 'clip'}.mp4")
+            end_card_path = os.path.join(self.storage_dir, f"subscribe_endcard_{exec_suffix}.mp4")
             if generate_subscribe_endcard(end_card_path, duration_sec=end_card_sec):
                 concat_lines.append(f"file '{end_card_path}'")
                 shot_timings.append(end_card_sec)
@@ -1306,7 +1410,6 @@ class MediaProducerAgent:
 
         # Assemble Final Timeline — filename correlated to the execution so a
         # given master always maps back to the run that produced it.
-        exec_suffix = (getattr(state, "pipeline_id", "") or "csgv").strip() or "csgv"
         final_video_path = os.path.join(self.storage_dir, f"final_video_{exec_suffix}.mp4")
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         bgm_source_path = os.path.join(project_root, "resources", "bgm.mp3")
@@ -1365,7 +1468,7 @@ class MediaProducerAgent:
             # Topic-grounded scene: fuses the video's subject (company/product)
             # into the hero shot's art direction so the thumbnail matches the
             # niche instead of shipping a generic stock scene.
-            thumb_scene = self._build_thumbnail_scene(state)
+            thumb_scene = _build_thumbnail_scene(state)
             await generate_thumbnail(ThumbnailRequest(
                 headline_text=brief,
                 visual_prompt=thumb_scene,

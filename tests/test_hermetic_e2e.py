@@ -1302,10 +1302,92 @@ def case_youtube_retention_and_engagement():
 
 
 # ---------------------------------------------------------------------------
+# Case 19 — MediaProducer chart derivation & thumbnail scene generation
+# ---------------------------------------------------------------------------
+def case_media_producer_charts_and_thumbnails():
+    from src.agents.media_producer import (
+        _extract_chart_numbers, _has_numeric_theme, _derive_chart_data, _build_thumbnail_scene
+    )
+    from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact
+
+    # 1. Number extraction
+    narr = "Revenue surged 35% YoY to $12.5 billion, while operating margins grew to ₹450 crore."
+    nums = _extract_chart_numbers(narr)
+    ok_nums = len(nums) == 3 and nums[0] == 35.0 and nums[1] == 12.5e9 and nums[2] == 450.0e7
+
+    # 2. Numeric theme detection
+    ok_theme_pos = _has_numeric_theme("Cinematic 16:9 shot: stock chart displaying market metrics")
+    ok_theme_neg = not _has_numeric_theme("Cinematic portrait of a smiling executive in an office")
+
+    # 3. Chart data derivation from chart_spec
+    shot_mock = ShotData(
+        shot_id=1, act_index=1, narration_text="Testing charts",
+        visual_prompt="stock chart", duration_estimate=10.0,
+        chart_spec={"title": "Q3 Growth", "labels": ["A", "B"], "values": [10.0, 20.0], "unit": "%"}
+    )
+    labels, vals, unit, title, ctype = _derive_chart_data(shot_mock, shot_mock.chart_spec, narr, shot_mock.visual_prompt, [])
+    ok_spec = title == "Q3 Growth" and vals == [10.0, 20.0] and unit == "%"
+
+    # 4. Chart data derivation from narration fallback
+    labels_n, vals_n, unit_n, title_n, ctype_n = _derive_chart_data(
+        shot_mock, {}, narr, "Cinematic chart: revenue trajectory", []
+    )
+    ok_narr_derive = len(vals_n) >= 2 and "%" in unit_n
+
+    # 5. Thumbnail scene building
+    st = GlobalState(
+        pipeline_id="test-p1",
+        timestamp="0",
+        selected_topic=TopicCandidate(
+            candidate_id="c1", headline="Meta unveils Muse Glimmer AI model for enterprise",
+            summary="New AI release", source_url="https://example.com", keywords=["meta", "ai"],
+            tvs_score=0.8, rpm_score=0.8, idi_score=0.8, sdi_score=0.8, sat_score=0.8
+        ),
+        script_data=ScriptData(
+            title="Meta AI Deep Dive", target_shots=1,
+            shots=[
+                ShotData(shot_id=1, act_index=1, narration_text="Intro", visual_prompt="Cinematic shot: glowing neon server room", duration_estimate=10.0)
+            ]
+        )
+    )
+    scene = _build_thumbnail_scene(st)
+    ok_scene = "Meta Muse Glimmer" in scene and "16:9" in scene
+
+    passed = ok_nums and ok_theme_pos and ok_theme_neg and ok_spec and ok_narr_derive and ok_scene
+    record("MEDIA_PRODUCER_CHARTS_AND_THUMBNAILS", passed,
+           f"nums={ok_nums}, theme_pos={ok_theme_pos}, theme_neg={ok_theme_neg}, spec={ok_spec}, narr_derive={ok_narr_derive}, scene={ok_scene}")
+    return passed
+
+
+# ---------------------------------------------------------------------------
+# Case 20 — Codebase static analysis (0 undefined names, unbound variables)
+# ---------------------------------------------------------------------------
+def case_codebase_static_analysis():
+    import subprocess
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cmd = [
+        sys.executable, "-m", "ruff", "check",
+        os.path.join(repo_root, "src"),
+        os.path.join(repo_root, "mcp_servers"),
+        os.path.join(repo_root, "tests"),
+        os.path.join(repo_root, "main.py"),
+        os.path.join(repo_root, "healthcheck.py"),
+        os.path.join(repo_root, "run_tests.py"),
+        "--select", "F821,F822,F823"
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    ok = (res.returncode == 0)
+    record("CODEBASE_STATIC_ANALYSIS", ok,
+           "0 undefined names / scope errors" if ok else f"ruff errors: {res.stdout.strip()[:100]}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def main():
     print("CSVG hermetic end-to-end test (self-sufficient, no network)\n")
+    case_codebase_static_analysis()
     case_happy_path()
     case_surgical_revision()
     case_outline_first()
@@ -1324,6 +1406,7 @@ def main():
     case_revenue_goal_alignment()
     case_synthetic_topic_deduplication()
     case_youtube_retention_and_engagement()
+    case_media_producer_charts_and_thumbnails()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

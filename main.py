@@ -1,3 +1,4 @@
+import os
 import sys
 import asyncio
 
@@ -123,7 +124,6 @@ def main():
             if arg == "--resume" and i + 1 < len(sys.argv):
                 pipeline_id = sys.argv[i + 1]
                 state_file = f"logs/state_{pipeline_id}.json"
-                import os
                 if os.path.exists(state_file):
                     print(f"Loading state checkpoint from {state_file}...")
                     from src.schemas.state import GlobalState
@@ -146,7 +146,7 @@ def main():
         rag_mode=rag_mode
     ))
 
-    print(f"Summary of Pipeline Execution:")
+    print("Summary of Pipeline Execution:")
     print(f"- Selected Topic: {state.selected_topic.headline if state.selected_topic else 'None'}")
     print(f"- TOPSIS Score: {state.selected_topic.topsis_score if state.selected_topic else 0.0}")
     print(f"- Script Title: {state.script_data.title if state.script_data else 'None'}")

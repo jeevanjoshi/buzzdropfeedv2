@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from typing import List, Dict, Any, Optional
 from src.schemas.state import VerifiedFact, TopicCandidate

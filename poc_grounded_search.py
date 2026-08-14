@@ -103,10 +103,10 @@ def main():
     print(f"  {meta['fact_count']} facts from {len(meta['sources'])} sources:")
     for s in sorted(meta["sources"]):
         print(f"    - {s}")
-    print(f"\n===== GROUNDING CHUNKS (audit URLs) =====")
+    print("\n===== GROUNDING CHUNKS (audit URLs) =====")
     for c in meta["grounding_chunks"][:12]:
         print(f"  - {c['title']} | {c['domain']} | {c['uri']}")
-    print(f"\n===== WEB SEARCH QUERIES =====")
+    print("\n===== WEB SEARCH QUERIES =====")
     for q in meta["web_search_queries"]:
         print(f"  * {q}")
 

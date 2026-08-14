@@ -244,10 +244,11 @@ placeholder audio (`src/agents/media_producer.py`):
 - **OAuth scope regularization** (`get_youtube_token.py`) — grants
   `youtube` / `youtube.upload` / `youtube.readonly` so `channels.list` probes and future
   playlist/comment writes work; YouTube health-check probe passes.
-- **Pre-flight health check** (`run_production.sh` → `healthcheck.py`) — env keys, ffmpeg/ffprobe,
-  LLM availability, Pi audio-edge reachability, YouTube upload quota + competitor-demand budget,
-  RAG fact-source keys, BGM + disk space; **aborts before launch** if any required check fails.
-  Optional `--probe-llm`/`--probe-yt` do a real 1-token LLM call and token-refresh `channels.list`.
+- **Pre-flight health check** (`run_production.sh` → `healthcheck.py`) — executes the self-sufficient
+  hermetic test suite (`tests/test_hermetic_e2e.py` covering static integrity via `ruff` and 23 E2E cases)
+  first; validates env keys, ffmpeg/ffprobe, LLM availability, Pi audio-edge reachability, YouTube upload
+  quota + competitor-demand budget, RAG fact-source keys, BGM + disk space; **aborts before launch** if any
+  required check or test fails. Optional `--probe-llm`/`--probe-yt` do a real 1-token LLM call and token-refresh `channels.list`.
 
 ### 1.10 Architecture & hosts
 
