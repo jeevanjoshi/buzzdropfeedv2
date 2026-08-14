@@ -31,7 +31,10 @@ class LLMClient:
     ):
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.model = model or os.getenv("LLM_MODEL") or "google/gemini-2.5-flash"
-        self.llama_cpp_url = (llama_cpp_url or os.getenv("LLAMA_CPP_URL", "http://localhost:8080")).rstrip("/")
+        import getpass
+        is_pi = (getpass.getuser() == "jeevanjoshi" or os.path.exists("/home/jeevanjoshi"))
+        default_llama_url = "http://100.104.253.1:8080" if is_pi else "http://localhost:8080"
+        self.llama_cpp_url = (llama_cpp_url or os.getenv("LLAMA_CPP_URL", default_llama_url)).rstrip("/")
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
 
     # Per-role model routing (Point 4). Each route may pin a cheaper/faster model

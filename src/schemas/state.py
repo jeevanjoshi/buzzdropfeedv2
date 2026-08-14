@@ -143,6 +143,10 @@ class AssetPaths(BaseModel):
 class UploadMetadata(BaseModel):
     video_id: Optional[str] = None
     shorts_video_id: Optional[str] = None
+    playlist_id: Optional[str] = None
+    playlist_url: Optional[str] = None
+    pinned_comment_id: Optional[str] = None
+    pinned_comment_text: Optional[str] = None
     status: str = "PENDING"
     retry_count: int = 0
     synthetic_content_flag: bool = True

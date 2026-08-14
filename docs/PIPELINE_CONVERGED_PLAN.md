@@ -305,6 +305,13 @@ placeholder audio (`src/agents/media_producer.py`):
 - **High-Quality Semantic Novelty Checks:** `calculate_semantic_novelty_index` in `src/engine/text_embeddings.py` utilizes the active MiniLM SentenceTransformer semantic embedding backend when `USE_SEMANTIC_GATES=1` is configured. This provides a deep semantic cosine-similarity comparison against past published topics, falling back gracefully to a stop-word-filtered TF-IDF vectorizer when the neural backend is unavailable.
 - **Synthesized Topic Gating:** The topic deduplication similarity check is applied directly inside `_measure_and_gate_synthetic` within `src/agents/fact_retriever.py` before querying the YouTube API for demand stats. This prevents synthesized evergreen tool-topics from bypassing the deduplication checks and ensures they are culled if they are semantically similar to any topic in `published_topics.json`.
 
+### 1.14 YouTube Retention: Auto-Playlists, End-Cards, and Comment Engagement
+
+- **Auto-Playlist Chaining:** `mcp_servers/youtube_cloud/server.py` implements `/tools/upsert_playlist_add_video` to search for or create the channel's thematic documentary playlist (default: `"LumenLoop AI Documentaries"`) and append the published video into it. Gated by `YOUTUBE_AUTO_PLAYLIST=1` (default on) and records `playlist_id`/`playlist_url` on `UploadMetadata`.
+- **Burned-in Subscribe End-Card:** `src/agents/media_producer.py` renders an aesthetic, modern 6-second subscribe outro clip (`generate_subscribe_endcard`) via FFmpeg `drawtext` and appends it to the master concat timeline at zero API cost. Configured via `CSVG_END_CARD_SECONDS` (default 6, `0` disables).
+- **Grounded Seed Comments & State Persistence:** `src/agents/publisher.py` automatically builds dynamic, topic-grounded seed comments from the video's Act 6 verdict questions, converts viewers with phase-aware CTAs, and attaches the comment text/ID to `UploadMetadata.pinned_comment_text` for real-time visibility on the Rust dashboard (`/api/runs`).
+- **YouTube Comment-Reply Bot:** `src/engine/youtube_engagement.py` queries top viewer comments and uses `LLMClient` to post fact-grounded replies via `/tools/reply_comment` to drive channel comment velocity and dwell time.
+
 ---
 
 ## 2. PLANNED — NEXT PASS
@@ -312,50 +319,7 @@ placeholder audio (`src/agents/media_producer.py`):
 API-verified growth features (pre-YPP: drive watch-time + subs). All follow the existing
 non-fatal, quota-aware, env-gated patterns.
 
-### 2.1 Auto-playlist chaining (watch-time amplifier)
-
-- **`mcp_servers/youtube_cloud/server.py`** — `POST /tools/upsert_playlist_add_video`:
-  `playlists.list(mine=true, part=snippet)` (the API has **no title filter** → match
-  `snippet.title` client-side against env `YOUTUBE_PLAYLIST_TITLE`, default
-  `LumenLoop AI Documentaries`); if missing, `playlists.insert` (body requires
-  `snippet.title`); then `playlistItems.insert` with `snippet.resourceId`
-  (`kind=youtube#video`, `videoId`) — **do NOT set `snippet.position`** (throws
-  `manualSortRequired` unless the playlist uses manual sort). Scopes `youtube` /
-  `youtube.force-ssl` (not `youtube.upload`). Quota: list 1 + insert 50 + item 50.
-- **`src/schemas/state.py`** — add `playlist_id` / `playlist_url` to `UploadMetadata`.
-- **`src/agents/publisher.py`** — after the real-video-id guard, non-fatal
-  `await upsert_playlist_add_video(...)`; env gate `YOUTUBE_AUTO_PLAYLIST` (default 1).
-- **Tests** — playlist side-effect gated off `demo_*` ids (like FAKE_UPLOAD_ABORTS); called
-  once on a real-id path.
-
-### 2.2 Burned-in subscribe end-card (subscriber conversion at peak intent)
-
-- **`src/agents/media_producer.py`** — in the ffmpeg assembly path (moviepy path skipped),
-  append a rendered subscribe clip to the master concat list: 1920x1080 ffmpeg `drawtext`
-  ("SUBSCRIBE 🔔 new documentary every day") over a color fade; duration from env
-  `CSVG_END_CARD_SECONDS` (default 6, `0` disables). Zero API cost / no quota.
-- **Tests** — concat list includes the end-card entry when enabled; total ≈ sum(shots) + card.
-
-### 2.3 YouTube comment-reply bot (comment velocity → dwell)
-
-- **`mcp_servers/youtube_cloud/server.py`** — `POST /tools/list_comments`
-  (`commentThreads.list` on `videoId`, `textFormat=plainText`, quota 1) and
-  `POST /tools/reply_comment` (`comments.insert` with body `snippet.textOriginal` +
-  `snippet.parentId` — **replies use `comments.insert`, NOT `commentThreads.insert`**,
-  quota 50). Scope `youtube.force-ssl`.
-- **`src/engine/youtube_engagement.py`** (mirrors `active_thread_seeder.py`) — fetch recent
-  top-level comments, filter out own channel, cap `YOUTUBE_REPLY_MAX` (default 3), LLM-grounded
-  replies from `state.verified_facts` (reuse the reply-generation prompt pattern).
-- **`src/agents/publisher.py`** — non-fatal `await reply_to_viewers(...)` after the pinned-comment
-  block; env gate `YOUTUBE_REPLY_BOT` (default 1).
-- **Tests** — ≤ cap replies; self-comments skipped; gated off `demo_*` ids.
-
-*Note:* the on-disk `token.json` scopes (`youtube`, `youtube.upload`, `youtube.readonly`)
-satisfy these writes via the broad `youtube` scope; new endpoints must load credentials with the
-`youtube.force-ssl` scope string (as `insert_pinned_comment` already does), not the
-`youtube.upload`-scoped uploads loader.
-
-### 2.4 Targeted discussion-injection seeding (Tier 1–3)
+### 2.1 Targeted discussion-injection seeding (Tier 1–3)
 
 The growth goal is maximum views + subscribers → YPP → $2,000/month ad revenue. Broadcasting
 multi-social posts into feeds yields low-RPM views and dilutes the viewer segment pre-YPP; the

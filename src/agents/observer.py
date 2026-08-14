@@ -471,7 +471,20 @@ class ObserverAgent:
                     if critic_result and "violations" in critic_result:
                         rejected_claims = critic_result["violations"]
                         for violation in rejected_claims:
-                            violations.append(violation)
+                            # Map the violation string back to a flagged shot ID
+                            matched_sid = None
+                            m = re.search(r"Shot #?(\d+)", violation)
+                            if m:
+                                matched_sid = int(m.group(1))
+                            else:
+                                for sid, sentence, itype in flagged_sentences_info:
+                                    if sentence in violation or violation in sentence:
+                                        matched_sid = sid
+                                        break
+                            if matched_sid is not None:
+                                violations.append(f"Shot #{matched_sid} fact audit violation: {violation}")
+                            else:
+                                violations.append(violation)
                         return violations
                 except Exception as critic_err:
                     print(f"Warning: Critic call failed: {critic_err}. Defaulting to local validation flags.")

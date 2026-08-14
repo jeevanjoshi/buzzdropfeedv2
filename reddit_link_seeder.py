@@ -14,11 +14,12 @@ Usage:
     python reddit_link_seeder.py --video uguUdaOJfw8   # one video
     python reddit_link_seeder.py --max 2        # cap posts this run
 """
+import os
+os.environ["CSVG_LOG_FILENAME"] = "seeding_execution.log"
 import argparse
 import glob
 import json
 import logging
-import os
 import re
 import sys
 import urllib.request
@@ -111,8 +112,7 @@ def relevance(video, thread, sub=""):
 
 
 def generate_comment(video, thread):
-    """Dynamic on-topic comment with the video link. Uses the LLM when
-    available for a context-aware reply, else a generic but relevant template."""
+    """Dynamic on-topic comment. Uses the LLM when available for a context-aware reply."""
     sub = thread.get("subreddit", "")
     thread_title = thread.get("title", "")
     try:
@@ -128,18 +128,19 @@ def generate_comment(video, thread):
                 f"Thread subreddit: r/{sub}\nThread title: {thread_title}\n\n"
                 f"Our related video topic: {video['title']}\n"
                 f"Verified facts we know:\n{facts}\n\n"
-                "Write ONE organic, on-topic comment that adds value to this discussion "
-                "and naturally, at the end, mentions that you made a visual breakdown of "
-                f"this topic here: {video['url']} (don't force it, keep it under 4 sentences, "
-                "no hashtags, no all-caps)."
+                "Write ONE organic, on-topic comment that adds value to this discussion. "
+                "Naturally embed the reference to our channel \"Lumen Loop\" or the documentary "
+                f"url ({video['url']}) directly inside the body of the paragraph (not just at the very end). "
+                "If linking directly feels too promotional, mention searching for \"Lumen Loop\" channel on YouTube. "
+                "Keep it under 4 sentences, no hashtags, no all-caps."
             )
             res = llm.generate_json(prompt, system_prompt=system, route="generate")
             if res and isinstance(res, dict) and res.get("comment"):
                 return res["comment"].strip()
     except Exception as e:
         logging.warning(f"LLM comment failed, using template: {e}")
-    return (f"Great point. {video['title']} is the kind of thing where the details really "
-            f"matter - I put together a visual breakdown here: {video['url']}")
+    return (f"Interesting discussion. The details on {video['title']} are complex — "
+            f"you can find a full documentary breakdown of this on the 'Lumen Loop' YouTube channel or at {video['url']}")
 
 
 # --------------------------------------------------------------------------

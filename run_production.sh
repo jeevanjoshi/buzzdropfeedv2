@@ -212,21 +212,44 @@ show_progress() {
 
 # Check if we should detach into the background
 if [ "${1:-}" != "--no-detach" ]; then
-    LATEST_STATE=$(ls -t logs/state_*.json 2>/dev/null | head -n 1)
+    # Find the most recent state checkpoint that is failed or incomplete (not PUBLISHED_SUCCESS and not DONE)
+    LATEST_STATE=""
+    for f in $(ls -t logs/state_*.json 2>/dev/null); do
+        STAGE=$(grep -o '"execution_stage": "[^"]*' "${f}" 2>/dev/null | head -n 1 | cut -d'"' -f4)
+        if [ -n "${STAGE}" ] && [ "${STAGE}" != "PUBLISHED_SUCCESS" ] && [ "${STAGE}" != "DONE" ]; then
+            LATEST_STATE="${f}"
+            break
+        fi
+    done
+
     RESUME_ARG=""
-    if [ -n "${LATEST_STATE}" ]; then
+    
+    # Check if --resume was explicitly passed in the CLI arguments
+    if [[ " $* " == *" --resume "* ]]; then
+        # Extract pipeline_id if provided after --resume
+        for ((i=1; i<=$#; i++)); do
+            if [[ "${!i}" == "--resume" ]]; then
+                j=$((i+1))
+                if [ -n "${!j:-}" ] && [[ "${!j}" != --* ]]; then
+                    RESUME_ARG="--resume ${!j}"
+                elif [ -n "${LATEST_STATE}" ]; then
+                    PIPELINE_ID=$(grep -o '"pipeline_id": "[^"]*' "${LATEST_STATE}" | head -n 1 | cut -d'"' -f4)
+                    RESUME_ARG="--resume ${PIPELINE_ID}"
+                fi
+                break
+            fi
+        done
+    elif [ -n "${LATEST_STATE}" ]; then
         PIPELINE_ID=$(grep -o '"pipeline_id": "[^"]*' "${LATEST_STATE}" | head -n 1 | cut -d'"' -f4)
         STAGE=$(grep -o '"execution_stage": "[^"]*' "${LATEST_STATE}" | head -n 1 | cut -d'"' -f4)
         
-        if [ "${STAGE}" != "PUBLISHED_SUCCESS" ]; then
-            echo -e "\n[CHECKPOINT] Found incomplete pipeline checkpoint: ${PIPELINE_ID} (Stage: ${STAGE})"
-            echo -n "Would you like to resume this run? (y/N) [Defaulting to N in 30s]: "
-            if read -t 30 response && [[ "${response}" =~ ^[Yy](es)?$ ]]; then
-                echo "[RESUMING] Resuming run ${PIPELINE_ID}..."
-                RESUME_ARG="--resume ${PIPELINE_ID}"
-            else
-                echo -e "\n[STARTING] Starting a fresh pipeline run..."
-            fi
+        echo -e "\n[CHECKPOINT] Found incomplete pipeline checkpoint: ${PIPELINE_ID} (Stage: ${STAGE})"
+        echo -n "Would you like to resume this run? (y/N) [Defaulting to N in 30s]: "
+        if read -t 30 response && [[ "${response}" =~ ^[Yy](es)?$ ]]; then
+            echo "[RESUMING] Resuming run ${PIPELINE_ID}..."
+            RESUME_ARG="--resume ${PIPELINE_ID}"
+        else
+            echo -e "\n[STARTING] Starting a fresh pipeline run..."
         fi
     fi
 
@@ -295,6 +318,11 @@ if command -v rsync >/dev/null 2>&1; then
             rsync -az --exclude '*.onnx' --exclude '*.bin' --exclude '*.mp3' --exclude '*.wav' \
                 -e ssh \
                 logs/ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/logs/" 2>/dev/null
+            for f in channel_stats.json published_topics.json; do
+                if [ -f "$f" ]; then
+                    rsync -az -e ssh "$f" "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/" 2>/dev/null
+                fi
+            done
             sleep 15
         done
     }
@@ -329,7 +357,12 @@ finalize() {
                 -e ssh \
                 logs/ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/logs/" 2>/dev/null \
                 || echo "[WARN] Failed to push logs to Pi" >> "${LOG_FILE}"
-            echo "[SYNC] Final logs pushed to Pi." >> "${LOG_FILE}"
+            for f in channel_stats.json published_topics.json; do
+                if [ -f "$f" ]; then
+                    rsync -az -e ssh "$f" "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/" 2>/dev/null
+                fi
+            done
+            echo "[SYNC] Final logs and state synced to Pi." >> "${LOG_FILE}"
         fi
     }
     return "$ec"

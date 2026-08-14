@@ -1564,6 +1564,9 @@ class StoryDesignerAgent:
             result = None
         if result and result.get("title"):
             title = str(result["title"]).strip()
+            # Guard against photo-gallery / picture listicle promises in video titles
+            title = re.sub(r"\b\d+\s+(photos?|pictures?|images?)\s+of\b", "The Truth Behind", title, flags=re.IGNORECASE)
+            title = re.sub(r"\b(rare\s+photos?|magnificent\s+photos?|see\s+photos?|photo\s+gallery)\b", "Deep Dive", title, flags=re.IGNORECASE)
             if 10 <= len(title) <= 70:
                 return title
         return None

@@ -1267,6 +1267,41 @@ def case_synthetic_topic_deduplication():
 
 
 # ---------------------------------------------------------------------------
+# Case 18 — YouTube retention features: playlist chaining, endcard & comment replies
+# ---------------------------------------------------------------------------
+def case_youtube_retention_and_engagement():
+    import asyncio
+    from src.agents.publisher import PublisherAgent
+    from src.agents.media_producer import generate_subscribe_endcard
+    from src.schemas.state import GlobalState, ScriptData, ShotData, AssetPaths, TopicCandidate
+    import mcp_servers.youtube_cloud.server as yt_server
+
+    # 1. Test subscribe end-card generator (clean FFmpeg generation)
+    test_endcard_path = "/tmp/test_subscribe_endcard.mp4"
+    endcard_ok = generate_subscribe_endcard(test_endcard_path, duration_sec=1.5)
+    if os.path.exists(test_endcard_path):
+        os.remove(test_endcard_path)
+
+    # 2. Test mock playlist creation endpoint
+    async def _test_playlist():
+        orig_mock = yt_server._MOCK_ENABLED
+        yt_server._MOCK_ENABLED = True
+        try:
+            req = yt_server.UpsertPlaylistRequest(video_id="hermetic-test-vid-1", playlist_title="Test Documentaries")
+            res = await yt_server.upsert_playlist_add_video(req)
+            return res.get("status") == "mock" and "playlist_id" in res
+        finally:
+            yt_server._MOCK_ENABLED = orig_mock
+
+    playlist_ok = asyncio.run(_test_playlist())
+
+    passed = endcard_ok and playlist_ok
+    record("YOUTUBE_RETENTION_ENGAGEMENT", passed,
+           f"endcard_generated={endcard_ok}, playlist_mock_ok={playlist_ok}")
+    return passed
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def main():
@@ -1288,6 +1323,7 @@ def main():
     case_region_revenue_dominates()
     case_revenue_goal_alignment()
     case_synthetic_topic_deduplication()
+    case_youtube_retention_and_engagement()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

@@ -7,6 +7,8 @@ informative, non-promotional comments on permissive subreddits, respecting the
 per-account daily cap, skipping already-posted threads, and learning per-sub
 permissiveness for future link posting.
 """
+import os
+os.environ["CSVG_LOG_FILENAME"] = "seeding_execution.log"
 import argparse
 import json
 import logging

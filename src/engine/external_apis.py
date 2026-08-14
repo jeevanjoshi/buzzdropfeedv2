@@ -120,6 +120,91 @@ class ExternalAPIManager:
 
         return {"symbol": symbol, "price": "$125.40", "change": "+3.45%"}
 
+    def fetch_alpha_vantage_stock_history(self, symbol: str = "NVDA", points: int = 5) -> Dict[str, Any]:
+        """
+        Fetches multi-day historical stock price series (TIME_SERIES_DAILY or yfinance)
+        to render realistic market trend lines rather than a synthetic straight line.
+        """
+        if self.alpha_vantage_key:
+            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={self.alpha_vantage_key}"
+            try:
+                res = requests.get(url, timeout=6)
+                if res.status_code == 200:
+                    data = res.json().get("Time Series (Daily)", {})
+                    if data:
+                        sorted_dates = sorted(data.keys())[-points:]
+                        labels = []
+                        values = []
+                        for dt in sorted_dates:
+                            try:
+                                from datetime import datetime
+                                d_obj = datetime.strptime(dt, "%Y-%m-%d")
+                                labels.append(d_obj.strftime("%b %d"))
+                            except Exception:
+                                labels.append(dt[5:])
+                            close_p = float(data[dt].get("4. close", 0.0))
+                            values.append(round(close_p, 2))
+                        if len(values) >= 2:
+                            first_val, last_val = values[0], values[-1]
+                            change_pct = round(((last_val - first_val) / first_val) * 100.0, 2) if first_val else 0.0
+                            return {
+                                "symbol": symbol,
+                                "labels": labels,
+                                "values": values,
+                                "price": last_val,
+                                "change": change_pct,
+                                "grounded": True,
+                            }
+            except Exception:
+                pass
+
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="1mo")
+            if not hist.empty and len(hist) >= 2:
+                recent = hist.tail(points)
+                labels = [d.strftime("%b %d") for d in recent.index]
+                values = [round(float(p), 2) for p in recent["Close"].values]
+                first_val, last_val = values[0], values[-1]
+                change_pct = round(((last_val - first_val) / first_val) * 100.0, 2) if first_val else 0.0
+                return {
+                    "symbol": symbol,
+                    "labels": labels,
+                    "values": values,
+                    "price": last_val,
+                    "change": change_pct,
+                    "grounded": True,
+                }
+        except Exception:
+            pass
+
+        quote = self.fetch_alpha_vantage_stock_quote(symbol)
+        raw_price = re.sub(r"[^\d.]", "", quote.get("price", "125.40") or "125.40")
+        raw_change = re.sub(r"[^\d.+-]", "", quote.get("change", "3.45") or "3.45")
+        try:
+            curr_p = float(raw_price)
+        except ValueError:
+            curr_p = 125.40
+        try:
+            chg = float(raw_change)
+        except ValueError:
+            chg = 3.45
+        # 5-point realistic historical trend leading up to current price
+        base = curr_p / (1.0 + chg / 100.0)
+        fluctuations = [-0.018, +0.012, -0.006, +0.015, chg / 100.0]
+        values = [round(base * (1.0 + f), 2) for f in fluctuations]
+        values[-1] = round(curr_p, 2)
+        return {
+            "symbol": symbol,
+            "labels": ["5d ago", "4d ago", "3d ago", "Yesterday", "Today"],
+            "values": values,
+            "price": curr_p,
+            "change": chg,
+            "grounded": False,
+        }
+
+
     def fetch_exa_semantic_facts(self, query: str) -> List[VerifiedFact]:
         """
         Executes AI semantic web search fact retrieval via Exa Search API.

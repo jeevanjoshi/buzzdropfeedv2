@@ -417,7 +417,7 @@ class RedditBrowserPoster:
                     f"(might be AutoMod removal; retiring after sustained failures)."
                 )
             logger.info(f"[RedditBrowserPoster] Comment posted by u/{uid} (visible={verified}).")
-            return True
+            return verified
         except Exception as e:
             logger.error(f"[RedditBrowserPoster] Posting failed for u/{uid}: {e}")
             return False
@@ -430,7 +430,9 @@ class RedditBrowserPoster:
         if ta.count() == 0:
             logger.warning("[RedditBrowserPoster] No comment textarea on old.reddit (sub may block low-karma accounts).")
             return False
-        ta.fill(text)
+        ta.focus()
+        # Humanized typing: type the text character by character with random delays to mimic human keypress speed
+        ta.type(text, delay=random.randint(15, 45))
         self._random_pace(2)
 
         def _confirm() -> bool:

@@ -215,15 +215,26 @@ def _resumable_upload(youtube, body: Dict[str, Any], video_path: str, thumbnail_
     }
 
 
+class UpsertPlaylistRequest(BaseModel):
+    video_id: str
+    playlist_title: str = "LumenLoop AI Documentaries"
+    description: Optional[str] = "Deep-dive financial and technological storytelling documentaries."
+
+
+class ListCommentsRequest(BaseModel):
+    video_id: str
+    max_results: int = 20
+
+
+class ReplyCommentRequest(BaseModel):
+    parent_comment_id: str
+    reply_text: str
+
+
 @app.post("/tools/insert_pinned_comment")
 async def insert_pinned_comment(req: InsertCommentRequest):
     """
     Inserts a pinned engagement question comment on a published YouTube video using YouTube Data API v3.
-
-    This is an OPTIONAL engagement side-effect: its failure must never gate publish
-    success, so on a real (non-mock) failure it returns ``status: "error"`` rather
-    than raising. The fabricated ``comment_*`` id is only produced when
-    ``YOUTUBE_UPLOAD_MOCK=1``.
     """
     try:
         token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
@@ -271,6 +282,171 @@ async def insert_pinned_comment(req: InsertCommentRequest):
         "video_id": req.video_id,
         "pinned": False
     }
+
+
+@app.post("/tools/upsert_playlist_add_video")
+async def upsert_playlist_add_video(req: UpsertPlaylistRequest):
+    """
+    Finds or creates a playlist by title and appends the video to it using YouTube Data API v3.
+    Non-fatal: failures return status: "error" without raising.
+    """
+    try:
+        token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
+        if os.path.exists(token_path):
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            from googleapiclient.discovery import build
+
+            credentials = Credentials.from_authorized_user_file(token_path)
+            if credentials and credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
+
+            if credentials:
+                youtube = build("youtube", "v3", credentials=credentials)
+                
+                # 1. Check existing playlists (playlists.list with mine=true)
+                playlist_id = None
+                list_req = youtube.playlists().list(part="snippet", mine=True, maxResults=50)
+                list_res = list_req.execute()
+                for item in (list_res or {}).get("items", []):
+                    if item.get("snippet", {}).get("title", "").strip().lower() == req.playlist_title.strip().lower():
+                        playlist_id = item.get("id")
+                        break
+
+                # 2. If missing, create the playlist
+                if not playlist_id:
+                    create_body = {
+                        "snippet": {
+                            "title": req.playlist_title,
+                            "description": req.description or "Documentary Series"
+                        },
+                        "status": {
+                            "privacyStatus": YOUTUBE_PRIVACY_STATUS
+                        }
+                    }
+                    create_res = youtube.playlists().insert(part="snippet,status", body=create_body).execute()
+                    playlist_id = (create_res or {}).get("id")
+
+                # 3. Add video to the playlist
+                if playlist_id:
+                    item_body = {
+                        "snippet": {
+                            "playlistId": playlist_id,
+                            "resourceId": {
+                                "kind": "youtube#video",
+                                "videoId": req.video_id
+                            }
+                        }
+                    }
+                    item_res = youtube.playlistItems().insert(part="snippet", body=item_body).execute()
+                    playlist_item_id = (item_res or {}).get("id")
+                    return {
+                        "status": "success",
+                        "playlist_id": playlist_id,
+                        "playlist_item_id": playlist_item_id,
+                        "playlist_url": f"https://www.youtube.com/playlist?list={playlist_id}",
+                        "video_id": req.video_id
+                    }
+    except Exception as e:
+        if _MOCK_ENABLED:
+            print(f"[YouTube Playlist] MOCK mode active; playlist call mock return: {e}")
+            suffix = os.urandom(4).hex()
+            return {
+                "status": "mock",
+                "playlist_id": f"PL_mock_{suffix}",
+                "playlist_url": f"https://www.youtube.com/playlist?list=PL_mock_{suffix}",
+                "video_id": req.video_id
+            }
+        print(f"[YouTube Playlist] Notice: Playlist API returned: {e}")
+
+    return {
+        "status": "error",
+        "playlist_id": "",
+        "playlist_url": "",
+        "video_id": req.video_id
+    }
+
+
+@app.post("/tools/list_comments")
+async def list_comments(req: ListCommentsRequest):
+    """
+    Fetches recent top-level comments for a video using YouTube Data API v3.
+    """
+    try:
+        token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
+        if os.path.exists(token_path):
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            from googleapiclient.discovery import build
+
+            credentials = Credentials.from_authorized_user_file(token_path)
+            if credentials and credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
+
+            if credentials:
+                youtube = build("youtube", "v3", credentials=credentials)
+                threads = youtube.commentThreads().list(
+                    part="snippet",
+                    videoId=req.video_id,
+                    textFormat="plainText",
+                    maxResults=req.max_results
+                ).execute()
+
+                comments = []
+                for item in (threads or {}).get("items", []):
+                    top = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
+                    cid = item.get("id")
+                    text = top.get("textDisplay", "")
+                    author = top.get("authorDisplayName", "")
+                    author_channel_id = top.get("authorChannelId", {}).get("value", "")
+                    comments.append({
+                        "comment_id": cid,
+                        "author": author,
+                        "author_channel_id": author_channel_id,
+                        "text": text
+                    })
+                return {"status": "success", "comments": comments}
+    except Exception as e:
+        if _MOCK_ENABLED:
+            return {"status": "mock", "comments": []}
+        print(f"[YouTube Comments] Notice: List comments error: {e}")
+
+    return {"status": "error", "comments": []}
+
+
+@app.post("/tools/reply_comment")
+async def reply_comment(req: ReplyCommentRequest):
+    """
+    Inserts a reply to an existing comment using YouTube Data API v3 comments.insert.
+    """
+    try:
+        token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
+        if os.path.exists(token_path):
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            from googleapiclient.discovery import build
+
+            credentials = Credentials.from_authorized_user_file(token_path)
+            if credentials and credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
+
+            if credentials:
+                youtube = build("youtube", "v3", credentials=credentials)
+                body = {
+                    "snippet": {
+                        "parentId": req.parent_comment_id,
+                        "textOriginal": req.reply_text
+                    }
+                }
+                res = youtube.comments().insert(part="snippet", body=body).execute()
+                reply_id = (res or {}).get("id")
+                return {"status": "success", "reply_id": reply_id}
+    except Exception as e:
+        if _MOCK_ENABLED:
+            return {"status": "mock", "reply_id": f"reply_mock_{os.urandom(4).hex()}"}
+        print(f"[YouTube Reply] Notice: Reply API error: {e}")
+
+    return {"status": "error", "reply_id": ""}
 
 
 if __name__ == "__main__":

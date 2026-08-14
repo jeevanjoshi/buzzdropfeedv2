@@ -69,14 +69,21 @@ Need to change something? Start here, not with a global grep.
 - `src/schemas/` — pydantic models (`state.py`, `a2a.py`); `GlobalState` is the checkpoint schema.
 - `mcp_servers/` — three standalone FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi), `media_cloud` (fal/flux visuals + ffmpeg, port 8001), `youtube_cloud` (upload/quota, port 8002). Only `audio_edge` has a committed systemd unit (`kokoro_tts.service`, port 8000, Pi); `media_cloud`/`youtube_cloud` run via `uvicorn.run` (no committed unit; `deploy.sh` only restarts `kokoro_tts`). Add new model/http endpoints here, not in `src/engine`.
 
-## Dashboard (Rust)
-- `rust_dashboard/` — zero-dependency (std-only) Rust web dashboard that **replaces the deprecated Python `dashboard_server.py` + legacy `index.html`**. Built with `cargo build --release`; run as `csvg_rust_dashboard.service` (port 8080, `CSVG_ROOT` env points at the repo dir holding `logs/` + `*.json`). Serves a self-contained SPA (`rust_dashboard/web/index.html`, embedded via `include_str!`) plus JSON endpoints: `/api/status` (heartbeat freshness + latest stage + channel stats), `/api/logs` (`pipeline_run.log` tail + `csvg_execution.log`), `/api/published` (`published_topics.json`), `/api/budget` (per-run + monthly ledger from `logs/run_budget.json`), `/api/runs` (recent `logs/state_*.json` checkpoints), `/health`. No JSON crate — `src/json.rs` is a minimal parser/serializer; build the binary per-node (the OCI x86 build is NOT pushed to the Pi via `sync_to_pi.sh`, which excludes `rust_dashboard/target/`; `deploy.sh` builds it on the Pi and switches the service).
+## Dashboard (Rust) — Runs on Raspberry Pi 5 Edge Node
+- `rust_dashboard/` — zero-dependency (std-only) high-performance Rust web dashboard that **runs on the Raspberry Pi 5 (`csvg_rust_dashboard.service`, port 8080)**. Replaces the deprecated Python `dashboard_server.py` + legacy `index.html`.
+- **Pi Deployment & Build**: Because the Pi is ARM64, `rust_dashboard` is compiled natively on the Pi via `cargo build --release` (`deploy.sh`), and the systemd unit `csvg_rust_dashboard.service` runs under user `jeevanjoshi` with `CSVG_ROOT=/home/jeevanjoshi/buzzdropfeedv2`.
+- **Sync & State Visibility**: During live runs on OCI, `run_production.sh` periodically syncs `logs/pipeline_heartbeat.json`, `logs/pipeline_run.log`, `logs/state_*.json`, and `channel_stats.json` to the Pi via SSH/rsync so the Pi dashboard renders live telemetry, structured logs, published video cards, and pinned seed comments in real time.
+- **Embedded SPA & Endpoints**: Serves a self-contained single-page application (`rust_dashboard/web/index.html`, embedded via `include_str!`) with JSON endpoints: `/api/status` (heartbeat freshness + channel phase stats), `/api/logs` (`pipeline_run.log` tail + `csvg_execution.log`), `/api/published` (`published_topics.json`), `/api/budget` (`logs/run_budget.json`), `/api/runs` (`logs/state_*.json` checkpoints including pinned seed comments and playlist links), and `/api/cron` (bidirectional OCI/Pi crontab sync).
 
-## Distributed layout (this is not a single-host repo)
-- Master pipeline (agents, media_cloud, youtube_cloud) runs on the OCI cloud host.
-- Audio/TTS (audio_edge, Kokoro, Whisper) runs on a Raspberry Pi 5 edge node, reached via `AUDIO_EDGE_URL` and `LLAMA_CPP_URL`.
-- `deploy.sh` git-clones/reset-hards the repo to both nodes over SSH and restarts services; it also builds the Rust dashboard on the Pi and fires up `csvg_rust_dashboard.service` (stopping the deprecated Python one); `sync_to_pi.sh` rsyncs the working tree to the Pi (excludes logs/media/venv/`rust_dashboard/target/`).
-- `run_production.sh` pushes logs/state/heartbeat to the Pi for a dashboard there; the Pi dashboard reads the fixed `logs/pipeline_run.log` name and heartbeat freshness to infer "running".
+## Distributed layout (multi-node architecture)
+- **Master pipeline (OCI Cloud Host)**: Orchestrator, sequential A2A agents (fact_retriever, story_designer, observer, media_producer, publisher), `media_cloud` (FLUX.1 + FFmpeg assembly, port 8001), and `youtube_cloud` (upload / playlist chaining / comment reply bot, port 8002).
+- **Edge node & Dashboard (Raspberry Pi 5)**:
+  1. **Audio/TTS Edge**: Kokoro-82M TTS + faster-whisper word alignment (`audio_edge` FastAPI server on port 8000 via `kokoro_tts.service`).
+  2. **Dashboard Host**: Rust SPA dashboard server on port 8080 (`csvg_rust_dashboard.service`).
+  3. **Residential Reddit Automation**: `reddit_browser_poster.py` / `reddit_warmup.py` running from the Pi's residential IP to avoid datacenter IP bans.
+- `deploy.sh` git-clones/reset-hards the repo to both nodes over SSH, builds the Rust dashboard binary on the Pi, and restarts `kokoro_tts` and `csvg_rust_dashboard` services.
+- `sync_to_pi.sh` rsyncs the working tree to the Pi (excludes logs/media/venv/`rust_dashboard/target/`).
+- `run_production.sh` pushes logs/state/heartbeat to the Pi so the dashboard reflects live pipeline runs.
 
 ## Runtime/generated files (all gitignored, auto-created per run)
 - `logs/state_<pipeline_id>.json` — checkpoint/resume source.

@@ -525,7 +525,8 @@ async def generate_thumbnail(req: ThumbnailRequest):
 async def generate_dynamic_chart(req: ChartRequest):
     """
     Renders an animated 16:9 financial stock / market trend data chart video clip with dynamic date context,
-    explicit units (e.g., '$ Billion', '₹ Crores', '%'), and high-contrast styling.
+    explicit units (e.g., '$ Billion', '₹ Crores', '%'), modern floating glassmorphic card canvas,
+    multi-layer depth perception, glowing area fills, and high-contrast callouts.
     Supports `chart_type`: 'line' (trend) or 'bar' (discrete comparisons / percentages).
     On any render failure this RAISES so the caller can fall through to a visible
     placeholder caught by Gate 7 — it never silently writes a fake "chart".
@@ -538,6 +539,7 @@ async def generate_dynamic_chart(req: ChartRequest):
 
         try:
             import matplotlib.pyplot as plt
+            import numpy as np
 
             labels = [str(l) for l in (req.labels or [])]
             values = [float(v) for v in (req.values or [])]
@@ -550,20 +552,23 @@ async def generate_dynamic_chart(req: ChartRequest):
             labels = labels[:len(values)]
 
             ctype = str(req.chart_type or "line").lower()
+            x = np.arange(len(values))
 
             plt.style.use('dark_background')
-            fig, ax = plt.subplots(figsize=(16, 9), dpi=120)
+            fig = plt.figure(figsize=(16, 9), dpi=120)
 
-            # Sleek modern dark container style
-            fig.patch.set_facecolor('#090d16')
-            ax.set_facecolor('#090d16')
+            # Deep cinematic background
+            fig.patch.set_facecolor('#070a12')
 
-            # Hide unnecessary borders for minimalist floating aesthetic
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            ax.spines['left'].set_visible(False)
-            ax.spines['bottom'].set_color('#30363d')
-            ax.spines['bottom'].set_linewidth(1.5)
+            # Floating glassmorphic card container for depth perception
+            ax = fig.add_axes([0.10, 0.16, 0.80, 0.64])
+            ax.set_facecolor('#0c1322')
+
+            # Clean borders
+            for spine in ['top', 'right', 'left']:
+                ax.spines[spine].set_visible(False)
+            ax.spines['bottom'].set_color('#1e293b')
+            ax.spines['bottom'].set_linewidth(2)
 
             def format_val(val, unit):
                 if not unit:
@@ -574,32 +579,64 @@ async def generate_dynamic_chart(req: ChartRequest):
                 return f"{val:g}{unit}" if unit.startswith("%") else f"{val:g} {unit}"
 
             if ctype == "bar":
-                # Modern uniform cyan theme for bar charts instead of messy rainbow
-                bars = ax.bar(labels, values, color='#00e5ff', width=0.5, edgecolor='#00ffd8', linewidth=1.5, alpha=0.85)
-                ax.set_xlabel("", fontsize=18)
+                width = 0.48
+                # Background depth shadow bars
+                ax.bar(x, values, width=width * 1.08, color='#00e5ff', alpha=0.08, zorder=2)
+                # Main 3D-styled bars with cyan glow outline
+                bars = ax.bar(x, values, width=width, color='#00b4d8', edgecolor='#00ffd8', linewidth=2, alpha=0.88, zorder=3)
+                # Top edge highlight on each bar for 3D depth perception
                 for bar, val in zip(bars, values):
+                    ax.plot([bar.get_x() + 0.02, bar.get_x() + bar.get_width() - 0.02], [val, val], color='#ffffff', linewidth=3, zorder=4)
                     ax.annotate(format_val(val, req.unit_symbol), (bar.get_x() + bar.get_width() / 2.0, val),
-                                textcoords="offset points", xytext=(0, 10),
-                                ha='center', fontsize=14, color='white', fontweight='semibold')
+                                textcoords="offset points", xytext=(0, 14),
+                                ha='center', fontsize=13, color='white', fontweight='bold',
+                                bbox=dict(boxstyle='round,pad=0.4', fc='#111c30', ec='#00ffd8', lw=1.2, alpha=0.92), zorder=5)
             else:
-                # Modern hollow marker line chart with premium area glow fill
-                ax.plot(labels, values, color='#00e5ff', linewidth=4, marker='o',
-                        markersize=10, markerfacecolor='#090d16', markeredgecolor='#00e5ff', markeredgewidth=3)
-                ax.fill_between(labels, values, color='#00e5ff', alpha=0.12)
-                for x, y in zip(labels, values):
-                    ax.annotate(format_val(y, req.unit_symbol), (x, y), textcoords="offset points",
-                                xytext=(0, 15), ha='center', fontsize=14, color='white', fontweight='semibold')
+                # Multi-layered glowing area fill for depth perception
+                for alpha, lw in [(0.04, 18), (0.08, 12), (0.15, 6)]:
+                    ax.plot(x, values, color='#00ffd8', linewidth=lw, alpha=alpha, zorder=2)
 
-            ax.set_title(chart_title, fontsize=26, color='white', pad=30, fontweight='bold', family='sans-serif')
-            ax.set_ylabel(f"Value ({req.unit_symbol})" if req.unit_symbol else "Value", fontsize=16, color='#8b949e', labelpad=15, fontweight='semibold')
-            ax.tick_params(axis='both', which='major', labelsize=14, colors='#8b949e')
-            plt.setp(ax.get_xticklabels(), rotation=20, ha='right')  # Rotate labels to prevent cluttering
-            ax.grid(True, color='#1f2937', linestyle='-', linewidth=1)
+                # Main high-contrast trend line
+                ax.plot(x, values, color='#00e5ff', linewidth=3.5, marker='o',
+                        markersize=9, markerfacecolor='#070a12', markeredgecolor='#00ffd8', markeredgewidth=2.5, zorder=5)
 
-            plt.savefig(chart_png, bbox_inches='tight', facecolor=fig.get_facecolor())
+                min_val = min(values) * 0.98
+                ax.fill_between(x, values, min_val, color='#00e5ff', alpha=0.12, zorder=2)
+                ax.fill_between(x, values, min_val, color='#00ffd8', alpha=0.05, zorder=2)
+
+                # Modern floating callout badges
+                last_x, last_y = x[-1], values[-1]
+                first_y = values[0]
+                chg_str = ""
+                if first_y:
+                    pct = ((last_y - first_y) / first_y) * 100.0
+                    chg_str = f" ▲ +{pct:.1f}%" if pct >= 0 else f" ▼ {pct:.1f}%"
+
+                ax.annotate(f"{format_val(last_y, req.unit_symbol)}{chg_str}", (last_x, last_y),
+                            textcoords='offset points', xytext=(0, 22),
+                            ha='center', fontsize=13, color='#00ffd8', fontweight='bold',
+                            bbox=dict(boxstyle='round,pad=0.5', fc='#111c30', ec='#00ffd8', lw=1.5, alpha=0.95), zorder=6)
+
+                for xi, yi in zip(x[:-1], values[:-1]):
+                    ax.annotate(format_val(yi, req.unit_symbol), (xi, yi), textcoords='offset points', xytext=(0, 12),
+                                ha='center', fontsize=11, color='#94a3b8', fontweight='bold', zorder=5)
+
+            # High-tech grid lines
+            ax.grid(True, linestyle='--', color='#1e293b', alpha=0.75, zorder=1)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, fontsize=13, color='#94a3b8', fontweight='bold')
+            ax.tick_params(axis='both', colors='#64748b', labelsize=12)
+            plt.setp(ax.get_xticklabels(), rotation=15, ha='right')
+
+            # Modern header typography
+            fig.text(0.10, 0.89, chart_title, fontsize=22, fontweight='bold', color='white', family='sans-serif')
+            subtitle = f"DATA METRIC: {req.unit_symbol}" if req.unit_symbol else "HISTORICAL MARKET METRICS"
+            fig.text(0.10, 0.85, subtitle.upper(), fontsize=12, fontweight='bold', color='#00ffd8', family='sans-serif')
+
+            plt.savefig(chart_png, bbox_inches='tight', facecolor=fig.get_facecolor(), dpi=120)
             plt.close(fig)
 
-            # Convert chart PNG to 16:9 static looped video (no Ken Burns motion for charts)
+            # Convert chart PNG to 16:9 static video (no Ken Burns motion for charts)
             cmd = [
                 "ffmpeg", "-y", "-loop", "1", "-i", chart_png,
                 "-vf", ("scale=1920:1080:force_original_aspect_ratio=decrease,"
@@ -610,8 +647,6 @@ async def generate_dynamic_chart(req: ChartRequest):
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return {"status": "success", "engine": f"matplotlib_chart_{ctype}", "path": req.output_mp4_path}
         except Exception:
-            # No silent "DUMMY_CHART_MP4" fallback: raise so the caller falls
-            # through to a visible placeholder that the Gate 7 post-check flags.
             raise HTTPException(status_code=500, detail="matplotlib chart render failed")
 
     except HTTPException:

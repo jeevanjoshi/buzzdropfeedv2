@@ -17,7 +17,8 @@ class PipelineLogger:
     def __init__(self, log_dir: str = "logs"):
         self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
-        self.log_file = os.path.join(self.log_dir, "csvg_execution.log")
+        log_name = os.getenv("CSVG_LOG_FILENAME", "csvg_execution.log")
+        self.log_file = os.path.join(self.log_dir, log_name)
 
         # Configure Root Logger
         self.logger = logging.getLogger("CSVG_PIPELINE")
@@ -41,7 +42,8 @@ class PipelineLogger:
     def set_log_dir(self, log_dir: str):
         """Re-route all logging output to a different directory."""
         self.log_dir = log_dir
-        self.log_file = os.path.join(self.log_dir, "csvg_execution.log")
+        log_name = os.getenv("CSVG_LOG_FILENAME", "csvg_execution.log")
+        self.log_file = os.path.join(self.log_dir, log_name)
         os.makedirs(self.log_dir, exist_ok=True)
         # Recreate file handler on the new log file path
         for handler in list(self.logger.handlers):

@@ -2,126 +2,284 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#05070f">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#060813">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>CSVG Live Dashboard (Rust)</title>
 <style>
   :root {
-    --bg:#05070f; --panel:rgba(15,20,38,.62); --border:rgba(255,255,255,.08);
-    --text:#eef1f8; --muted:#7c8598; --blue:#3b82f6; --green:#10b981;
-    --red:#ef4444; --purple:#8b5cf6; --amber:#f59e0b; --cyan:#22d3ee;
+    --bg:#060813;
+    --panel:rgba(14, 19, 36, 0.72);
+    --panel-solid:#0d1326;
+    --border:rgba(255, 255, 255, 0.08);
+    --border-hover:rgba(255, 255, 255, 0.16);
+    --text:#f1f5f9;
+    --muted:#94a3b8;
+    --dim:#64748b;
+    --blue:#3b82f6;
+    --blue-glow:rgba(59, 130, 246, 0.25);
+    --green:#10b981;
+    --green-glow:rgba(16, 185, 129, 0.25);
+    --red:#ef4444;
+    --purple:#8b5cf6;
+    --amber:#f59e0b;
+    --cyan:#06b6d4;
+    --cyan-glow:rgba(6, 182, 212, 0.25);
     --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
-  html { -webkit-text-size-adjust:100%; }
+  html { -webkit-text-size-adjust:100%; height: 100%; }
   body {
-    font-family:'Outfit',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     background:
-      radial-gradient(circle at 12% 18%,rgba(59,130,246,.14),transparent 42%),
-      radial-gradient(circle at 88% 78%,rgba(139,92,246,.13),transparent 42%),
-      radial-gradient(circle at 72% 12%,rgba(16,185,129,.08),transparent 32%),
-      radial-gradient(circle at 25% 85%,rgba(34,211,238,.07),transparent 34%),var(--bg);
-    color:var(--text); min-height:100vh; overflow-x:hidden;
+      radial-gradient(circle at 15% 10%, rgba(59,130,246,.12), transparent 40%),
+      radial-gradient(circle at 85% 75%, rgba(139,92,246,.12), transparent 40%),
+      var(--bg);
+    color:var(--text); min-height:100%; min-height:100dvh; overflow-x:hidden;
     -webkit-tap-highlight-color:transparent;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
-  .wrap { max-width:1220px; margin:0 auto; padding:28px 20px 90px; }
+  .wrap {
+    max-width: 1020px;
+    margin: 0 auto;
+    padding: calc(68px + env(safe-area-inset-top, 0px)) 16px calc(80px + env(safe-area-inset-bottom, 0px));
+    width: 100%;
+    overflow-x: hidden;
+  }
 
-  header { display:flex; justify-content:space-between; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:24px; padding-bottom:18px; border-bottom:1px solid var(--border); }
-  .brand { display:flex; align-items:center; gap:14px; }
-  .logo { width:46px; height:46px; border-radius:13px; background:linear-gradient(135deg,#3b82f6,#8b5cf6 60%,#22d3ee); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px; color:#fff; box-shadow:0 10px 26px rgba(59,130,246,.4); }
-  .brand h1 { font-size:21px; font-weight:800; letter-spacing:-.4px; }
-  .brand p { font-size:11.5px; color:var(--muted); }
-  .h-right { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  /* Header */
+  header { 
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    height: calc(56px + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+    background: rgba(6, 8, 19, 0.85);
+    backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    gap: 8px;
+  }
+  .brand { display:flex; align-items:center; gap:8px; min-width:0; flex-shrink:1; }
+  .logo {
+    width:32px; height:32px; border-radius:8px; flex-shrink:0;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6 60%, #22d3ee);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:800; font-size:10px; color:#fff;
+    box-shadow: 0 4px 16px rgba(59,130,246,.35);
+  }
+  .brand h1 { font-size:15px; font-weight:800; letter-spacing:-.3px; color: #fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .brand p { display: none; }
+  .h-right { display:flex; align-items:center; gap:6px; flex-shrink:0; }
 
-  .pill { display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--border); padding:9px 14px; border-radius:30px; font-size:12.5px; font-weight:600; }
-  .dot { width:9px; height:9px; border-radius:50%; }
-  .dot.running { background:var(--green); animation:blink 1.2s infinite; }
+  /* Pill Status Badge */
+  .pill {
+    display:flex; align-items:center; gap:6px; flex-shrink:0;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border);
+    padding: 6px 11px; border-radius: 30px;
+    font-size: 11.5px; font-weight: 600;
+    white-space: nowrap;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .dot.running { background:var(--green); animation:blink 1.2s infinite; box-shadow:0 0 8px var(--green); }
   .dot.idle { background:#64748b; }
-  .dot.error { background:var(--red); animation:blink .7s infinite; }
-  .pill.running { border-color:rgba(16,185,129,.35); }
-  .pill.error { border-color:rgba(239,68,68,.4); }
+  .dot.error { background:var(--red); animation:blink .7s infinite; box-shadow:0 0 8px var(--red); }
+  .pill.running { border-color:rgba(16,185,129,.35); background:rgba(16,185,129,.06); }
+  .pill.error { border-color:rgba(239,68,68,.35); background:rgba(239,68,68,.06); }
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 
-  .btn { background:rgba(255,255,255,.05); border:1px solid var(--border); color:var(--text); padding:9px 15px; border-radius:30px; font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; }
-  .btn:hover { background:rgba(255,255,255,.1); }
-  .btn:active { transform:scale(.96); }
+  /* Buttons */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    background: rgba(255,255,255,.05); border: 1px solid var(--border);
+    color: var(--text); padding: 7px 13px; border-radius: 10px;
+    font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+    transition: all 0.15s ease; -webkit-user-select: none; user-select: none;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .btn:hover { background: rgba(255,255,255,.09); border-color: var(--border-hover); }
+  .btn:active { transform: scale(.97); opacity: 0.9; }
+  .btn-primary {
+    background: var(--blue); color: #fff; border: none;
+    box-shadow: 0 4px 14px rgba(59,130,246,0.3);
+  }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-purple {
+    background: var(--purple); color: #fff; border: none;
+    box-shadow: 0 4px 14px rgba(139,92,246,0.3);
+  }
+  .btn-purple:hover { background: #7c3aed; }
+  .btn-danger {
+    background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3);
+  }
+  .btn-danger:hover { background: rgba(239,68,68,0.25); }
 
-  .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:22px; }
-  .tab { background:transparent; border:1px solid transparent; color:var(--muted); padding:10px 16px; border-radius:10px; cursor:pointer; font-family:inherit; font-weight:600; font-size:13.5px; }
-  .tab:hover { color:var(--text); background:rgba(255,255,255,.04); }
-  .tab.active { color:var(--text); background:var(--panel); border-color:var(--border); }
+  /* SVG Icons in Buttons / Tabs */
+  .svg-icon {
+    display: inline-block; vertical-align: middle; flex-shrink: 0;
+  }
 
-  .stage { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:14px 18px; background:var(--panel); border:1px solid var(--border); border-radius:14px; margin-bottom:20px; }
-  .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1.2px; font-weight:700; }
-  .badge { font-family:var(--mono); font-size:12.5px; font-weight:600; padding:5px 12px; border-radius:8px; border:1px solid; }
-  .hb { margin-left:auto; font-size:12px; color:var(--muted); font-family:var(--mono); }
+  /* Bottom Navigation Tabs for Mobile / Desktop */
+  .tabs { 
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+    height: calc(58px + env(safe-area-inset-bottom, 0px));
+    background: rgba(10, 14, 28, 0.92);
+    backdrop-filter: blur(28px); -webkit-backdrop-filter: blur(28px);
+    border-top: 1px solid var(--border);
+    display: flex; justify-content: space-around; align-items: center;
+    padding: 0 4px env(safe-area-inset-bottom, 0px) 4px;
+  }
+  .tab { 
+    background: transparent; border: none; color: var(--muted); 
+    display: flex; flex-direction: column; align-items: center; justify-content: center; 
+    gap: 3px; padding: 4px 0; font-size: 9.5px; font-weight: 600; width: 20%; min-width: 0;
+    cursor: pointer; transition: color 0.15s ease; -webkit-user-select: none; user-select: none;
+    overflow: hidden;
+  }
+  .tab .icon-wrap {
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 8px; transition: all 0.2s ease;
+  }
+  .tab span:last-child {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.02em; font-weight: 700;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+  }
+  .tab.active { color: var(--cyan); }
+  .tab.active .icon-wrap {
+    background: rgba(6, 182, 212, 0.12);
+    color: var(--cyan);
+    transform: scale(1.08);
+  }
+
+  /* Stage Tracker */
+  .stage {
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:14px 16px;
+    background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    margin-bottom:16px; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+  }
+  .lbl { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; font-weight:700; }
+  .badge { font-family:var(--mono); font-size:12px; font-weight:700; padding:4px 10px; border-radius:6px; border:1px solid; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .hb { margin-left:auto; font-size:11.5px; color:var(--muted); font-family:var(--mono); white-space:nowrap; }
   .hb b { color:var(--green); }
-  .prog { flex:1 1 100%; display:flex; gap:6px; margin-top:10px; }
-  .seg { flex:1; height:4px; border-radius:2px; background:rgba(255,255,255,.07); }
+  .prog { flex:1 1 100%; display:flex; gap:4px; margin-top:8px; }
+  .seg { flex:1; height:5px; border-radius:3px; background:rgba(255,255,255,.06); }
   .seg.filled { background:linear-gradient(90deg,#3b82f6,#8b5cf6,#22d3ee); }
   .seg.current { animation:pulse 1.6s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:14px; margin-bottom:20px; }
-  .card { background:var(--panel); border:1px solid var(--border); border-radius:15px; padding:18px 20px; backdrop-filter:blur(14px); }
-  .card .t { font-size:10.5px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
-  .card .v { font-size:27px; font-weight:800; letter-spacing:-1px; line-height:1.1; font-variant-numeric:tabular-nums; }
-  .card .s { margin-top:8px; font-size:12px; color:var(--muted); }
-  .bar { height:6px; background:rgba(255,255,255,.07); border-radius:3px; margin-top:12px; overflow:hidden; }
+  /* Grid & Metric Cards */
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px; }
+  .card {
+    background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    padding:16px 18px; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    transition: transform 0.15s ease, border-color 0.15s ease;
+    overflow: hidden;
+  }
+  .card:hover { border-color: var(--border-hover); }
+  .card .t { font-size:10px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px; margin-bottom:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .v { font-size:22px; font-weight:800; letter-spacing:-0.5px; line-height:1.1; font-variant-numeric:tabular-nums; word-break:break-all; }
+  .card .s { margin-top:6px; font-size:11.5px; color:var(--muted); word-break:break-word; }
+  .bar { height:5px; background:rgba(255,255,255,.06); border-radius:3px; margin-top:10px; overflow:hidden; }
   .bar > i { display:block; height:100%; background:linear-gradient(90deg,var(--blue),var(--purple)); border-radius:3px; transition:width .8s; }
 
-  .panel { background:var(--panel); border:1px solid var(--border); border-radius:15px; padding:18px 20px; margin-bottom:18px; backdrop-filter:blur(14px); }
-  .panel h3 { font-size:13.5px; font-weight:700; margin-bottom:14px; }
+  /* Panel */
+  .panel {
+    background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    padding:16px 18px; margin-bottom:16px; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    overflow: hidden;
+  }
+  .panel h3 { font-size:13.5px; font-weight:700; margin-bottom:14px; display: flex; align-items: center; gap: 8px; color: #fff; word-break:break-word; }
 
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th { text-align:left; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.8px; padding:8px 10px; border-bottom:1px solid var(--border); }
-  td { padding:9px 10px; border-bottom:1px solid rgba(255,255,255,.05); vertical-align:top; }
+  /* Table with Smooth Scrollbar */
+  .table-wrapper {
+    width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 4px;
+    border-radius: 8px;
+  }
+  .table-wrapper::-webkit-scrollbar { height: 6px; }
+  .table-wrapper::-webkit-scrollbar-track { background: rgba(255,255,255,0.02); }
+  .table-wrapper::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; min-width: 440px; }
+  th { text-align:left; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.8px; padding:8px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  td { padding:10px 10px; border-bottom:1px solid rgba(255,255,255,.04); vertical-align:middle; }
   tr:last-child td { border-bottom:none; }
-  .mono { font-family:var(--mono); }
-  .r { text-align:right; }
+  .mono { font-family:var(--mono); word-break:break-all; }
+  .r { text-align:right; white-space:nowrap; }
 
-  .console { background:#04060d; border:1px solid var(--border); border-radius:15px; overflow:hidden; }
-  .console-head { display:flex; justify-content:space-between; align-items:center; padding:11px 16px; background:rgba(255,255,255,.02); border-bottom:1px solid var(--border); }
-  .dots { display:flex; gap:6px; }
-  .dots i { width:11px; height:11px; border-radius:50%; display:block; }
+  /* Console Log Viewer */
+  .console { background:#03050d; border:1px solid var(--border); border-radius:14px; overflow:hidden; }
+  .console-head { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:rgba(255,255,255,.02); border-bottom:1px solid var(--border); gap:8px; }
+  .dots { display:flex; gap:5px; flex-shrink:0; }
+  .dots i { width:9px; height:9px; border-radius:50%; display:block; }
   .dots i:nth-child(1){background:var(--red)} .dots i:nth-child(2){background:var(--amber)} .dots i:nth-child(3){background:var(--green)}
-  .console-title { font-size:11.5px; color:var(--muted); font-family:var(--mono); }
-  .console-body { font-family:var(--mono); font-size:12px; line-height:1.7; padding:14px 16px; max-height:52vh; overflow-y:auto; white-space:pre-wrap; word-wrap:break-word; color:#7dd3fc; }
-  .empty { text-align:center; color:var(--muted); padding:40px; font-size:13.5px; }
+  .console-title { font-size:11px; color:var(--muted); font-family:var(--mono); display:flex; align-items:center; gap:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .console-body {
+    font-family:var(--mono); font-size:11.5px; line-height:1.6; padding:14px 16px;
+    max-height:50vh; overflow-y:auto; overflow-x:hidden; white-space:pre-wrap; word-break:break-word;
+    color:#7dd3fc; -webkit-overflow-scrolling:touch;
+  }
+  .empty { text-align:center; color:var(--muted); padding:32px; font-size:13px; }
 
-  .list { display:flex; flex-direction:column; gap:11px; }
-  .item { background:var(--panel); border:1px solid var(--border); border-radius:13px; padding:15px 17px; }
-  .item .title { font-size:14.5px; font-weight:700; margin-bottom:6px; }
-  .item .meta { font-size:12px; color:var(--muted); display:flex; gap:14px; flex-wrap:wrap; }
-  .tag { padding:2px 8px; border-radius:6px; font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:.5px; border:1px solid; }
-  .ok { background:rgba(16,185,129,.14); color:#34d399; border-color:rgba(16,185,129,.3); }
-  .warn { background:rgba(245,158,11,.14); color:#fbbf24; border-color:rgba(245,158,11,.3); }
-  .err { background:rgba(239,68,68,.14); color:#f87171; border-color:rgba(239,68,68,.3); }
-  a.watch { color:#f87171; text-decoration:none; font-weight:700; }
-  details summary { cursor:pointer; color:var(--cyan); font-size:12px; }
+  /* Lists & Cards */
+  .list { display:flex; flex-direction:column; gap:10px; }
+  .item {
+    background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px;
+    padding:14px 16px; transition: border-color 0.15s ease;
+    overflow: hidden; word-break: break-word; overflow-wrap: break-word;
+  }
+  .item:hover { border-color: var(--border-hover); }
+  .item .title { font-size:13.5px; font-weight:700; margin-bottom:6px; line-height:1.3; color: #fff; word-break:break-word; }
+  .item .meta { font-size:11.5px; color:var(--muted); display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .tag { padding:3px 8px; border-radius:5px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.5px; border:1px solid; white-space:nowrap; }
+  .ok { background:rgba(16,185,129,.1); color:#34d399; border-color:rgba(16,185,129,.25); }
+  .warn { background:rgba(245,158,11,.1); color:#fbbf24; border-color:rgba(245,158,11,.25); }
+  .err { background:rgba(239,68,68,.1); color:#f87171; border-color:rgba(239,68,68,.25); }
+  a.watch {
+    color:#38bdf8; text-decoration:none; font-weight:700; display:inline-flex; align-items:center; gap:4px; white-space:nowrap;
+  }
+  a.watch:hover { text-decoration: underline; color: #7dd3fc; }
+  details summary { cursor:pointer; color:var(--cyan); font-size:11.5px; font-weight:600; }
   .muted { color:var(--muted); }
 
-  .foot { margin-top:14px; font-size:11px; color:#4b5563; font-family:var(--mono); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; }
-  .live { display:flex; align-items:center; gap:6px; }
-  .live::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--green); animation:blink 1.6s infinite; }
+  /* Forms & Touch Targets */
+  .form-row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; width:100%; }
+  .form-group { display:flex; flex-direction:column; gap:6px; width: 100%; min-width:0; }
+  .btn-group { display:flex; gap:8px; margin-top:14px; align-items:center; width: 100%; flex-wrap:wrap; }
 
-  @media (max-width:768px){
-    .wrap { padding:18px 13px 100px; }
-    header { flex-direction:column; align-items:stretch; }
-    .h-right { justify-content:space-between; }
-    .tabs { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
-    .tabs::-webkit-scrollbar { display:none; }
-    .tab { flex:1; min-width:0; text-align:center; padding:12px 6px; font-size:12px; white-space:nowrap; }
-    .grid { grid-template-columns:1fr 1fr; }
-    .card .v { font-size:22px; }
-    .console-body { max-height:46vh; }
-    .hb { margin-left:0; width:100%; }
+  select, input[type="text"], input[type="time"], input[type="number"] {
+    background: #0a0e1c!important;
+    border: 1px solid var(--border)!important;
+    color: var(--text)!important;
+    border-radius: 8px!important;
+    font-family: inherit!important;
+    outline: none;
+    max-width: 100%;
+    transition: border-color 0.15s ease;
   }
-  @media (max-width:420px){ .grid { grid-template-columns:1fr; } }
+  select:focus, input:focus {
+    border-color: var(--blue)!important;
+  }
+
+  .foot { display: none; }
+  
+  @media (max-width:768px){
+    .grid { grid-template-columns:1fr 1fr; }
+    .btn-group { flex-direction:column; align-items:stretch; }
+    
+    /* Input padding & font optimization for iOS touch targets (prevents auto-zoom) */
+    .form-group select, .form-group input { width:100%!important; max-width:100%!important; font-size:16px!important; padding:12px 14px!important; }
+    .btn-group button { width:100%; font-size:15px!important; padding:13px 20px!important; }
+  }
+  @media (max-width:480px){
+    .grid { grid-template-columns:1fr; }
+    .brand h1 { font-size:13.5px; }
+    .btn-text-desktop { display:none; }
+    #refreshBtn { padding: 7px 9px; }
+    .pill { padding: 5px 8px; font-size: 11px; }
+  }
   @media (prefers-reduced-motion:reduce){ * { animation:none!important; } }
-  @supports (padding:env(safe-area-inset-bottom)) { .wrap { padding-bottom:calc(90px + env(safe-area-inset-bottom)); } }
 </style>
 </head>
 <body>
@@ -135,17 +293,45 @@
       </div>
     </div>
     <div class="h-right">
-      <button class="btn" id="refreshBtn">↻ Refresh</button>
+      <button class="btn" id="refreshBtn" title="Refresh Live Data">
+        <svg class="svg-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+        <span class="btn-text-desktop">Refresh</span>
+      </button>
       <div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusTxt">—</span></div>
     </div>
   </header>
 
   <nav class="tabs" id="tabs">
-    <button class="tab active" data-tab="overview">Overview</button>
-    <button class="tab" data-tab="logs">Live Logs</button>
-    <button class="tab" data-tab="budget">Budget</button>
-    <button class="tab" data-tab="runs">Runs</button>
-    <button class="tab" data-tab="published">Published</button>
+    <button class="tab active" data-tab="overview">
+      <span class="icon-wrap">
+        <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+      </span>
+      <span>Overview</span>
+    </button>
+    <button class="tab" data-tab="logs_runs">
+      <span class="icon-wrap">
+        <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+      </span>
+      <span>Logs</span>
+    </button>
+    <button class="tab" data-tab="analytics">
+      <span class="icon-wrap">
+        <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></svg>
+      </span>
+      <span>Stats</span>
+    </button>
+    <button class="tab" data-tab="seeding">
+      <span class="icon-wrap">
+        <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>
+      </span>
+      <span>Seeding</span>
+    </button>
+    <button class="tab" data-tab="scheduler">
+      <span class="icon-wrap">
+        <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      </span>
+      <span>Schedules</span>
+    </button>
   </nav>
 
   <div id="view"></div>
@@ -165,12 +351,27 @@ const num = (n, d=2) => Number(n||0).toLocaleString(undefined,{maximumFractionDi
 const money = n => '$' + num(n,4);
 const ONE_DAY_YT = 10000;
 
+const ICONS = {
+  play: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"/></svg>`,
+  resume: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`,
+  trash: `<svg class="svg-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>`,
+  plus: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg>`,
+  save: `<svg class="svg-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>`,
+  external: `<svg class="svg-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" x2="21" y1="14" y2="3"/></svg>`,
+  bolt: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
+  clock: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
+  terminal: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>`,
+  activity: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
+  message: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`
+};
+
 const STAGES = ['INITIALIZATION','TOPIC_SELECTED','SCRIPT_GENERATED','SCRIPT_APPROVED','MEDIA_PRODUCED','QUALITY_GATES_PASSED','PUBLISHED','PUBLISHED_SUCCESS'];
 const STAGE_IDX = {};
 STAGES.forEach((s,i)=>STAGE_IDX[s]=i);
 
 let tab = 'overview';
 const DATA = { status:null, logs:null, budget:null, runs:[], published:[], objFailed:false };
+let EDITOR_STATE = { pipeline: [], seeder: [], initialized: false };
 
 const pill = (kind, txt) => {
   const p = $('#statusPill'), d = $('#statusDot');
@@ -188,10 +389,15 @@ async function fetchJ(path){
 async function loadAll(){
   try {
     const s0 = await fetchJ('/api/status');
-    const [budget, runs, published, logs] = await Promise.all([
-      fetchJ('/api/budget'), fetchJ('/api/runs'), fetchJ('/api/published'), fetchJ('/api/logs')
+    const [budget, runs, published, logs, seeding, seedingLogs, cron] = await Promise.all([
+      fetchJ('/api/budget'), fetchJ('/api/runs'), fetchJ('/api/published'), fetchJ('/api/logs'), fetchJ('/api/seeding'), fetchJ('/api/seeding/logs'), fetchJ('/api/cron')
     ]);
-    DATA.status = s0; DATA.budget = budget; DATA.runs = runs; DATA.published = published; DATA.logs = logs;
+    DATA.status = s0; DATA.budget = budget; DATA.runs = runs; DATA.published = published; DATA.logs = logs; DATA.seeding = seeding; DATA.seedingLogs = seedingLogs; DATA.cron = cron;
+    if (!EDITOR_STATE.initialized && cron) {
+      EDITOR_STATE.pipeline = [...(cron.pipeline_cron || [])];
+      EDITOR_STATE.seeder = [...(cron.seeder_cron || [])];
+      EDITOR_STATE.initialized = true;
+    }
     DATA.objFailed = false;
   } catch(e) {
     DATA.objFailed = true;
@@ -248,7 +454,7 @@ function card(t,v,s,color,pct){
 function structuredLines(){
   const logs = DATA.logs && DATA.logs.structured_logs || [];
   if(!logs.length) return '<div class="empty">No structured logs found.</div>';
-  return `<div class="console"><div class="console-head"><div class="dots"><i></i><i></i><i></i></div><div class="console-title">csvg_execution.log · last ${logs.length}</div></div>
+  return `<div class="console"><div class="console-head"><div class="dots"><i></i><i></i><i></i></div><div class="console-title">${ICONS.terminal} csvg_execution.log · last ${logs.length}</div></div>
     <div class="console-body">${logs.map(l=>esc(l)).join('\n')}</div></div>`;
 }
 
@@ -274,34 +480,62 @@ function budgetPanel(){
 
   <div class="panel"><h3>Budget categories — latest run</h3>${catTable(latest)}</div>
   <div class="panel"><h3>Monthly totals</h3>
-    <table><thead><tr><th>Month</th><th class="r">Est. $</th><th class="r">YT units</th><th class="r">Runs</th><th class="r">Units/day %</th></tr></thead>
-    <tbody>${monthlyRows||'<tr><td colspan="5" class="empty">—</td></tr>'}</tbody></table>
+    <div class="table-wrapper">
+      <table><thead><tr><th>Month</th><th class="r">Est. $</th><th class="r">YT units</th><th class="r">Runs</th><th class="r">Units/day %</th></tr></thead>
+      <tbody>${monthlyRows||'<tr><td colspan="5" class="empty">—</td></tr>'}</tbody></table>
+    </div>
   </div>
-  <div class="panel"><h3>Recent per-run budget</h3><table><thead><tr>
-    <th>Run / status</th><th class="r">Est. $</th><th class="r">YT units</th><th>Stage</th><th></th>
-  </tr></thead><tbody>${rows}</tbody></table></div>`;
+  <div class="panel"><h3>Recent per-run budget</h3>
+    <div class="table-wrapper">
+      <table><thead><tr>
+        <th>Run / status</th><th class="r">Est. $</th><th class="r">YT units</th><th>Stage</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>
+    </div>
+  </div>`;
 }
 
 function catTable(rec){
   const cats = rec && rec.categories;
   if(!cats || !Object.keys(cats).length) return '<div class="empty">No categories recorded (stub/dry runs cost $0).</div>';
   const rows = Object.entries(cats).map(([k,c])=>`<tr><td class="mono">${esc(k)}</td><td class="r">${money(c.est_usd||0)}</td><td class="r">${num(c.yt_units||0,0)}</td><td class="r">${num(c.calls||0,0)}</td></tr>`).join('');
-  return `<table><thead><tr><th>Category</th><th class="r">Est. $</th><th class="r">YT units</th><th class="r">Calls</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return `<div class="table-wrapper">
+    <table><thead><tr><th>Category</th><th class="r">Est. $</th><th class="r">YT units</th><th class="r">Calls</th></tr></thead><tbody>${rows}</tbody></table>
+  </div>`;
 }
 
 function runRow(r){
-  const st = (r.status||'').toLowerCase();
+  const isPipelineRunning = DATA.status && DATA.status.is_running;
+  const latestRunId = DATA.status && DATA.status.latest_run && DATA.status.latest_run.pipeline_id;
+  
+  let st = (r.status||'').toLowerCase();
+  let stage = r.stage || '';
+  if (st === 'in_progress') {
+    if (!isPipelineRunning || r.pipeline_id !== latestRunId) {
+      st = 'failed';
+      if (stage === 'in_progress' || stage === 'INITIALIZATION' || stage === '') {
+        stage = 'interrupted';
+      }
+    }
+  }
+
   const sttag = st==='success' ? '<span class="tag ok">success</span>'
     : st==='failed' ? '<span class="tag err">failed</span>'
     : st==='in_progress' ? '<span class="tag warn">running</span>'
     : '<span class="tag">'+esc(r.status||'—')+'</span>';
-  const cats = r.categories ? Object.entries(r.categories).map(([k,c]) => esc(k)+' $'+num(c.est_usd,4)+' · '+num(c.yt_units,0)+'u').join(' · ') : '';
+    
+  const cats = r.categories ? Object.entries(r.categories).map(([k,c]) => `
+    <div style="display:flex; justify-content:space-between; gap:10px; border-bottom:1px solid rgba(255,255,255,0.03); padding:4px 0;">
+      <span style="color:var(--text); font-weight:600;">${esc(k)}</span>
+      <span style="color:var(--muted);">${money(c.est_usd||0)} · ${num(c.yt_units||0,0)}u</span>
+    </div>
+  `).join('') : '';
+  
   return `<tr>
     <td><div class="mono">${esc(r.pipeline_id||'—')}</div><div class="meta muted">${esc(r.started_at||r.finished_at||'')}</div></td>
     <td class="r">${money((r.totals&&r.totals.est_usd)||0)}</td>
     <td class="r" title="est $/unit">${num((r.totals&&r.totals.yt_units)||0,0)}</td>
-    <td>${esc((r.stage||'') .slice(0,32))} ${sttag}</td>
-    <td>${cats?'<details><summary>details</summary><div class="muted">'+cats+'</div></details>':''}</td>
+    <td>${esc((stage||'').slice(0,32))} ${sttag}</td>
+    <td style="max-width:200px;">${cats?'<details style="font-size:11px;"><summary style="cursor:pointer; color:var(--cyan); font-weight:600;">categories</summary><div style="margin-top:6px; background:rgba(0,0,0,0.25); padding:6px 10px; border-radius:6px; border:1px solid var(--border);">${cats}</div></details>':''}</td>
   </tr>`;
 }
 
@@ -328,7 +562,7 @@ function runsList(){
         <span class="mono">${esc(r.pipeline_id||'—')}</span>
         <span>${esc(r.timestamp||'')}</span>
         ${tag}
-        ${r.video_id?`<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${esc(r.video_id)}">Watch ↗</a>`:''}
+        ${r.video_id?`<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${esc(r.video_id)}">Watch ${ICONS.external}</a>`:''}
       </div>
       <div class="run-params" style="margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; font-size: 11.5px; border-top: 1px solid var(--border); padding-top: 10px;">
         <div><span class="muted">Region:</span> <b style="color:var(--cyan)">${esc(r.region || '—')}</b></div>
@@ -340,6 +574,15 @@ function runsList(){
         <div><span class="muted">Facts:</span> <b style="color:var(--text)">${esc(r.fact_count || '—')}</b></div>
         <div><span class="muted">Est. Revenue:</span> <b style="color:var(--green)">${revStr}</b></div>
       </div>
+      ${r.pinned_comment ? `
+        <div style="margin-top: 10px; padding: 8px 12px; background: rgba(0, 229, 255, 0.04); border: 1px solid rgba(0, 229, 255, 0.15); border-radius: 8px; font-size: 11.5px;">
+          <div style="font-weight: 700; color: var(--cyan); margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+            <span>${ICONS.message || ''}</span>
+            <span>Pinned Seed Comment</span>
+          </div>
+          <div style="color: #e0f2fe; white-space: pre-wrap; line-height: 1.4;">${esc(r.pinned_comment)}</div>
+        </div>
+      ` : ''}
     </div>`;
   }).join('')}</div>`;
 }
@@ -356,7 +599,7 @@ function publishedList(){
         <span>Published At: <b>${esc(ts)}</b></span>
         ${p.topsis_score!=null?`<span>TOPSIS <b>${to(p.topsis_score)}</b></span>`:''}
         <span class="tag ok">Published</span>
-        ${p.video_id?'<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v='+esc(p.video_id)+'">Watch ↗</a>':''}
+        ${p.video_id?'<a class="watch" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v='+esc(p.video_id)+'">Watch '+ICONS.external+'</a>':''}
       </div>
       ${p.summary?`<div style="margin-top:8px; font-size:12px; color:var(--muted); line-height:1.4;">${esc(p.summary)}</div>`:''}
       ${p.keywords && p.keywords.length ? `<div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:5px;">${p.keywords.map(kw=>`<span style="font-size:10px; background:rgba(255,255,255,0.04); border:1px solid var(--border); padding:2px 6px; border-radius:4px; color:var(--muted);">${esc(kw)}</span>`).join('')}</div>`:''}
@@ -367,22 +610,709 @@ function publishedList(){
 function liveLogs(){
   const raw = (DATA.logs && DATA.logs.raw_logs) || '';
   return `<div class="console"><div class="console-head"><div class="dots"><i></i><i></i><i></i></div>
-    <div class="console-title">pipeline_run.log · tail</div></div>
+    <div class="console-title">${ICONS.terminal} pipeline_run.log · tail</div></div>
     <div class="console-body" id="logbody">${raw?esc(raw):'<span class="empty">No log output yet.</span>'}</div></div>`;
+}
+
+function seedingPanel(){
+  const s = DATA.seeding;
+  
+  const triggerHtml = `
+    <div class="panel" style="margin-bottom: 20px;">
+      <h3>${ICONS.bolt} Trigger Reddit Seeding Campaign</h3>
+      <div class="form-row">
+        <div class="form-group" style="flex:1; min-width:180px;">
+          <label class="lbl">Filter by Video ID</label>
+          <select id="seed-video-select" style="padding:10px 12px; border-radius:8px; font-size:13px; width: 100%;">
+            <option value="">All Videos</option>
+          </select>
+        </div>
+        
+        <div class="form-group" style="width:140px;">
+          <label class="lbl">Max Posts Limit</label>
+          <input type="number" id="seed-max" min="1" value="1" style="padding:10px 12px; border-radius:8px; font-size:13px; width: 100%;" />
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-primary" id="btn-trigger-seeding" style="padding:10px 20px;">${ICONS.play} Run Link Seeder</button>
+        </div>
+      </div>
+      <div id="seed-feedback" style="margin-top: 12px; font-size: 12.5px; font-family: var(--mono); min-height: 18px;"></div>
+      <div id="seeding-output" style="display:none; margin-top:14px;" class="console">
+        <div class="console-head"><div class="dots"><i></i><i></i><i></i></div><div class="console-title">${ICONS.terminal} seeding_execution.log</div></div>
+        <pre class="console-body" id="seeding-log-body" style="white-space:pre-wrap; font-size:12px; margin:0; line-height:1.4; max-height:250px; overflow-y:auto; font-family:var(--mono); color:var(--text);"></pre>
+      </div>
+    </div>`;
+
+  if(!s || (!s.accounts && !s.subreddits && !s.posted_threads)){
+    return triggerHtml + `<div class="panel"><h3>Reddit Seeding Status</h3><div class="empty">No seeding data yet. Wait for a post-publish run to initialize logs/reddit_rotation_state.json on the Pi.</div></div>`;
+  }
+  
+  let accRows = '';
+  if (s.accounts && Object.keys(s.accounts).length > 0) {
+    accRows = Object.entries(s.accounts).map(([username, info]) => {
+      const retiredTag = info.retired ? '<span class="tag err">retired</span>' : '<span class="tag ok">active</span>';
+      return `<tr>
+        <td class="mono">u/${esc(username)}</td>
+        <td>${retiredTag}</td>
+        <td class="r">${num(info.used, 0)}</td>
+        <td class="r">${num(info.unverified, 0)}</td>
+      </tr>`;
+    }).join('');
+  } else {
+    accRows = '<tr><td colspan="4" class="empty">No configured accounts found in state.</td></tr>';
+  }
+
+  let subRows = '';
+  if (s.subreddits && Object.keys(s.subreddits).length > 0) {
+    subRows = Object.entries(s.subreddits).map(([sub, stats]) => {
+      const ok = stats.ok || 0;
+      const filt = stats.filtered || 0;
+      const total = ok + filt;
+      const rate = total > 0 ? ((ok / total) * 100).toFixed(0) + '%' : '—';
+      return `<tr>
+        <td class="mono">r/${esc(sub)}</td>
+        <td class="r" style="color:var(--green)">${num(ok, 0)}</td>
+        <td class="r" style="color:var(--red)">${num(filt, 0)}</td>
+        <td class="r">${rate}</td>
+      </tr>`;
+    }).join('');
+  } else {
+    subRows = '<tr><td colspan="4" class="empty">No subreddit permissiveness stats learned yet.</td></tr>';
+  }
+
+  let threadsList = '';
+  if (s.posted_threads && s.posted_threads.length > 0) {
+    threadsList = s.posted_threads.slice().reverse().map(id => `
+      <div style="font-family:var(--mono); font-size:12.5px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.04); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <span>Thread ID: <b style="color:var(--cyan)">${esc(id)}</b></span> 
+        <a class="watch" style="font-size:11.5px;" target="_blank" rel="noreferrer" href="https://reddit.com/${esc(id)}">View on Reddit ${ICONS.external}</a>
+      </div>
+    `).join('');
+  } else {
+    threadsList = '<div class="empty">No threads posted to yet.</div>';
+  }
+
+  return triggerHtml + `
+    <div class="panel">
+      <h3>Reddit Accounts Rotation</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Status</th>
+              <th class="r">Used Today</th>
+              <th class="r">Unverified Streak</th>
+            </tr>
+          </thead>
+          <tbody id="seeding-accounts-tbody">${accRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Subreddit Permissiveness Statistics</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Subreddit</th>
+              <th class="r">Verified (OK)</th>
+              <th class="r">Filtered</th>
+              <th class="r">Success Rate</th>
+            </tr>
+          </thead>
+          <tbody id="seeding-subreddits-tbody">${subRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Recently Seeded Threads</h3>
+      <div id="seeding-threads-div">${threadsList}</div>
+    </div>
+  `;
+}
+
+function controlPanel(){
+  const isRunning = DATA.status && DATA.status.is_running;
+  const disabled = isRunning ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : '';
+  
+  return `
+  <div class="panel" style="margin-bottom: 20px;">
+    <h3>${ICONS.activity} OCI Pipeline Control Center</h3>
+    <div class="form-row">
+      <div class="form-group" style="flex:1; min-width:180px;">
+        <label class="lbl">Region</label>
+        <select id="ctrl-region" ${disabled} style="padding:10px 12px; font-size:13px;">
+          <option value="">Dynamic (Recommended)</option>
+          <option value="global">Global</option>
+          <option value="india">India</option>
+        </select>
+      </div>
+
+      <div class="form-group" style="flex:1; min-width:180px;">
+        <label class="lbl">RAG Mode</label>
+        <select id="ctrl-rag" ${disabled} style="padding:10px 12px; font-size:13px;">
+          <option value="scraper">Scraper (Default)</option>
+          <option value="hybrid">Hybrid (Search + Scraper)</option>
+          <option value="grounded">Grounded (Search Grounding)</option>
+        </select>
+      </div>
+
+      <div class="form-group" style="flex:1; min-width:180px;">
+        <label class="lbl">Renderer</label>
+        <select id="ctrl-renderer" ${disabled} style="padding:10px 12px; font-size:13px;">
+          <option value="ffmpeg">FFmpeg (Default)</option>
+          <option value="moviepy">MoviePy</option>
+        </select>
+      </div>
+
+      <div class="form-group" style="flex:1; min-width:180px;">
+        <label class="lbl">Resume Target</label>
+        <select id="ctrl-resume-select" ${disabled} style="padding:10px 12px; font-size:13px;">
+          <option value="">Last Failed Run (Auto)</option>
+        </select>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary" id="btn-start-run" ${disabled}>${ICONS.play} Start New Run</button>
+        <button class="btn btn-purple" id="btn-resume-run" ${disabled}>${ICONS.resume} Resume Selected</button>
+      </div>
+    </div>
+    <div id="ctrl-feedback" style="margin-top: 12px; font-size: 12.5px; font-family: var(--mono); min-height: 18px;"></div>
+    <!-- Next Scheduled Runs -->
+    <div id="next-schedules-bar" style="margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 16px;">
+      <h4 style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 12px; font-weight: 700;">Next Scheduled Automations</h4>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px;">
+        
+        <!-- Pipeline Card -->
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div style="font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600;">Pipeline (OCI)</div>
+            <div id="next-pipeline-time" style="font-family: var(--mono); font-size: 12px; color: var(--text); margin-top: 4px;">—</div>
+          </div>
+          <div style="text-align: right;">
+            <span class="tag ok" style="font-size: 10px; padding: 2px 6px;">Active</span>
+            <div id="next-pipeline-countdown" style="font-size: 13.5px; font-weight: 700; color: var(--cyan); margin-top: 4px;">—</div>
+          </div>
+        </div>
+
+        <!-- Seeder Card -->
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div style="font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600;">Link Seeder (Pi)</div>
+            <div id="next-seeder-time" style="font-family: var(--mono); font-size: 12px; color: var(--text); margin-top: 4px;">—</div>
+          </div>
+          <div style="text-align: right;">
+            <span class="tag ok" style="font-size: 10px; padding: 2px 6px;">Active</span>
+            <div id="next-seeder-countdown" style="font-size: 13.5px; font-weight: 700; color: var(--cyan); margin-top: 4px;">—</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindControlEvents(){
+  const isRunning = DATA.status && DATA.status.is_running;
+  if (isRunning) return;
+  
+  const startBtn = $('#btn-start-run');
+  const resumeBtn = $('#btn-resume-run');
+  const feedback = $('#ctrl-feedback');
+  const resumeSelect = $('#ctrl-resume-select');
+  
+  if(!startBtn || !resumeBtn) return;
+  
+  if (resumeSelect && DATA.runs) {
+    const incomplete = DATA.runs.filter(r => r.execution_stage !== 'PUBLISHED_SUCCESS' && r.execution_stage !== 'DONE');
+    resumeSelect.innerHTML = '<option value="">Last Failed Run (Auto)</option>';
+    incomplete.forEach(r => {
+      const pid = r.pipeline_id;
+      const head = r.headline || 'Incomplete Run';
+      const stage = r.execution_stage || 'Unknown';
+      const opt = document.createElement('option');
+      opt.value = pid;
+      opt.textContent = `${head.slice(0, 30)}... (${pid.slice(-15)} - ${stage})`;
+      resumeSelect.appendChild(opt);
+    });
+  }
+  
+  const getParams = () => {
+    const region = $('#ctrl-region').value;
+    const rag = $('#ctrl-rag').value;
+    const renderer = $('#ctrl-renderer').value;
+    let params = [];
+    if (region) params.push(`region=${region}`);
+    if (rag) params.push(`rag=${rag}`);
+    if (renderer) params.push(`renderer=${renderer}`);
+    return params.join('&');
+  };
+  
+  startBtn.addEventListener('click', async () => {
+    feedback.style.color = 'var(--cyan)';
+    feedback.textContent = 'Triggering production pipeline...';
+    try {
+      const q = getParams();
+      const r = await fetch(`/api/pipeline/start?${q}`, { method: 'POST' });
+      const res = await r.json();
+      if (res.success) {
+        feedback.style.color = 'var(--green)';
+        feedback.textContent = `Pipeline launched (PID: ${res.pid || 'OK'}). Refreshing status...`;
+        setTimeout(loadAll, 2000);
+      } else {
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Error: ' + (res.error || 'Failed to start');
+      }
+    } catch(e) {
+      feedback.style.color = 'var(--red)';
+      feedback.textContent = 'Network error: ' + e.message;
+    }
+  });
+
+  resumeBtn.addEventListener('click', async () => {
+    feedback.style.color = 'var(--cyan)';
+    const targetId = resumeSelect ? resumeSelect.value : '';
+    feedback.textContent = targetId ? `Resuming pipeline run ${targetId}...` : 'Resuming last run...';
+    try {
+      let q = getParams();
+      if (targetId) q += (q ? '&' : '') + `pipeline_id=${targetId}`;
+      const r = await fetch(`/api/pipeline/resume?${q}`, { method: 'POST' });
+      const res = await r.json();
+      if (res.success) {
+        feedback.style.color = 'var(--green)';
+        feedback.textContent = `Pipeline resumed (PID: ${res.pid || 'OK'}). Refreshing status...`;
+        setTimeout(loadAll, 2000);
+      } else {
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Error: ' + (res.error || 'Failed to resume');
+      }
+    } catch(e) {
+      feedback.style.color = 'var(--red)';
+      feedback.textContent = 'Network error: ' + e.message;
+    }
+  });
+}
+
+function bindSeedingEvents(){
+  const triggerBtn = $('#btn-trigger-seeding');
+  const feedback = $('#seed-feedback');
+  const videoSelect = $('#seed-video-select');
+  const outputBox = $('#seeding-output');
+  const logBody = $('#seeding-log-body');
+  
+  if (videoSelect && DATA.published) {
+    videoSelect.innerHTML = '<option value="">All Videos</option>';
+    DATA.published.forEach(p => {
+      if (p.video_id) {
+        const opt = document.createElement('option');
+        opt.value = p.video_id;
+        opt.textContent = `${(p.headline||p.topic||p.video_id).slice(0, 30)}... (${p.video_id})`;
+        videoSelect.appendChild(opt);
+      }
+    });
+  }
+
+  if (triggerBtn) {
+    triggerBtn.addEventListener('click', async () => {
+      if (!feedback) return;
+      feedback.style.color = 'var(--cyan)';
+      feedback.textContent = 'Triggering Reddit link seeder...';
+      try {
+        const videoId = videoSelect ? videoSelect.value : '';
+        const maxPosts = $('#seed-max') ? $('#seed-max').value : '1';
+        let q = `max_posts=${maxPosts}`;
+        if (videoId) q += `&video_id=${videoId}`;
+        
+        const r = await fetch(`/api/seeding/trigger?${q}`, { method: 'POST' });
+        const res = await r.json();
+        if (res.success) {
+          feedback.style.color = 'var(--green)';
+          feedback.textContent = 'Reddit seeder started in background!';
+          if (outputBox && logBody) {
+            outputBox.style.display = 'block';
+            logBody.textContent = 'Link Seeder launched on Raspberry Pi edge node...\nPolling execution logs...';
+          }
+          setTimeout(loadAll, 2000);
+        } else {
+          feedback.style.color = 'var(--red)';
+          feedback.textContent = 'Error: ' + (res.error || 'Failed to trigger seeder');
+        }
+      } catch(e) {
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Network error: ' + e.message;
+      }
+    });
+  }
+}
+
+function renderOverview(){
+  return `
+    ${stageTracker(DATA.status && DATA.status.execution_stage)}
+    ${controlPanel()}
+    ${statCards()}
+    ${budgetPanel()}
+  `;
+}
+
+function renderLogsRuns(){
+  return `
+    <div class="panel"><h3>${ICONS.terminal} Live Execution Log Tail</h3>${liveLogs()}</div>
+    <div class="panel"><h3>${ICONS.terminal} Structured Step Logs</h3>${structuredLines()}</div>
+    <div class="panel"><h3>${ICONS.clock} Pipeline State Checkpoints</h3>${runsList()}</div>
+  `;
+}
+
+function renderAnalytics(){
+  return `
+    ${statCards()}
+    <div class="panel"><h3>Published Videos</h3>${publishedList()}</div>
+    ${budgetPanel()}
+  `;
+}
+
+function renderSeeding(){
+  return seedingPanel();
 }
 
 function paint(){
   paintStatus();
   const v = $('#view');
-  switch(tab){
-    case 'overview':
-      v.innerHTML = (DATA.status?stageTracker(DATA.status.latest_stage):'') + statCards() + structuredLines();
-      paintStatus();
-      break;
-    case 'logs': v.innerHTML = liveLogs(); break;
-    case 'budget': v.innerHTML = budgetPanel(); break;
-    case 'runs': v.innerHTML = runsList(); break;
-    case 'published': v.innerHTML = publishedList(); break;
+  if(!v) return;
+
+  if (tab === 'overview') {
+    v.innerHTML = renderOverview();
+    bindControlEvents();
+  } else if (tab === 'logs_runs') {
+    v.innerHTML = renderLogsRuns();
+  } else if (tab === 'analytics') {
+    v.innerHTML = renderAnalytics();
+  } else if (tab === 'seeding') {
+    v.innerHTML = renderSeeding();
+    bindSeedingEvents();
+  } else if (tab === 'scheduler') {
+    v.innerHTML = schedulerPanel();
+    bindSchedulerEvents();
+  }
+
+  // Update schedule countdowns across views
+  if (DATA.cron) {
+    if (DATA.cron.pipeline_cron && DATA.cron.pipeline_cron.length) {
+      const times = DATA.cron.pipeline_cron.map(getNextCronTime).filter(Boolean);
+      times.sort((a,b) => a.getTime() - b.getTime());
+      if (times.length > 0) {
+        const next = times[0];
+        const nextTimeEl = $('#next-pipeline-time');
+        const nextCdEl = $('#next-pipeline-countdown');
+        if (nextTimeEl) nextTimeEl.textContent = next.toISOString().replace('T', ' ').substring(0, 16) + ' UTC';
+        if (nextCdEl) nextCdEl.textContent = formatTimeRemaining(next);
+      }
+    }
+    if (DATA.cron.seeder_cron && DATA.cron.seeder_cron.length) {
+      const times = DATA.cron.seeder_cron.map(getNextCronTime).filter(Boolean);
+      times.sort((a,b) => a.getTime() - b.getTime());
+      if (times.length > 0) {
+        const next = times[0];
+        const nextTimeEl = $('#next-seeder-time');
+        const nextCdEl = $('#next-seeder-countdown');
+        if (nextTimeEl) nextTimeEl.textContent = next.toISOString().replace('T', ' ').substring(0, 16) + ' UTC';
+        if (nextCdEl) nextCdEl.textContent = formatTimeRemaining(next);
+      }
+    }
+  }
+
+  if (tab === 'seeding') {
+    if (DATA.seedingLogs && DATA.seedingLogs.logs) {
+      const outputBox = $('#seeding-output');
+      const logBody = $('#seeding-log-body');
+      if (outputBox && logBody) {
+        outputBox.style.display = 'block';
+        logBody.textContent = DATA.seedingLogs.logs;
+      }
+    }
+    if (DATA.seeding && DATA.seeding.is_running) {
+      const triggerBtn = $('#btn-trigger-seeding');
+      if (triggerBtn) {
+        triggerBtn.innerHTML = `${ICONS.bolt} Seeding in Progress...`;
+        triggerBtn.style.opacity = '0.5';
+        triggerBtn.style.cursor = 'not-allowed';
+      }
+    }
+  }
+}
+
+function getNextCronTime(cronStr) {
+  const parts = cronStr.trim().split(/\s+/);
+  if (parts.length < 5) return null;
+  const minutePart = parts[0];
+  const hourPart = parts[1];
+
+  const now = new Date();
+  
+  let targetMinutes = [];
+  let targetHours = [];
+  
+  if (minutePart === '*') {
+    for (let i = 0; i < 60; i++) targetMinutes.push(i);
+  } else if (minutePart.includes(',')) {
+    targetMinutes = minutePart.split(',').map(Number);
+  } else {
+    targetMinutes = [Number(minutePart)];
+  }
+  
+  if (hourPart === '*') {
+    for (let i = 0; i < 24; i++) targetHours.push(i);
+  } else if (hourPart.startsWith('*/')) {
+    const step = Number(hourPart.replace('*/', ''));
+    for (let i = 0; i < 24; i += step) targetHours.push(i);
+  } else if (hourPart.includes(',')) {
+    targetHours = hourPart.split(',').map(Number);
+  } else {
+    targetHours = [Number(hourPart)];
+  }
+  
+  let nextDate = null;
+  let minDiff = Infinity;
+  
+  for (let dayOffset = 0; dayOffset <= 2; dayOffset++) {
+    for (const h of targetHours) {
+      for (const m of targetMinutes) {
+        const candidate = new Date(now.getTime());
+        candidate.setUTCDate(now.getUTCDate() + dayOffset);
+        candidate.setUTCHours(h, m, 0, 0);
+        
+        const diff = candidate.getTime() - now.getTime();
+        if (diff > 0 && diff < minDiff) {
+          minDiff = diff;
+          nextDate = candidate;
+        }
+      }
+    }
+  }
+  
+  return nextDate;
+}
+
+function formatTimeRemaining(nextDate) {
+  if (!nextDate) return '—';
+  const now = new Date();
+  const diffMs = nextDate.getTime() - now.getTime();
+  if (diffMs <= 0) return 'due now';
+  
+  const diffSecs = Math.floor(diffMs / 1000);
+  const hours = Math.floor(diffSecs / 3600);
+  const minutes = Math.floor((diffSecs % 3600) / 60);
+  
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
+window.removePipelineCron = function(idx) {
+  EDITOR_STATE.pipeline.splice(idx, 1);
+  paint();
+};
+
+window.removeSeederCron = function(idx) {
+  EDITOR_STATE.seeder.splice(idx, 1);
+  paint();
+};
+
+function schedulerPanel() {
+  try {
+    const pipelineHtml = EDITOR_STATE.pipeline.map((expr, idx) => {
+      const nextTime = getNextCronTime(expr);
+      const remaining = formatTimeRemaining(nextTime);
+      const nextStr = nextTime ? nextTime.toISOString().replace('T', ' ').substring(0, 16) + ' UTC' : '—';
+      return `
+        <div class="item" style="margin-bottom: 12px; display:flex; justify-content:space-between; align-items:center; padding:14px 16px; flex-wrap:wrap; gap:10px;">
+          <div style="min-width:0; flex:1;">
+            <div style="font-family:var(--mono); font-size:15px; font-weight:700; color:#fff; word-break:break-all;">${esc(expr)}</div>
+            <div style="font-size:12px; color:var(--muted); margin-top:2px;">Next: ${nextStr} (${remaining} remaining)</div>
+          </div>
+          <button class="btn btn-danger" onclick="removePipelineCron(${idx})">${ICONS.trash} <span>Delete</span></button>
+        </div>`;
+    }).join('') || '<div class="empty">No pipeline cron jobs scheduled.</div>';
+
+    const seederHtml = EDITOR_STATE.seeder.map((expr, idx) => {
+      const nextTime = getNextCronTime(expr);
+      const remaining = formatTimeRemaining(nextTime);
+      const nextStr = nextTime ? nextTime.toISOString().replace('T', ' ').substring(0, 16) + ' UTC' : '—';
+      return `
+        <div class="item" style="margin-bottom: 12px; display:flex; justify-content:space-between; align-items:center; padding:14px 16px; flex-wrap:wrap; gap:10px;">
+          <div style="min-width:0; flex:1;">
+            <div style="font-family:var(--mono); font-size:15px; font-weight:700; color:#fff; word-break:break-all;">${esc(expr)}</div>
+            <div style="font-size:12px; color:var(--muted); margin-top:2px;">Next: ${nextStr} (${remaining} remaining)</div>
+          </div>
+          <button class="btn btn-danger" onclick="removeSeederCron(${idx})">${ICONS.trash} <span>Delete</span></button>
+        </div>`;
+    }).join('') || '<div class="empty">No seeder cron jobs scheduled.</div>';
+
+    return `
+      <div class="panel">
+        <h3>${ICONS.clock} Pipeline Automation Schedules (OCI)</h3>
+        <div style="margin-bottom: 20px;">
+          ${pipelineHtml}
+        </div>
+        
+        <!-- Add Pipeline Run Form -->
+        <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.05); border-radius:10px; padding:16px; margin-top:15px;">
+          <h4 style="font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:12px; display:flex; align-items:center; gap:6px;">${ICONS.plus} Add Pipeline Scheduled Run</h4>
+          <div class="form-row" style="align-items:flex-end; gap:15px;">
+            <div class="form-group" style="flex:1; min-width:180px;">
+              <label class="lbl">Choose Run Time (UTC)</label>
+              <input type="time" id="add-pipeline-time" style="padding:10px 12px; border-radius:8px; width:100%; font-size:14px; font-family:var(--mono);" />
+            </div>
+            <div class="form-group" style="flex:1; min-width:180px;">
+              <label class="lbl">Or Custom Raw Cron Expression</label>
+              <input type="text" id="add-pipeline-raw" placeholder="20 11 * * *" style="padding:10px 12px; border-radius:8px; width:100%; font-size:14px; font-family:var(--mono);" />
+            </div>
+            <button class="btn btn-primary" id="btn-add-pipeline" style="padding:10px 20px; height:42px;">${ICONS.plus} Add Time</button>
+          </div>
+          <div id="add-pipeline-err" style="color:#ef4444; font-size:12px; margin-top:6px; min-height:15px;"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>${ICONS.bolt} Reddit Seeder Schedules (Pi)</h3>
+        <div style="margin-bottom: 20px;">
+          ${seederHtml}
+        </div>
+        
+        <!-- Add Seeder Run Form -->
+        <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.05); border-radius:10px; padding:16px; margin-top:15px;">
+          <h4 style="font-size:12px; text-transform:uppercase; color:var(--muted); margin-bottom:12px; display:flex; align-items:center; gap:6px;">${ICONS.plus} Add Seeder Scheduled Run</h4>
+          <div class="form-row" style="align-items:flex-end; gap:15px;">
+            <div class="form-group" style="flex:1; min-width:180px;">
+              <label class="lbl">Choose Interval Preset</label>
+              <select id="add-seeder-preset" style="padding:10px 12px; border-radius:8px; width:100%; font-size:13px; height:42px;">
+                <option value="23 */4 * * *">Every 4 hours (e.g. 23 */4 * * *)</option>
+                <option value="23 */6 * * *">Every 6 hours (e.g. 23 */6 * * *)</option>
+                <option value="23 */12 * * *">Every 12 hours (e.g. 23 */12 * * *)</option>
+                <option value="23 8 * * *">Once daily at 08:23 UTC (23 8 * * *)</option>
+                <option value="custom">Custom Raw Cron...</option>
+              </select>
+            </div>
+            <div class="form-group" id="add-seeder-raw-group" style="flex:1; min-width:180px; display:none;">
+              <label class="lbl">Custom Raw Cron Expression</label>
+              <input type="text" id="add-seeder-raw" placeholder="23 */4 * * *" style="padding:10px 12px; border-radius:8px; width:100%; font-size:14px; font-family:var(--mono);" />
+            </div>
+            <button class="btn btn-primary" id="btn-add-seeder" style="padding:10px 20px; height:42px;">${ICONS.plus} Add Schedule</button>
+          </div>
+          <div id="add-seeder-err" style="color:#ef4444; font-size:12px; margin-top:6px; min-height:15px;"></div>
+        </div>
+      </div>
+
+      <div class="panel" style="display:flex; justify-content:space-between; align-items:center; background:rgba(30,58,138,0.12); border:1px solid rgba(59,130,246,0.25); flex-wrap:wrap; gap:12px;">
+        <div>
+          <h3 style="margin-bottom:4px; color:var(--text);">${ICONS.save} Apply and Save Changes</h3>
+          <p style="font-size:12px; color:var(--muted); margin:0;">This will write the new schedules to the OCI and Pi crontabs.</p>
+        </div>
+        <div>
+          <button class="btn btn-primary" id="btn-save-cron" style="padding:12px 28px; font-weight:700; font-size:14px;">${ICONS.save} Apply &amp; Save Changes</button>
+        </div>
+      </div>
+      <div id="cron-feedback" style="margin-top: 12px; font-size: 13px; font-family: var(--mono); text-align:center; min-height: 20px; font-weight:700;"></div>
+    `;
+  } catch (err) {
+    console.error("Error in schedulerPanel:", err);
+    return `<div class="panel err"><h3>Error Rendering Scheduler</h3><pre>${esc(err.stack || err.message || err)}</pre></div>`;
+  }
+}
+
+function bindSchedulerEvents() {
+  const saveBtn = $('#btn-save-cron');
+  const feedback = $('#cron-feedback');
+  const addPipeBtn = $('#btn-add-pipeline');
+  const addSeedBtn = $('#btn-add-seeder');
+  const seedPreset = $('#add-seeder-preset');
+  const seedRawGroup = $('#add-seeder-raw-group');
+
+  if (seedPreset && seedRawGroup) {
+    seedPreset.addEventListener('change', () => {
+      seedRawGroup.style.display = seedPreset.value === 'custom' ? 'block' : 'none';
+    });
+  }
+
+  if (addPipeBtn) {
+    addPipeBtn.addEventListener('click', () => {
+      const timeVal = $('#add-pipeline-time').value;
+      const rawVal = $('#add-pipeline-raw').value.trim();
+      const errEl = $('#add-pipeline-err');
+      if (errEl) errEl.textContent = '';
+
+      let cronExpr = '';
+      if (rawVal) {
+        if (rawVal.split(/\s+/).length < 5) {
+          if (errEl) errEl.textContent = 'Invalid cron expression (must have 5 fields)';
+          return;
+        }
+        cronExpr = rawVal;
+      } else if (timeVal) {
+        const [hh, mm] = timeVal.split(':');
+        cronExpr = `${Number(mm)} ${Number(hh)} * * *`;
+      } else {
+        if (errEl) errEl.textContent = 'Please choose a time or enter a raw cron expression';
+        return;
+      }
+
+      EDITOR_STATE.pipeline.push(cronExpr);
+      paint();
+    });
+  }
+
+  if (addSeedBtn) {
+    addSeedBtn.addEventListener('click', () => {
+      const presetVal = $('#add-seeder-preset').value;
+      const rawVal = $('#add-seeder-raw') ? $('#add-seeder-raw').value.trim() : '';
+      const errEl = $('#add-seeder-err');
+      if (errEl) errEl.textContent = '';
+
+      let cronExpr = '';
+      if (presetVal === 'custom') {
+        if (!rawVal || rawVal.split(/\s+/).length < 5) {
+          if (errEl) errEl.textContent = 'Invalid cron expression (must have 5 fields)';
+          return;
+        }
+        cronExpr = rawVal;
+      } else {
+        cronExpr = presetVal;
+      }
+
+      EDITOR_STATE.seeder.push(cronExpr);
+      paint();
+    });
+  }
+
+  if (saveBtn && feedback) {
+    saveBtn.addEventListener('click', async () => {
+      feedback.style.color = 'var(--cyan)';
+      feedback.textContent = 'Saving cron details and updating crontabs...';
+      try {
+        const pipeline = EDITOR_STATE.pipeline.join(' | ');
+        const seeder = EDITOR_STATE.seeder.join(' | ');
+        
+        const q = `pipeline=${encodeURIComponent(pipeline)}&seeder=${encodeURIComponent(seeder)}`;
+        const r = await fetch(`/api/cron/update?${q}`, { method: 'POST' });
+        const res = await r.json();
+        if (res.success) {
+          feedback.style.color = 'var(--green)';
+          feedback.textContent = 'Schedules successfully updated and applied!';
+          EDITOR_STATE.initialized = false;
+          setTimeout(loadAll, 1500);
+        } else {
+          feedback.style.color = 'var(--red)';
+          feedback.textContent = 'Error: ' + (res.error || 'failed to update cron');
+        }
+      } catch(e) {
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Network error: ' + e.message;
+      }
+    });
   }
 }
 

@@ -42,6 +42,9 @@ _DIRECT_NEWS_RES = [
     re.compile(r"\b(?:plans? to|set to|will) (?:raise|cut|open|launch|acquire|invest|list)\b"),
     re.compile(r"\b(today announced|announced today|will be available|goes on sale|now shipping|"
                r"available this month|from \$\d|starting at)"),
+    # Photo gallery / listicle blips (cannot build 6-act documentary, prevents synthetic photo clickbait)
+    re.compile(r"\b(see\s+photos?|magnificent\s+photos?|rare\s+photos?|gallery|photo\s+essay|pictures?\s+of)\b", re.IGNORECASE),
+    re.compile(r"\b\d+\s+(photos?|pictures?|images?)\s+of\b", re.IGNORECASE),
 ]
 
 # ── Documentary / investigative depth signals ───────────────────────────────

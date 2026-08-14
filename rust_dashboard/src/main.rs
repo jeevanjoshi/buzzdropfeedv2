@@ -76,13 +76,13 @@ fn handle(mut stream: TcpStream, root: &str) {
     let first = req.lines().next().unwrap_or("");
     let mut parts = first.split_whitespace();
     let (method, raw_path) = (parts.next().unwrap_or("GET"), parts.next().unwrap_or("/"));
-    if method != "GET" {
+    if method != "GET" && method != "POST" {
         respond(stream, 405, "text/plain; charset=utf-8", b"method not allowed".as_slice());
         return;
     }
     let path = raw_path.split('?').next().unwrap_or("/");
 
-    let (code, ctype, body) = route(root, path);
+    let (code, ctype, body) = route(root, path, raw_path);
     respond(stream, code, ctype, &body);
 }
 
@@ -109,7 +109,7 @@ fn respond(mut stream: TcpStream, code: u16, ctype: &str, body: &[u8]) {
 
 // ── routing ────────────────────────────────────────────────────────────────
 
-fn route(root: &str, path: &str) -> (u16, &'static str, Vec<u8>) {
+fn route(root: &str, path: &str, raw_path: &str) -> (u16, &'static str, Vec<u8>) {
     match path {
         "/" | "/index.html" => (200, "text/html; charset=utf-8", HTML.as_bytes().to_vec()),
         "/favicon.ico" => (204, "text/plain", Vec::new()),
@@ -119,6 +119,19 @@ fn route(root: &str, path: &str) -> (u16, &'static str, Vec<u8>) {
         "/api/published" => json_response(&api_published(root)),
         "/api/budget" => json_response(&api_budget(root)),
         "/api/runs" => json_response(&api_runs(root)),
+        "/api/seeding" => json_response(&api_seeding(root)),
+        "/api/seeding/logs" => json_response(&api_seeding_logs(root)),
+        "/api/seeding/trigger" => json_response(&api_seeding_trigger(root, raw_path)),
+        "/api/cron" => {
+            println!("[csvg-dashboard] GET /api/cron endpoint hit");
+            json_response(&api_cron(root))
+        }
+        "/api/cron/update" => {
+            println!("[csvg-dashboard] POST /api/cron/update endpoint hit");
+            json_response(&api_cron_update(root, raw_path))
+        }
+        "/api/healthcheck/run" => json_response(&api_healthcheck_run(root)),
+        "/api/pipeline/start" | "/api/pipeline/resume" => json_response(&api_pipeline_control(root, path, raw_path)),
         _ => (404, "text/plain; charset=utf-8", b"not found".to_vec()),
     }
 }
@@ -303,6 +316,32 @@ fn latest_state(root: &str) -> (String, String) {
     (stage, pid)
 }
 
+fn last_failed_state(root: &str) -> Option<(String, String)> {
+    let dir = Path::new(root).join("logs");
+    let rd = fs::read_dir(&dir).ok()?;
+    let mut states: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("state_") && name.ends_with(".json")
+        })
+        .collect();
+    if states.is_empty() {
+        return None;
+    }
+    states.sort_by(mtime_desc);
+    for path in states {
+        let name = path.file_name()?.to_str()?.to_string();
+        let v = read_json(root, &format!("logs/{name}"));
+        let stage = v.get_str("execution_stage").unwrap_or_else(|| "UNKNOWN".into());
+        let pid = v.get_str("pipeline_id").unwrap_or_default();
+        if stage != "PUBLISHED_SUCCESS" && stage != "DONE" && !pid.is_empty() {
+            return Some((stage, pid));
+        }
+    }
+    None
+}
+
 fn mtime_desc(a: &PathBuf, b: &PathBuf) -> std::cmp::Ordering {
     let ma = fs::metadata(a).and_then(|m| m.modified()).ok();
     let mb = fs::metadata(b).and_then(|m| m.modified()).ok();
@@ -344,6 +383,215 @@ fn api_logs(root: &str) -> Value {
 
 fn api_published(root: &str) -> Value {
     read_json(root, "published_topics.json")
+}
+
+// ── /api/seeding ───────────────────────────────────────────────────────────
+
+fn api_seeding(root: &str) -> Value {
+    read_json(root, "logs/reddit_rotation_state.json")
+}
+
+fn api_seeding_logs(root: &str) -> Value {
+    let raw = read_text(root, "logs/seeding_execution.log")
+        .or_else(|| read_text(root, "logs/reddit_link_seeder_cron.log"))
+        .map(|t| {
+            let lines: Vec<&str> = t.lines().collect();
+            let start = lines.len().saturating_sub(150);
+            lines[start..].join("\n")
+        })
+        .unwrap_or_default();
+
+    obj(&[
+        ("logs", s(&raw)),
+        ("is_running", Value::Bool(is_seeding_running())),
+    ])
+}
+
+
+fn api_cron(_root: &str) -> Value {
+    let mut oci_lines = Vec::new();
+    if let Ok(out) = std::process::Command::new("ssh")
+        .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", "crontab -l"])
+        .output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let l = line.trim();
+                if l.contains("cron_publish.sh") && !l.starts_with('#') {
+                    let parts: Vec<&str> = l.split_whitespace().collect();
+                    if parts.len() >= 5 {
+                        oci_lines.push(parts[..5].join(" "));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut seeder_lines = Vec::new();
+    if let Ok(out) = std::process::Command::new("crontab")
+        .arg("-l")
+        .output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let l = line.trim();
+                if l.contains("reddit_link_seeder.py") && !l.starts_with('#') {
+                    let parts: Vec<&str> = l.split_whitespace().collect();
+                    if parts.len() >= 5 {
+                        seeder_lines.push(parts[..5].join(" "));
+                    }
+                }
+            }
+        }
+    }
+
+    obj(&[
+        ("pipeline_cron", json::Value::Arr(oci_lines.into_iter().map(|l| s(&l)).collect())),
+        ("seeder_cron", json::Value::Arr(seeder_lines.into_iter().map(|l| s(&l)).collect())),
+    ])
+}
+
+fn api_cron_update(_root: &str, raw_path: &str) -> Value {
+    let pipeline_param = get_query_param(raw_path, "pipeline").unwrap_or_default();
+    let seeder_param = get_query_param(raw_path, "seeder").unwrap_or_default();
+
+    let mut oci_success = true;
+    let mut oci_err = String::new();
+    let mut pi_success = true;
+    let mut pi_err = String::new();
+
+    // 1. Update OCI crontab
+    if !pipeline_param.is_empty() {
+        let mut current_crontab = String::new();
+        if let Ok(out) = std::process::Command::new("ssh")
+            .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", "crontab -l"])
+            .output() {
+            if out.status.success() {
+                current_crontab = String::from_utf8_lossy(&out.stdout).into_owned();
+            }
+        }
+
+        let mut new_lines = Vec::new();
+        let mut has_header = false;
+        for line in current_crontab.lines() {
+            let l = line.trim();
+            if l.contains("cron_publish.sh") {
+                continue;
+            }
+            if l.contains("region-optimized publication") {
+                has_header = true;
+                continue;
+            }
+            new_lines.push(line.to_string());
+        }
+
+        if !has_header {
+            new_lines.push("# CSVG region-optimized publication (cron_publish.sh)".to_string());
+            new_lines.push("MAILTO=\"\"".to_string());
+        }
+        for cron_expr in pipeline_param.split('|') {
+            let expr = cron_expr.trim();
+            if !expr.is_empty() {
+                new_lines.push(format!("{} /home/ubuntu/buzzdropfeedv2/cron_publish.sh", expr));
+            }
+        }
+        new_lines.push("".to_string());
+
+        let new_crontab = new_lines.join("\n");
+        let spawned = std::process::Command::new("ssh")
+            .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", "crontab -"])
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+
+        match spawned {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(new_crontab.as_bytes());
+                }
+                if let Ok(output) = child.wait_with_output() {
+                    if !output.status.success() {
+                        oci_success = false;
+                        oci_err = String::from_utf8_lossy(&output.stderr).into_owned();
+                    }
+                } else {
+                    oci_success = false;
+                    oci_err = "Failed to wait for remote crontab process".to_string();
+                }
+            }
+            Err(e) => {
+                oci_success = false;
+                oci_err = e.to_string();
+            }
+        }
+    }
+
+    // 2. Update local crontab (Pi 5)
+    if !seeder_param.is_empty() {
+        let mut current_crontab = String::new();
+        if let Ok(out) = std::process::Command::new("crontab")
+            .arg("-l")
+            .output() {
+            if out.status.success() {
+                current_crontab = String::from_utf8_lossy(&out.stdout).into_owned();
+            }
+        }
+
+        let mut new_lines = Vec::new();
+        for line in current_crontab.lines() {
+            let l = line.trim();
+            if l.contains("reddit_link_seeder.py") {
+                continue;
+            }
+            new_lines.push(line.to_string());
+        }
+
+        new_lines.push(format!("{} cd /home/jeevanjoshi/buzzdropfeedv2 && flock -n /tmp/reddit_link.lock venv/bin/python reddit_link_seeder.py --max 1 >> /home/jeevanjoshi/buzzdropfeedv2/logs/reddit_link_seeder_cron.log 2>&1", seeder_param.trim()));
+        new_lines.push("".to_string());
+
+        let new_crontab = new_lines.join("\n");
+        let spawned = std::process::Command::new("crontab")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+
+        match spawned {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(new_crontab.as_bytes());
+                }
+                if let Ok(output) = child.wait_with_output() {
+                    if !output.status.success() {
+                        pi_success = false;
+                        pi_err = String::from_utf8_lossy(&output.stderr).into_owned();
+                    }
+                } else {
+                    pi_success = false;
+                    pi_err = "Failed to wait for local crontab process".to_string();
+                }
+            }
+            Err(e) => {
+                pi_success = false;
+                pi_err = e.to_string();
+            }
+        }
+    }
+
+    let success = oci_success && pi_success;
+    let mut err_parts = Vec::new();
+    if !oci_success {
+        err_parts.push(format!("OCI: {}", oci_err));
+    }
+    if !pi_success {
+        err_parts.push(format!("Pi: {}", pi_err));
+    }
+    let err = err_parts.join("; ");
+
+    obj(&[
+        ("success", Value::Bool(success)),
+        ("error", s(&err)),
+    ])
 }
 
 // ── /api/budget ────────────────────────────────────────────────────────────
@@ -478,6 +726,12 @@ fn api_runs(root: &str) -> Value {
                 _ => "0".to_string(),
             })
             .unwrap_or_else(|| "0".to_string());
+        let pinned_comment = json::get_path(&v, &["upload_metadata", "pinned_comment_text"])
+            .and_then(string_value)
+            .unwrap_or_default();
+        let playlist_url = json::get_path(&v, &["upload_metadata", "playlist_url"])
+            .and_then(string_value)
+            .unwrap_or_default();
 
         out.push(obj(&[
             ("pipeline_id", s(&v.get_str("pipeline_id").unwrap_or_default())),
@@ -494,7 +748,340 @@ fn api_runs(root: &str) -> Value {
             ("revenue", s(&revenue)),
             ("region", s(&region)),
             ("fact_count", s(&fact_count)),
+            ("pinned_comment", s(&pinned_comment)),
+            ("playlist_url", s(&playlist_url)),
         ]));
     }
     arr(out)
+}
+
+fn url_decode(s: &str) -> String {
+    let mut res = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let mut hex = String::new();
+            if let Some(h1) = chars.next() { hex.push(h1); }
+            if let Some(h2) = chars.next() { hex.push(h2); }
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                res.push(byte as char);
+            }
+        } else if c == '+' {
+            res.push(' ');
+        } else {
+            res.push(c);
+        }
+    }
+    res
+}
+
+fn get_query_param(raw_path: &str, key: &str) -> Option<String> {
+    let parts: Vec<&str> = raw_path.split('?').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    for pair in parts[1].split('&') {
+        let kv: Vec<&str> = pair.split('=').collect();
+        if kv.len() == 2 && kv[0] == key {
+            return Some(url_decode(kv[1]));
+        }
+    }
+    None
+}
+
+fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
+
+    if is_pipeline_running(root_dir) {
+        return obj(&[
+            ("success", Value::Bool(false)),
+            ("command", s("")),
+            ("error", s("A pipeline run is already in progress. Duplicate runs are not allowed.")),
+        ]);
+    }
+
+    if is_budget_exceeded(root_dir) {
+        let current_cost = get_current_month_cost(root_dir);
+        let cap = env::var("CSVG_BUDGET_CAP_USD")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(50.0);
+        return obj(&[
+            ("success", Value::Bool(false)),
+            ("command", s("")),
+            ("error", s(&format!("Monthly budget limit of ${:.2} has been exceeded. Current usage: ${:.2}. Operations are locked.", cap, current_cost))),
+        ]);
+    }
+
+    let mut args = Vec::new();
+    
+    // Auto-skip pre-flight interactive prompt when running headless from dashboard
+    args.push("--skip-health-check".to_string());
+    
+    if let Some(reg) = get_query_param(raw_path, "region") {
+        if reg == "global" {
+            args.push("--global".to_string());
+        } else if reg == "india" {
+            args.push("--india".to_string());
+        }
+    }
+    if let Some(rag) = get_query_param(raw_path, "rag") {
+        args.push("--rag".to_string());
+        args.push(rag);
+    }
+    if let Some(renderer) = get_query_param(raw_path, "renderer") {
+        args.push("--renderer".to_string());
+        args.push(renderer);
+    }
+    
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
+
+    let is_resume = path.ends_with("/resume");
+    if is_resume {
+        args.push("--resume".to_string());
+        if let Some(pid) = get_query_param(raw_path, "pipeline_id") {
+            if !pid.is_empty() {
+                args.push(pid);
+            }
+        } else {
+            // Find last failed run dynamically
+            if let Some((_, pid)) = last_failed_state(root_dir) {
+                args.push(pid);
+            } else {
+                return obj(&[
+                    ("success", Value::Bool(false)),
+                    ("command", s("")),
+                    ("error", s("No failed or incomplete runs found to resume.")),
+                ]);
+            }
+        }
+    }
+
+    let flag_str = args.join(" ");
+    let cmd_str = format!("cd /home/ubuntu/buzzdropfeedv2 && ./run_production.sh {}", flag_str);
+    
+    let spawned = if is_pi {
+        std::process::Command::new("ssh")
+            .args(&[
+                "-o", "StrictHostKeyChecking=no",
+                "ubuntu@100.104.253.1",
+                &cmd_str
+            ])
+            .spawn()
+    } else {
+        std::process::Command::new("bash")
+            .args(&[
+                "-c",
+                &cmd_str
+            ])
+            .spawn()
+    };
+
+    let (success, err_msg) = match spawned {
+        Ok(_) => (true, String::new()),
+        Err(e) => (false, e.to_string()),
+    };
+
+    obj(&[
+        ("success", Value::Bool(success)),
+        ("command", s(&cmd_str)),
+        ("error", s(&err_msg)),
+    ])
+}
+
+fn api_seeding_trigger(root: &str, raw_path: &str) -> Value {
+    if is_seeding_running() {
+        return obj(&[
+            ("success", Value::Bool(false)),
+            ("command", s("")),
+            ("error", s("A seeding campaign is already in progress. Duplicate runs are not allowed.")),
+        ]);
+    }
+
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
+
+    if is_budget_exceeded(root_dir) {
+        let current_cost = get_current_month_cost(root_dir);
+        let cap = env::var("CSVG_BUDGET_CAP_USD")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(50.0);
+        return obj(&[
+            ("success", Value::Bool(false)),
+            ("command", s("")),
+            ("error", s(&format!("Monthly budget limit of ${:.2} has been exceeded. Current usage: ${:.2}. Seeding operations are locked.", cap, current_cost))),
+        ]);
+    }
+
+    let mut args = Vec::new();
+    if let Some(vid) = get_query_param(raw_path, "video") {
+        if !vid.is_empty() {
+            args.push("--video".to_string());
+            args.push(vid);
+        }
+    }
+    if let Some(max_p) = get_query_param(raw_path, "max") {
+        if !max_p.is_empty() {
+            args.push("--max".to_string());
+            args.push(max_p);
+        }
+    }
+
+    // Reddit seeder runs locally on the Pi (residential IP); OCI cloud IP is blocked by Reddit.
+    let python_bin = format!("{}/venv/bin/python", root_dir);
+    let seeder_script = format!("{}/reddit_link_seeder.py", root_dir);
+    let log_path = format!("{}/logs/reddit_link_seeder_cron.log", root_dir);
+
+    let mut full_args = vec![seeder_script];
+    full_args.extend(args.clone());
+
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    let mut cmd = std::process::Command::new(&python_bin);
+    cmd.args(&full_args).current_dir(root_dir);
+
+    if let Ok(file) = log_file {
+        if let Ok(dup_file) = file.try_clone() {
+            cmd.stdout(std::process::Stdio::from(file));
+            cmd.stderr(std::process::Stdio::from(dup_file));
+        }
+    }
+    let spawned = cmd.spawn();
+
+    let cmd_str = format!("{}/venv/bin/python {}/reddit_link_seeder.py {} >> {}/logs/reddit_link_seeder_cron.log 2>&1 &", root_dir, root_dir, args.join(" "), root_dir);
+
+    let (success, err_msg) = match spawned {
+        Ok(_) => (true, String::new()),
+        Err(e) => (false, e.to_string()),
+    };
+
+    obj(&[
+        ("success", Value::Bool(success)),
+        ("command", s(&cmd_str)),
+        ("error", s(&err_msg)),
+    ])
+}
+
+fn is_pipeline_running(root: &str) -> bool {
+    let ttl = env::var("CSVG_HEARTBEAT_TTL")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(60.0);
+
+    if exists(root, "logs/pipeline_heartbeat.json") {
+        let hb = read_json(root, "logs/pipeline_heartbeat.json");
+        let running = matches!(&hb, Value::Obj(_))
+            && hb.get_str("running").map(|v| v == "true").unwrap_or(false);
+        if let Some(ts) = hb.get_str("ts") {
+            if let Some(epoch) = parse_iso_utc(&ts) {
+                let age = (now_epoch() - epoch).max(0.0);
+                return running && age < ttl;
+            }
+        }
+    }
+    false
+}
+
+fn is_seeding_running() -> bool {
+    // Seeder runs locally on the Pi (residential IP, not blocked by Reddit).
+    let output = std::process::Command::new("pgrep")
+        .args(&["-f", "reddit_link_seeder.py"])
+        .output();
+    if let Ok(out) = output {
+        return out.status.success();
+    }
+    false
+}
+
+fn current_month_str() -> String {
+    let epoch = now_epoch() as i64;
+    let days = epoch / 86400;
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    let mut y = (yoe as i64) + era * 400;
+    let doy = doe - (365*yoe + yoe/4 - yoe/100);
+    let mp = (5*doy + 2)/153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!("{:04}-{:02}", y, m)
+}
+
+fn get_current_month_cost(root: &str) -> f64 {
+    let current_mo = current_month_str();
+    let agg = read_json(root, "logs/run_budget.json");
+    let mut total = 0.0;
+    if let Value::Obj(m) = &agg {
+        for rec in m.values() {
+            if let Some(started) = rec.get_str("started_at") {
+                if started.starts_with(&current_mo) {
+                    let est_usd = rec
+                        .get_obj("totals")
+                        .and_then(|t| t.get("est_usd"))
+                        .and_then(|v| match v {
+                            Value::Num(n) => Some(*n),
+                            _ => None,
+                        })
+                        .unwrap_or(0.0);
+                    total += est_usd;
+                }
+            }
+        }
+    }
+    total
+}
+
+fn is_budget_exceeded(root: &str) -> bool {
+    let limit = env::var("CSVG_BUDGET_CAP_USD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(50.0);
+    get_current_month_cost(root) >= limit
+}
+
+fn api_healthcheck_run(root: &str) -> Value {
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
+    let python_bin = format!("{}/venv/bin/python", root_dir);
+    let health_script = format!("{}/healthcheck.py", root_dir);
+
+    let cmd_str = "cd /home/ubuntu/buzzdropfeedv2 && ./venv/bin/python healthcheck.py";
+    let output = if is_pi {
+        std::process::Command::new("ssh")
+            .args(&[
+                "-o", "StrictHostKeyChecking=no",
+                "ubuntu@100.104.253.1",
+                cmd_str
+            ])
+            .output()
+    } else {
+        std::process::Command::new(python_bin)
+            .arg(health_script)
+            .current_dir(root_dir)
+            .output()
+    };
+
+    let (success, log_out) = match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let combined = format!("{}{}", stdout, stderr);
+            (out.status.success(), combined)
+        }
+        Err(e) => (false, e.to_string()),
+    };
+
+    obj(&[
+        ("success", Value::Bool(success)),
+        ("output", s(&log_out)),
+    ])
 }

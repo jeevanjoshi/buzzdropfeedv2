@@ -124,7 +124,7 @@ class ActiveThreadSeederEngine:
         else:
             self.seeders = {"reddit": RedditJsonClient()}
         self.llm_client = None
-        self.warmup_mode = os.getenv("ACTIVE_SEEDER_WARMUP", "0").strip().lower() in ("1", "true", "yes")
+        self.warmup_mode = os.getenv("ACTIVE_SEEDER_WARMUP", "1").strip().lower() in ("1", "true", "yes")
 
     async def seed_active_discussions(self, state: GlobalState, youtube_url: str):
         logger.info("[ActiveThreadSeeder] Starting active thread comment reply bot...")
@@ -162,11 +162,9 @@ class ActiveThreadSeederEngine:
         candidates = []
         for query in search_queries:
             logger.info(f"[ActiveThreadSeeder] Searching Reddit for '{query}'...")
-            found = await asyncio.to_thread(reddit_seeder.search_active_threads, query, limit=5)
+            found = await asyncio.to_thread(reddit_seeder.search_active_threads, query, limit=25)
             if found:
                 candidates.extend(found)
-                # Break early if we have found threads
-                break
         
         if not candidates:
             logger.warning("[ActiveThreadSeeder] No active relevant Reddit threads found from the last 24 hours.")
@@ -180,83 +178,125 @@ class ActiveThreadSeederEngine:
 
         # Sort by comments/score to find the most active thread (max visibility)
         deduped_candidates.sort(key=lambda x: -x["num_comments"])
-        target_thread = deduped_candidates[0]
         
-        logger.info(
-            f"[ActiveThreadSeeder] Selected target thread: r/{target_thread['subreddit']} - "
-            f"'{target_thread['title']}' (ID: {target_thread['id']}, Comments: {target_thread['num_comments']})"
-        )
+        posted_subreddits = set()
+        retained_count = 0
+        target_retained = 15
+        
+        for target_thread in deduped_candidates:
+            if retained_count >= target_retained:
+                break
+                
+            subreddit = target_thread.get("subreddit")
+            if not subreddit:
+                continue
+                
+            if subreddit.lower() in posted_subreddits:
+                continue
 
-        # 3. Load full comment context
-        comments_context = self._get_comments_context(reddit_seeder, target_thread)
-
-        # 4. Invoke LLM to generate context-aware response
-        verified_facts_str = ""
-        if state.verified_facts:
-            verified_facts_str = "\n".join(
-                [f"- {getattr(f, 'summary', '') or getattr(f, 'headline', '')}" for f in state.verified_facts[:3]]
+            logger.info(
+                f"[ActiveThreadSeeder] Selected target thread ({retained_count + 1}/{target_retained}): "
+                f"r/{subreddit} - '{target_thread['title']}' (ID: {target_thread['id']}, Comments: {target_thread['num_comments']})"
             )
 
-        system_prompt = (
-            "You are an expert commenter participating in an online discussion forum thread. "
-            "Your task is to write a highly helpful, engaging, and organic comment responding to the thread. "
-            "Follow these critical guidelines:\n"
-            "- Do not sound like a bot, promotional marketer, or corporate advertiser.\n"
-            "- Do not start with phrases like 'Here is a breakdown' or 'In this video...'.\n"
-            "- Add real, factual value to the discussion. Speak like an experienced human user.\n"
-            "- Tailor your comment directly to the specific posts and top comments context provided.\n"
-            "You must return a JSON object in this exact format:\n"
-            "{\n"
-            "  \"comment\": \"<your response text here>\",\n"
-            "  \"reasoning\": \"<brief explanation of why this fits the thread>\"\n"
-            "}"
-        )
+            # 3. Load full comment context
+            comments_context = self._get_comments_context(reddit_seeder, target_thread)
 
-        prompt = (
-            f"Thread Title: {target_thread['title']}\n"
-            f"Thread Subreddit: r/{target_thread['subreddit']}\n"
-            f"Thread Content: {target_thread['selftext'][:1000]}\n\n"
-            f"Context of Existing Comments in Thread:\n{comments_context}\n\n"
-            f"Our Video Topic: {title}\n"
-            f"Verified Facts we know:\n{verified_facts_str}\n\n"
-        )
+            # 4. Invoke LLM to generate context-aware response
+            verified_facts_str = ""
+            if state.verified_facts:
+                verified_facts_str = "\n".join(
+                    [f"- {getattr(f, 'summary', '') or getattr(f, 'headline', '')}" for f in state.verified_facts[:3]]
+                )
 
-        if self.warmup_mode:
-            prompt += (
-                "CRITICAL: We are in account WARMUP mode. "
-                "Do NOT include any links, URLs, mentions of a YouTube video, or promotional text. "
-                "Write a 100% informational, engaging comment that answers the thread."
+            system_prompt = (
+                "You are an expert commenter participating in an online discussion forum thread. "
+                "Your task is to write a highly helpful, engaging, and organic comment responding to the thread. "
+                "Follow these critical guidelines to avoid automated filters and look completely human:\n"
+                "- Do not sound like a bot, promotional marketer, or corporate advertiser.\n"
+                "- Speak like a regular casual user: use natural phrasing, contractions (e.g., i'm, don't, it's), and informal structure. Avoid perfect 'academic' essay styles.\n"
+                "- Do not use stereotypical AI buzzwords or transitions (e.g., 'delve', 'crucial', 'testament', 'furthermore', 'moreover', 'in summary', 'ultimately', 'it's important to remember').\n"
+                "- Keep formatting casual: avoid neat bullet lists, numbered points, or bold headers unless completely natural for the context. Keep paragraphs short (1-2 paragraphs max, 2-4 sentences total is optimal).\n"
+                "- Do not start with phrases like 'Here is a breakdown', 'In this video...', or 'Based on the thread...'.\n"
+                "- Add real, factual value to the discussion. Speak like an experienced human user.\n"
+                "- Tailor your comment directly to the specific posts and top comments context provided.\n"
+                "You must return a JSON object in this exact format:\n"
+                "{\n"
+                "  \"comment\": \"<your response text here>\",\n"
+                "  \"reasoning\": \"<brief explanation of why this fits the thread>\"\n"
+                "}"
             )
-        else:
-            prompt += (
-                "CRITICAL: Naturally mention or cite our video breakdown as a source/reference. "
-                "For example: 'I put together a full visual animated breakdown on this here: [link]'. "
-                "Use the exact URL: {youtube_url} but replace the anchor text appropriately. "
-                "Do not make the link drop feel forced or spammy. Keep it subtle and at the end."
-            ).format(youtube_url=youtube_url)
 
-        if not self.llm_client.is_available():
-            logger.warning("[ActiveThreadSeeder] LLM Client is not available. Skipping reply generation.")
-            return
+            # Link obfuscation to bypass AutoMod
+            video_id = youtube_url.split("v=")[-1].split("&")[0] if "v=" in youtube_url else youtube_url.split("/")[-1]
+            import random
+            link_styles = [
+                f"youtube.com/watch?v={video_id}",
+                f"youtu.be/{video_id}",
+                f"youtube[dot]com/watch?v={video_id}",
+                f"youtube [dot] com / watch?v={video_id}",
+                f"youtu [dot] be / {video_id}",
+                f"youtube(dot)com/watch?v={video_id}",
+                f"youtu(dot)be/{video_id}",
+                f"youtube . com / watch?v={video_id}",
+                f"youtu.be / {video_id}",
+                f"youtube.com/watch?v=\u200b{video_id}",
+                f"`youtube.com/watch?v={video_id}`",
+                f"`youtu.be/{video_id}`",
+                youtube_url
+            ]
+            obfuscated_url = random.choice(link_styles)
 
-        logger.info("[ActiveThreadSeeder] Requesting context-aware reply from LLM...")
-        llm_res = self.llm_client.generate_json(prompt, system_prompt=system_prompt, route="generate")
-        if not llm_res or "comment" not in llm_res:
-            logger.warning(
-                f"[ActiveThreadSeeder] LLM reply generation failed or returned invalid JSON structure: {llm_res}"
+            prompt = (
+                f"Thread Title: {target_thread['title']}\n"
+                f"Thread Subreddit: r/{subreddit}\n"
+                f"Thread Content: {target_thread['selftext'][:1000]}\n\n"
+                f"Context of Existing Comments in Thread:\n{comments_context}\n\n"
+                f"Our Video Topic: {title}\n"
+                f"Verified Facts we know:\n{verified_facts_str}\n\n"
             )
-            return
 
-        comment_text = llm_res["comment"].strip()
-        reasoning = llm_res.get("reasoning", "")
-        logger.info(f"[ActiveThreadSeeder] LLM generated reply (Reasoning: '{reasoning}'):\n{comment_text}")
+            if self.warmup_mode:
+                prompt += (
+                    "CRITICAL: We are in account WARMUP mode. "
+                    "Do NOT include any links, URLs, mentions of a YouTube video, or promotional text. "
+                    "Write a 100% informational, engaging comment that answers the thread."
+                )
+            else:
+                prompt += (
+                    "CRITICAL: Naturally mention or cite our video breakdown as a source/reference. "
+                    "For example: 'I saw a good visual breakdown of this on youtube (url) that explains...' or 'put together a quick visualization of this here: url'. "
+                    "Use the exact URL/reference: {obfuscated_url} but replace or weave the anchor text/reference absolutely naturally. "
+                    "You can place the URL reference anywhere in the comment (beginning, middle, or end). "
+                    "Do not make the link drop feel forced or spammy. Keep it subtle."
+                ).format(obfuscated_url=obfuscated_url)
 
-        # 5. Post reply
-        success = await asyncio.to_thread(self._post_reply, target_thread, comment_text)
-        if success:
-            logger.info(f"[ActiveThreadSeeder] Active thread comment successfully posted!")
-        else:
-            logger.warning(f"[ActiveThreadSeeder] Failed to post reply to Reddit.")
+            if not self.llm_client.is_available():
+                logger.warning("[ActiveThreadSeeder] LLM Client is not available. Skipping reply generation.")
+                return
+
+            logger.info("[ActiveThreadSeeder] Requesting context-aware reply from LLM...")
+            llm_res = self.llm_client.generate_json(prompt, system_prompt=system_prompt, route="generate")
+            if not llm_res or "comment" not in llm_res:
+                logger.warning(
+                    f"[ActiveThreadSeeder] LLM reply generation failed or returned invalid JSON structure: {llm_res}"
+                )
+                continue
+
+            comment_text = llm_res["comment"].strip()
+            reasoning = llm_res.get("reasoning", "")
+            logger.info(f"[ActiveThreadSeeder] LLM generated reply (Reasoning: '{reasoning}'):\n{comment_text}")
+
+            # 5. Post reply
+            success = await asyncio.to_thread(self._post_reply, target_thread, comment_text)
+            if success:
+                logger.info(f"[ActiveThreadSeeder] Active thread comment successfully posted and verified on r/{subreddit}!")
+                posted_subreddits.add(subreddit.lower())
+                retained_count += 1
+            else:
+                logger.warning(f"[ActiveThreadSeeder] Reply failed or unverified (possible shadowban/Automod filtering) on r/{subreddit}. Trying other relevant groups...")
+        
+        logger.info(f"[ActiveThreadSeeder] Seeding finished. Total retained comments posted: {retained_count}/{target_retained}")
 
     def _get_comments_context(self, seeder, target_thread: Dict[str, Any]) -> str:
         """Loads top comment context from whichever seeder backend is active."""
