@@ -362,7 +362,8 @@ const ICONS = {
   clock: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
   terminal: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>`,
   activity: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
-  message: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`
+  message: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+  stop: `<svg class="svg-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>`
 };
 
 const STAGES = ['INITIALIZATION','TOPIC_SELECTED','SCRIPT_GENERATED','SCRIPT_APPROVED','MEDIA_PRODUCED','QUALITY_GATES_PASSED','PUBLISHED','PUBLISHED_SUCCESS'];
@@ -635,6 +636,7 @@ function seedingPanel(){
 
         <div class="btn-group">
           <button class="btn btn-primary" id="btn-trigger-seeding" style="padding:10px 20px;">${ICONS.play} Run Link Seeder</button>
+          <button class="btn btn-danger" id="btn-stop-seeding" style="padding:10px 20px; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4);">${ICONS.stop} Stop Seeder</button>
         </div>
       </div>
       <div id="seed-feedback" style="margin-top: 12px; font-size: 12.5px; font-family: var(--mono); min-height: 18px;"></div>
@@ -779,6 +781,7 @@ function controlPanel(){
       <div class="btn-group">
         <button class="btn btn-primary" id="btn-start-run" ${disabled}>${ICONS.play} Start New Run</button>
         <button class="btn btn-purple" id="btn-resume-run" ${disabled}>${ICONS.resume} Resume Selected</button>
+        <button class="btn btn-danger" id="btn-stop-run" ${!isRunning ? 'disabled' : ''} style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4);">${ICONS.stop} Stop Pipeline</button>
       </div>
     </div>
     <div id="ctrl-feedback" style="margin-top: 12px; font-size: 12.5px; font-family: var(--mono); min-height: 18px;"></div>
@@ -895,10 +898,35 @@ function bindControlEvents(){
       feedback.textContent = 'Network error: ' + e.message;
     }
   });
+
+  const stopBtn = $('#btn-stop-run');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', async () => {
+      if (!confirm('Are you sure you want to abort the running pipeline job on OCI/Pi?')) return;
+      feedback.style.color = 'var(--amber)';
+      feedback.textContent = 'Terminating pipeline processes...';
+      try {
+        const r = await fetch('/api/pipeline/stop', { method: 'POST' });
+        const res = await r.json();
+        if (res.success) {
+          feedback.style.color = 'var(--green)';
+          feedback.textContent = 'Pipeline execution terminated.';
+          setTimeout(loadAll, 1500);
+        } else {
+          feedback.style.color = 'var(--red)';
+          feedback.textContent = 'Error: ' + (res.error || 'Failed to stop pipeline');
+        }
+      } catch(e) {
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Network error: ' + e.message;
+      }
+    });
+  }
 }
 
 function bindSeedingEvents(){
   const triggerBtn = $('#btn-trigger-seeding');
+  const stopSeederBtn = $('#btn-stop-seeding');
   const feedback = $('#seed-feedback');
   const videoSelect = $('#seed-video-select');
   const outputBox = $('#seeding-output');
@@ -940,6 +968,30 @@ function bindSeedingEvents(){
         } else {
           feedback.style.color = 'var(--red)';
           feedback.textContent = 'Error: ' + (res.error || 'Failed to trigger seeder');
+        }
+      } catch(e) {
+        feedback.style.color = 'var(--red)';
+        feedback.textContent = 'Network error: ' + e.message;
+      }
+    });
+  }
+
+  if (stopSeederBtn) {
+    stopSeederBtn.addEventListener('click', async () => {
+      if (!feedback) return;
+      if (!confirm('Are you sure you want to stop the active seeding process on the Pi?')) return;
+      feedback.style.color = 'var(--amber)';
+      feedback.textContent = 'Terminating Reddit seeder...';
+      try {
+        const r = await fetch('/api/seeding/stop', { method: 'POST' });
+        const res = await r.json();
+        if (res.success) {
+          feedback.style.color = 'var(--green)';
+          feedback.textContent = 'Reddit seeding terminated.';
+          setTimeout(loadAll, 1500);
+        } else {
+          feedback.style.color = 'var(--red)';
+          feedback.textContent = 'Error: ' + (res.error || 'Failed to stop seeder');
         }
       } catch(e) {
         feedback.style.color = 'var(--red)';
