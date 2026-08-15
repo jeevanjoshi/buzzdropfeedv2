@@ -851,9 +851,6 @@ fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
         args.push(renderer);
     }
     
-    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
-    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
-
     let is_resume = path.ends_with("/resume");
     if is_resume {
         args.push("--resume".to_string());
@@ -876,7 +873,7 @@ fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
     }
 
     let flag_str = args.join(" ");
-    let cmd_str = format!("cd /home/ubuntu/buzzdropfeedv2 && ./run_production.sh {}", flag_str);
+    let cmd_str = format!("cd {} && ./run_production.sh {}", root_dir, flag_str);
     
     let spawned = if is_pi {
         std::process::Command::new("ssh")
@@ -989,21 +986,18 @@ fn api_pipeline_stop(root: &str) -> Value {
     
     // Command to kill main.py / run_production.sh / cron / ffmpeg child processes
     let kill_cmd = "pkill -9 -f run_production.sh 2>/dev/null; pkill -9 -f main.py 2>/dev/null; pkill -9 -f cron_publish.sh 2>/dev/null; pkill -9 -f healthcheck.py 2>/dev/null; pkill -9 -f ffmpeg 2>/dev/null; true";
+    let hb_cmd = "echo '{\"running\":false,\"ts\":\"\"}' > logs/pipeline_heartbeat.json 2>/dev/null; true";
 
     if is_pi {
-        // Kill on OCI cloud host via SSH host oci-prod
+        // Kill on OCI cloud host via SSH host oci-prod AND update its heartbeat
         let _ = std::process::Command::new("ssh")
-            .args(&[
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=5",
-                "oci-prod",
-                kill_cmd
-            ])
+            .args(&["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "oci-prod",
+                &format!("{}; {}", kill_cmd, hb_cmd)])
             .output();
     } else {
-        // Kill locally if running on OCI
+        // Kill locally and update heartbeat
         let _ = std::process::Command::new("bash")
-            .args(&["-c", kill_cmd])
+            .args(&["-c", &format!("{}; {}", kill_cmd, hb_cmd)])
             .output();
     }
 
@@ -1134,13 +1128,13 @@ fn api_healthcheck_run(root: &str) -> Value {
     let python_bin = format!("{}/venv/bin/python", root_dir);
     let health_script = format!("{}/healthcheck.py", root_dir);
 
-    let cmd_str = "cd /home/ubuntu/buzzdropfeedv2 && ./venv/bin/python healthcheck.py";
+    let cmd_str = format!("cd {} && ./venv/bin/python healthcheck.py", root_dir);
     let output = if is_pi {
         std::process::Command::new("ssh")
             .args(&[
                 "-o", "StrictHostKeyChecking=no",
-                "ubuntu@100.104.253.1",
-                cmd_str
+                "oci-prod",
+                &cmd_str
             ])
             .output()
     } else {

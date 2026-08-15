@@ -81,6 +81,25 @@ if [[ " $* " != *" --skip-health-check "* ]]; then
     else
         echo "[HEALTH] FAILED — aborting production run before launch." >&2
         echo "[HEALTH] See logs/health_check.log for the audit trail." >&2
+        # Persist a state-shaped failure checkpoint so the aborted run is VISIBLE
+        # on the dashboard (/api/runs lists logs/state_*.json), instead of being
+        # silently absent. JSON is spaced exactly like the pipeline's own
+        # checkpoints ("execution_stage": "...") so the same greps stay consistent.
+        # The auto-resume scan explicitly skips this stage, so it is never
+        # mistaken for an incomplete real run.
+        FAILED_ID="csvg-exec-$(date -u +%Y%m%d-%H%M%S)-healthcheck"
+        FAILED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        FAILED_REGION=""
+        if [[ "$*" == *"--india"* ]]; then FAILED_REGION="india"; fi
+        if [[ "$*" == *"--global"* ]]; then FAILED_REGION="global"; fi
+        printf '{"pipeline_id": "%s", "timestamp": "%s", "execution_stage": "HEALTH_CHECK_FAILED", "region": "%s", "health_check_failed": true}\n' \
+            "${FAILED_ID}" "${FAILED_TS}" "${FAILED_REGION}" > "logs/state_${FAILED_ID}.json"
+        echo "[HEALTH] Failure checkpoint written -> logs/state_${FAILED_ID}.json"
+        if [ "${1:-}" != "--no-detach" ] && command -v rsync >/dev/null 2>&1; then
+            rsync -az -e ssh "logs/state_${FAILED_ID}.json" "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/logs/" 2>/dev/null \
+                && echo "[SYNC] Failure checkpoint synced to Pi dashboard." \
+                || echo "[WARN] Could not sync failure checkpoint to Pi dashboard."
+        fi
         exit 1
     fi
 else
@@ -212,11 +231,13 @@ show_progress() {
 
 # Check if we should detach into the background
 if [ "${1:-}" != "--no-detach" ]; then
-    # Find the most recent state checkpoint that is failed or incomplete (not PUBLISHED_SUCCESS and not DONE)
+    # Find the most recent state checkpoint that is failed or incomplete (not PUBLISHED_SUCCESS and not DONE).
+    # HEALTH_CHECK_FAILED markers are pre-flight abort records, NOT resumable runs — always skipped.
     LATEST_STATE=""
     for f in $(ls -t logs/state_*.json 2>/dev/null); do
         STAGE=$(grep -o '"execution_stage": "[^"]*' "${f}" 2>/dev/null | head -n 1 | cut -d'"' -f4)
-        if [ -n "${STAGE}" ] && [ "${STAGE}" != "PUBLISHED_SUCCESS" ] && [ "${STAGE}" != "DONE" ]; then
+        if [ -n "${STAGE}" ] && [ "${STAGE}" != "PUBLISHED_SUCCESS" ] && [ "${STAGE}" != "DONE" ] \
+           && [ "${STAGE}" != "HEALTH_CHECK_FAILED" ]; then
             LATEST_STATE="${f}"
             break
         fi

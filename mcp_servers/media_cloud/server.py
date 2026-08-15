@@ -67,7 +67,72 @@ class ThumbnailRequest(BaseModel):
     visual_prompt: Optional[str] = ""   # theme-matched scene description (e.g. the hero
                                         # shot's visual prompt) so the AI art matches the
                                         # story's subject instead of the raw CTR text.
+    emotion: str = ""                   # optional human-emotion descriptor for the face;
+                                        # when empty a deterministic one is derived.
+    art_prompt: Optional[str] = ""      # optional LLM-analysed nano-banana art prompt
+                                        # (16:9). When present + nano-banana is enabled it
+                                        # is used as the background-image prompt instead of
+                                        # the Flux-composed prompt below.
     output_thumbnail_path: str
+
+
+# Deterministic per-topic human emotion variety (hash-stable so the same video
+# always gets the same face emotion, giving the channel a consistent identity).
+_THUMB_EMOTIONS = (
+    "genuine excited wonder",
+    "intense analytical focus",
+    "authentic curious contemplation",
+    "delighted surprise",
+)
+
+
+def _thumbnail_emotion(seed: str) -> str:
+    import zlib
+    _idx = zlib.crc32((seed or "").encode("utf-8")) % len(_THUMB_EMOTIONS)
+    return _THUMB_EMOTIONS[_idx]
+
+
+def _bold_font_path() -> Optional[str]:
+    """Locate an ultra-bold sans-serif TrueType font (DejaVu Sans Bold) for
+    thumbnail typography — the article-recommended bold, legible-at-mobile-size
+    look that cv2's thin Hershey vector fonts cannot deliver."""
+    import matplotlib
+    candidates = [
+        os.path.join(matplotlib.get_data_path(), "fonts", "ttf", "DejaVuSans-Bold.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            return cand
+    return None
+
+
+def _load_bold_font(size: int):
+    from PIL import ImageFont
+    path = _bold_font_path()
+    if path:
+        return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+def _fit_thumbnail_font(headline: str, max_width: int) -> int:
+    """Largest font size whose single headline line still fits max_width (px)."""
+    for size in range(116, 53, -1):
+        font = _load_bold_font(size)
+        _l, _t, _r, _b = font.getbbox(headline)
+        if (_r - _l) <= max_width:
+            return size
+    return 54
+
+
+def _shorten_thumbnail_text(text: str) -> str:
+    """Reduce any headline/brief to a single high-impact line: uppercase and at
+    most 3 words — '0-3 words is best' per high-CTR thumbnail research."""
+    clean = re.sub(r"\s+", " ", str(text or "")).strip().upper()
+    words = clean.split()
+    if len(words) > 3:
+        words = words[:3]
+    return " ".join(words) if words else "EXPLAINED"
 
 
 class TimelineAssemblyRequest(BaseModel):
@@ -312,8 +377,6 @@ async def generate_thumbnail(req: ThumbnailRequest):
     """
     try:
         os.makedirs(os.path.dirname(os.path.abspath(req.output_thumbnail_path)), exist_ok=True)
-        current_month_year = datetime.datetime.now(datetime.timezone.utc).strftime("%B %Y").upper()
-        sub_text = req.subtitle_text.upper() if req.subtitle_text else f"EXPLAINED ({current_month_year})"
 
         try:
             import matplotlib.pyplot as plt
@@ -326,30 +389,71 @@ async def generate_thumbnail(req: ThumbnailRequest):
             scene = re.sub(
                 r'^\s*cinematic\s+16:9(?:\s+widescreen)?\s*\.?\s*', '', scene, flags=re.IGNORECASE
             )
-            # Bright, vibrant, on-theme background: "dark moody" reads muddy/dark
-            # and the raw headline string produces garbled "text-in-image" tearing.
-            # Explicit no-text guard stops fal/replicate from painting letters.
+            # BillBoard-test-safe art: single clear focal subject, rule-of-thirds
+            # composition with clean negative space on the LEFT (reserved for the
+            # text hook), 60-30-10 color grading, minimal background detail so it
+            # stays readable at ~15% thumbnail size. Explicit no-text guard stops
+            # fal/replicate from painting letters; the human-emotion face hook is
+            # added below (and only once — scenes that already request a face/gaze
+            # keep their own phrasing).
+            _compose = (
+                "Composition: rule-of-thirds, single clear focal subject placed in the "
+                "RIGHT third of frame at one of the grid intersections, generous clean "
+                "negative space in the LEFT third (reserved for a bold text overlay), "
+                "never dead-centered. Minimal background detail, no extra objects, no "
+                "clutter — it must stay instantly readable at a tiny thumbnail size. "
+                "60-30-10 color grading: muted/deep background, high-contrast saturated "
+                "subject, one vivid accent color. Sharp focus on the subject, soft "
+                "blurred background."
+            )
+            _emotion_clause = ""
+            if "face" not in scene.lower() and "gaze" not in scene.lower():
+                _emotion_clause = (
+                    "Human emotion & gaze direction: foreground ONE authentic, "
+                    "recognizable human reaction face (with "
+                    f"{_thumbnail_emotion(req.emotion or scene or req.headline_text)}), "
+                    "never an overplayed generic shock face or fake grin. The face looks "
+                    "directly at the camera and its attention pulls the viewer toward the "
+                    "upper-left corner where the text hook will be added, guiding the eye. "
+                    "Face placed in the lower-right foreground roughly 30% of the frame, "
+                    "sharp and well lit. "
+                )
+            _guard = (
+                "Absolutely no text, no words, no letters, no numbers, no typography, "
+                "no watermark, no logo, no captions, no UI. A single human reaction "
+                "face only — no crowds, no other/duplicate people."
+            )
             style_keywords = ["neon", "dramatic", "minimalist", "angle", "perspective", "lighting", "cyberpunk", "dark", "moody", "high-contrast", "contrast", "vivid", "saturated"]
             has_style_cues = any(kw in scene.lower() for kw in style_keywords)
             if has_style_cues:
                 prompt = (
                     f"Widescreen 16:9 YouTube thumbnail background image of: {scene}. "
-                    f"Absolutely no text, no words, no letters, no numbers, no typography, "
-                    f"no watermark, no logo, no captions, no UI, no people overlaid."
+                    f"{_compose} {_emotion_clause}{_guard}"
                 )
             else:
                 prompt = (
                     f"Widescreen 16:9 YouTube thumbnail background image of: {scene}. "
                     f"Photorealistic, bright natural daylight, vivid vibrant colors, high contrast, "
                     f"sunny optimistic atmosphere, crisp sharp focus. "
-                    f"Absolutely no text, no words, no letters, no numbers, no typography, "
-                    f"no watermark, no logo, no captions, no UI, no people overlaid."
+                    f"{_compose} {_emotion_clause}{_guard}"
                 )
 
-            # Try generating a background image using fal.ai or replicate
+            # Try generating a background image — nano-banana first (LLM-analysed
+            # art when provided), then fal.ai, then Replicate.
             bg_data = None
+            nano_prompt = (req.art_prompt or "").strip()
+            if not nano_prompt:
+                nano_prompt = prompt
+            try:
+                from src.engine.nano_banana import generate_image as _nano_image
+                bg_data = _nano_image(nano_prompt, "16:9")
+                if bg_data:
+                    print("[Thumbnail] Successfully generated background image via Google nano-banana")
+            except Exception as e:
+                print(f"[Thumbnail] nano-banana background generation failed: {e}")
+
             fal_key = os.getenv("FAL_KEY")
-            if fal_key and not fal_key.startswith("YOUR_"):
+            if bg_data is None and fal_key and not fal_key.startswith("YOUR_"):
                 try:
                     import fal_client
                     import requests
@@ -427,91 +531,82 @@ async def generate_thumbnail(req: ThumbnailRequest):
                     t = yy / 720.0
                     img[yy, :] = (int(38 + 40 * t), int(78 + 100 * t), int(138 + 110 * t))
 
-            # Soft dark gradient on the lower half ONLY, under the text zone, so the
-            # bottom reads legibly while the top of the scene stays bright.
             h, w = img.shape[:2]
-            grad_area = int(h * 0.5)
-            grad = np.linspace(0.0, 0.45, grad_area, dtype=np.float32).reshape(-1, 1, 1)
-            img[h - grad_area:] = (img[h - grad_area:].astype(np.float32) * (1.0 - grad)).astype(np.uint8)
 
-            # Glowing border & high-contrast yellow/white text overlay
-            cv2.rectangle(img, (20, 20), (1260, 700), (0, 215, 255), 6)
-            
-            # Word-wrap the headline into two lines of max ~25-30 chars
-            words = req.headline_text.upper().split()
-            lines = []
-            current_line = []
-            current_len = 0
-            for w in words:
-                if current_len + len(w) + 1 <= 24:
-                    current_line.append(w)
-                    current_len += len(w) + 1
-                else:
-                    if current_line:
-                        lines.append(" ".join(current_line))
-                    current_line = [w]
-                    current_len = len(w)
-            if current_line:
-                lines.append(" ".join(current_line))
+            # Subtle radial vignette darkens only the extreme corners to focus the
+            # eye on the center subject — background simplification, no gaudy frame.
+            _vx = np.linspace(0.0, 1.0, w, dtype=np.float32)
+            _vy = np.linspace(0.0, 1.0, h, dtype=np.float32)
+            _gx, _gy = np.meshgrid(_vx, _vy)
+            _dist = np.sqrt((_gx - 0.5) ** 2 + (_gy - 0.5) ** 2) * 2.0
+            _vig = np.clip(1.0 - 0.16 * np.clip(_dist - 0.75, 0.0, 1.0), 0.84, 1.0)
+            img = (img.astype(np.float32) * _vig[..., None]).astype(np.uint8)
 
-            # Limit to max 2 lines for thumbnail readability, adding ... if truncated
-            if len(lines) > 2:
-                lines = lines[:2]
-                lines[1] = lines[1][:21] + "..."
-            elif not lines:
-                lines = ["EXPLAINED"]
+            # ── Clean single-line, ultra-bold typography (decluttered) ────────
+            # Research-based rules now applied: 0-3 words, ONE punchy line (no
+            # wrapped paragraphs), text in the UPPER-LEFT safe zone clear of the
+            # timestamp/progress overlays, ultra-bold sans-serif that stays
+            # legible at mobile sizes, and no redundant "EXPLAINED (date)" band.
+            from PIL import Image, ImageDraw, ImageFilter
+            _headline = _shorten_thumbnail_text(req.headline_text)
+            _sub = str(req.subtitle_text).strip().upper()[:44] if req.subtitle_text else ""
 
-            # Draw lines with clean anti-aliasing + black outline so the text stays
-            # legible over a bright background.
-            def _draw_outlined(text, pos, scale, color, thick=4, outline_thick=9):
-                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                            (0, 0, 0), outline_thick, cv2.LINE_AA)
-                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                            color, thick, cv2.LINE_AA)
-
-            y_start = 260 if len(lines) > 1 else 340
-            sub_y = y_start + (len(lines) * 90) + 10
-
-            # ── Deterministic text contrast (right-first-time) ────────────────
-            # A single fixed light-yellow fill loses contrast on bright scenes
-            # (e.g. the ostrich video's golden-sand background ≈ same tone as the
-            # text). Instead: draw an adaptive dark pedestal behind the text zone
-            # and pick fill/outline colors from the MEASURED local luminance, so
-            # light text works on dark and dark text works on bright, regardless
-            # of what the AI painted.
-            _pad = 30
-            _box_y0 = max(0, y_start - _pad)
-            # Text block ends below the last line / subtitle.
-            _box_end = sub_y + 55
-            _region = img[_box_y0:_box_end, 60:1260]
-            mean_lum = float(cv2.mean(cv2.cvtColor(_region, cv2.COLOR_BGR2GRAY))[0]) if _region.size else 128.0
-            _is_bright = mean_lum > 150.0
-
-            # Soft dark scrim so text ALWAYS has a pedestal (alpha scales only
-            # mildly; enough to guarantee separation without crushing the art).
-            _ped = np.zeros_like(_region)
-            cv2.rectangle(_ped, (0, 0), (_region.shape[1] - 1, _region.shape[0] - 1), (0, 0, 0), -1)
-            _alpha = 0.30 if _is_bright else 0.18
-            np.copyto(_region, cv2.addWeighted(_region, 1.0 - _alpha, _ped, _alpha, 0))
-
-            # On a bright region use DARK bold text with a white outline; on a
-            # dark region use LIGHT text with a black outline.
-            if _is_bright:
-                _fill, _outline = (10, 10, 20), (255, 255, 255)
+            # Text palette from MEASURED luminance of the zone under the headline:
+            # light text on dark art, dark text on very bright art (e.g. desert
+            # scenes) — guaranteed contrast instead of a fixed yellow fill.
+            _zone = img[150:360, 40:780]
+            _lum = float(cv2.mean(cv2.cvtColor(_zone, cv2.COLOR_BGR2GRAY))[0]) if _zone.size else 128.0
+            if _lum > 200.0:
+                _fill, _stroke = (12, 14, 24), (255, 255, 255)
             else:
-                _fill, _outline = (0, 235, 255), (0, 0, 0)
+                _fill, _stroke = (255, 255, 255), (8, 8, 10)
+            # 10% high-contrast accent per the 60-30-10 color rule: an amber bar
+            # under the hook on dark art, a signal-red bar on bright art.
+            _accent = (255, 211, 25) if _lum <= 200.0 else (255, 45, 58)
+            _shadow_alpha = 0.55 if _lum > 150.0 else 0.42
 
-            def _draw_outlined(text, pos, scale, thick=4, outline_thick=8):
-                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                            _outline, outline_thick, cv2.LINE_AA)
-                cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                            _fill, thick, cv2.LINE_AA)
+            _head_font = _load_bold_font(_fit_thumbnail_font(_headline, 1060))
+            _bbox = _head_font.getbbox(_headline)
+            _head_w = _bbox[2] - _bbox[0]
+            # Rule-of-thirds anchor: hook sits in the upper-LEFT third grid cell.
+            _x0, _y0 = 78, 190
+            _base_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).convert("RGBA")
 
-            for idx, line in enumerate(lines):
-                _draw_outlined(line, (60, y_start + (idx * 90)), 1.4)
+            # Soft blurred drop shadow beneath the glyphs separates the text from
+            # any art tone without a boxy pedestal.
+            _sh = Image.new("RGBA", _base_img.size, (0, 0, 0, 0))
+            _sd = ImageDraw.Draw(_sh)
+            _sd.text((_x0, _y0 + 8), _headline, font=_head_font,
+                     fill=(0, 0, 0, int(255 * _shadow_alpha)),
+                     stroke_width=3, stroke_fill=(0, 0, 0, int(255 * _shadow_alpha)))
+            _sh = _sh.filter(ImageFilter.GaussianBlur(7))
+            _base_img = Image.alpha_composite(_base_img, _sh)
+            _d = ImageDraw.Draw(_base_img)
 
-            _draw_outlined(sub_text, (60, sub_y), 1.1)
+            # Ultra-Bold reach: a wide dark outline plus a second same-colored
+            # fill pass thickens DejaVu Sans Bold toward an Impact/Anton weight,
+            # staying legible at mobile/postage-stamp size.
+            _d.text((_x0, _y0), _headline, font=_head_font, fill=_fill + (255,),
+                    stroke_width=10, stroke_fill=_stroke + (255,))
+            _d.text((_x0, _y0), _headline, font=_head_font, fill=_fill + (255,),
+                    stroke_width=3, stroke_fill=_fill + (255,))
 
+            # 10% accent: a short vivid bar under the hook (extended under the
+            # subtitle when one is present) — the single color accent that makes
+            # the design register grey/busy-sky reading as intentional.
+            if _sub:
+                _sub_font = _load_bold_font(46)
+                _d.text((_x0 + 6, _y0 + int(_head_font.size * 1.18)), _sub, font=_sub_font,
+                        fill=_fill + (255,), stroke_width=4, stroke_fill=_stroke + (255,))
+                _acc_w = int(_head_w * 0.5)
+                _acc_top = _y0 + int(_head_font.size * 1.18) + 60
+            else:
+                _acc_w = int(_head_w * 0.62)
+                _acc_top = _y0 + _head_font.size + 14
+            _d.rounded_rectangle([_x0, _acc_top, _x0 + max(_acc_w, 110), _acc_top + 12],
+                                 radius=6, fill=_accent + (255,))
+
+            img = cv2.cvtColor(np.array(_base_img), cv2.COLOR_RGBA2BGR)
             cv2.imwrite(req.output_thumbnail_path, img)
             return {"status": "success", "engine": "high_ctr_thumbnail", "path": req.output_thumbnail_path}
         except Exception:

@@ -133,6 +133,7 @@ class AssetPaths(BaseModel):
     thumbnail: Optional[str] = None          # 1280x720 YouTube thumbnail PNG
     shorts_clip: Optional[str] = None        # 1080x1920 vertical 60-90s Shorts clip
     shorts: List[str] = Field(default_factory=list, description="Generated vertical Shorts clips (1080x1920)")
+    shorts_covers: List[str] = Field(default_factory=list, description="9:16 Shorts cover PNGs (parallel to shorts; uploaded via thumbnails.set)")
     storage_dir: Optional[str] = "/tmp/csvg_media"
     # Measured (ffprobe) per-shot durations + the crossfade used at assembly, so
     # pre-upload gates can check the master duration against the REAL timeline
@@ -158,6 +159,8 @@ class ChannelStats(BaseModel):
     """Persisted channel growth metrics — read from YouTube Analytics API daily."""
     subscribers: int = 0
     total_watch_hours: int = 0
+    total_views: int = 0
+    total_videos: int = 0
     channel_phase: str = CHANNEL_PHASE_GROWTH  # GROWTH | REVENUE | SCALE
     last_updated: str = ""
     ypp_unlocked: bool = False

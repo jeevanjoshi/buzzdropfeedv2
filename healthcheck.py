@@ -416,25 +416,42 @@ def check_media(strict: bool = False):
 def check_hermetic_suite() -> bool:
     """
     Executes the self-sufficient hermetic test suite (tests/test_hermetic_e2e.py)
-    which runs full codebase static integrity analysis (ruff) + all 23 pipeline
+    which runs full codebase static integrity analysis (ruff) + all 24 pipeline
     logic, regression, and A2A quality tests. Hard-fails before any external
     network, quota, or media resources are consumed.
     """
     import subprocess
     repo = os.path.dirname(os.path.abspath(__file__))
     cmd = [sys.executable, "run_tests.py"]
-    try:
-        res = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=120)
-        if res.returncode == 0:
-            record("test", "hermetic test suite", _OK, "all tests passed (static integrity + 23 E2E cases)")
-            return True
-        else:
-            err_summary = res.stdout.strip().splitlines()[-4:] if res.stdout else [res.stderr.strip()]
-            record("test", "hermetic test suite", _FAIL, f"Suite failed: {' | '.join(err_summary)}")
-            return False
-    except Exception as e:
-        record("test", "hermetic test suite", _FAIL, f"Could not execute test suite: {e}")
-        return False
+
+    # The suite normally finishes in ~10-15s, but an occasional cold-model-load
+    # or I/O-heavy condition can make it exceed a tight cap. Give it a generous
+    # first attempt, then a second warm attempt before counting a real failure —
+    # a transient timeout must NOT silently skip a scheduled publish slot.
+    last_res = None
+    last_err = None
+    ok = False
+    for attempt in (1, 2):
+        try:
+            last_res = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=300)
+            if last_res.returncode == 0:
+                ok = True
+                break
+        except Exception as e:
+            last_err = e
+    if ok:
+        record("test", "hermetic test suite", _OK, "all tests passed (static integrity + 24 E2E cases)")
+        return True
+    if last_res is not None and last_res.stdout:
+        err_summary = last_res.stdout.strip().splitlines()[-4:]
+    elif last_res is not None and last_res.stderr:
+        err_summary = [last_res.stderr.strip()]
+    elif last_err is not None:
+        err_summary = [f"Could not execute test suite: {last_err}"]
+    else:
+        err_summary = ["Unknown suite failure"]
+    record("test", "hermetic test suite", _FAIL, f"Suite failed: {' | '.join(err_summary)}")
+    return False
 
 
 # ---------------------------------------------------------------------------

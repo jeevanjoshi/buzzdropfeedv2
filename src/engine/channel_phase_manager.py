@@ -84,9 +84,9 @@ def _save_stats_to_disk(stats: Dict[str, Any]) -> None:
 
 def _fetch_from_youtube_analytics() -> Dict[str, Any]:
     """
-    Fetches subscriber count and lifetime watch hours from YouTube Analytics API.
+    Fetches subscriber count, total views, and video count from YouTube Data API.
     Falls back to environment variables if API is unavailable.
-    Returns dict with 'subscribers' and 'total_watch_hours' keys.
+    Watch hours are NOT available from Data API v3 — uses CHANNEL_WATCH_HOURS env.
     """
     # 1. Try YouTube Data API v3 (channel statistics)
     try:
@@ -103,16 +103,30 @@ def _fetch_from_youtube_analytics() -> Dict[str, Any]:
             if items:
                 stats = items[0]["statistics"]
                 subs = int(stats.get("subscriberCount", 0))
+                views = int(stats.get("viewCount", 0))
+                videos = int(stats.get("videoCount", 0))
                 # Watch hours not in Data API v3 — use Analytics API or env override
                 watch_hours = int(os.getenv("CHANNEL_WATCH_HOURS", "0"))
-                return {"subscribers": subs, "total_watch_hours": watch_hours}
+                return {
+                    "subscribers": subs,
+                    "total_watch_hours": watch_hours,
+                    "total_views": views,
+                    "total_videos": videos,
+                }
     except Exception:
         pass
 
     # 2. Fall back to environment variable overrides (set manually from YouTube Studio)
     subs = int(os.getenv("CHANNEL_SUBSCRIBERS", "0"))
     watch_hours = int(os.getenv("CHANNEL_WATCH_HOURS", "0"))
-    return {"subscribers": subs, "total_watch_hours": watch_hours}
+    views = int(os.getenv("CHANNEL_VIEWS", "0"))
+    videos = int(os.getenv("CHANNEL_VIDEOS", "0"))
+    return {
+        "subscribers": subs,
+        "total_watch_hours": watch_hours,
+        "total_views": views,
+        "total_videos": videos,
+    }
 
 
 def get_channel_stats(force_refresh: bool = False) -> ChannelStats:
@@ -138,12 +152,16 @@ def get_channel_stats(force_refresh: bool = False) -> ChannelStats:
         live = _fetch_from_youtube_analytics()
         subs = live["subscribers"]
         watch_hours = live["total_watch_hours"]
+        views = live.get("total_views", 0)
+        videos = live.get("total_videos", 0)
         phase = _determine_phase(subs, watch_hours)
         ypp_unlocked = (subs >= YPP_SUBS_THRESHOLD and watch_hours >= YPP_WATCH_HOURS_THRESHOLD)
 
         data = {
             "subscribers": subs,
             "total_watch_hours": watch_hours,
+            "total_views": views,
+            "total_videos": videos,
             "channel_phase": phase,
             "last_updated": now_utc,
             "ypp_unlocked": ypp_unlocked,
@@ -154,6 +172,8 @@ def get_channel_stats(force_refresh: bool = False) -> ChannelStats:
     return ChannelStats(
         subscribers=cached.get("subscribers", 0),
         total_watch_hours=cached.get("total_watch_hours", 0),
+        total_views=cached.get("total_views", 0),
+        total_videos=cached.get("total_videos", 0),
         channel_phase=cached.get("channel_phase", CHANNEL_PHASE_GROWTH),
         last_updated=cached.get("last_updated", now_utc),
         ypp_unlocked=cached.get("ypp_unlocked", False),

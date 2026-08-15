@@ -289,9 +289,21 @@ def _build_thumbnail_scene(state) -> str:
     base = re.sub(r"\.\s*$", "", base.strip())
     return (
         f"A dramatic cinematic 16:9 scene of {subject}: {base}. "
-        f"Center the imagery completely on {subject}, monumental product-shot " 
-        f"realism, glowing dramatic rim lighting against a deep dark background, "
-        f"ultra high contrast, precious-metal accents.")
+        f"Rule-of-thirds composition: place {subject} in the RIGHT third of the "
+        f"frame at a grid intersection, never dead-center, with clean empty "
+        f"negative space in the LEFT third reserved for a bold text hook. "
+        f"Single hero subject only — no crowds, no extra props, no clutter, "
+        f"minimal background detail so the image stays instantly readable at "
+        f"postage-stamp thumbnail size. Monumental product-shot realism, glowing "
+        f"dramatic rim lighting against a deep dark background, 60-30-10 color "
+        f"grading: muted background, high-contrast saturated subject, one vivid "
+        f"accent hue. Sharp focus on the subject, soft blurred background, ultra "
+        f"high contrast. Human emotion & gaze direction: foreground one "
+        f"authentic, recognizable human reaction face — genuine surprise, "
+        f"curiosity or intense focus, never an overplayed shock face — facing "
+        f"the camera, gaze and attention pointing toward the upper-left text-hook "
+        f"corner to guide the viewer's eye. One single face only, no crowds, no "
+        f"extra people.")
 
 
 def _resolve_ticker(topic) -> Optional[str]:
@@ -1457,27 +1469,65 @@ class MediaProducerAgent:
         # Generate dynamic widescreen high-CTR Thumbnail (uses the CTR-optimized brief
         # for the text, and the hero shot's theme-matched visual prompt for the art so
         # the background matches the story's subject instead of the raw CTR text).
+        # Preferred (Option B): nano-banana bakes the full design — thematic hook from
+        # the narration/facts + design-rules art + model-rendered text + compliance —
+        # reusing the video's own frame as an identity reference; then thumbnails.set
+        # uploads it (honored for long-form). Fallback = art+cv2 path below.
         thumbnail_path = os.path.join(self.storage_dir, f"thumbnail_{exec_suffix}.png")
+        thumb_scene = _build_thumbnail_scene(state)
+        baked_thumb_path = os.path.join(self.storage_dir, f"thumbnail_{exec_suffix}.jpg")
         try:
-            from mcp_servers.media_cloud.server import ThumbnailRequest, generate_thumbnail
-            brief = (
-                state.seo_metadata.thumbnail_brief
-                if state.seo_metadata and state.seo_metadata.thumbnail_brief
-                else (state.selected_topic.headline if state.selected_topic else "Market Shift")
-            )
-            # Topic-grounded scene: fuses the video's subject (company/product)
-            # into the hero shot's art direction so the thumbnail matches the
-            # niche instead of shipping a generic stock scene.
-            thumb_scene = _build_thumbnail_scene(state)
-            await generate_thumbnail(ThumbnailRequest(
-                headline_text=brief,
-                visual_prompt=thumb_scene,
-                output_thumbnail_path=thumbnail_path
-            ))
-            asset_paths.thumbnail = thumbnail_path
-            print(f"[MediaProducer] High-CTR Thumbnail successfully generated at {thumbnail_path}")
+            from src.engine.nano_banana import generate_baked_video_thumbnail
+            _ref = None
+            try:
+                import subprocess as _sp
+                _frame_path = os.path.join(self.storage_dir, f"thumbref_{exec_suffix}.jpg")
+                _sp.run(
+                    ["ffmpeg", "-y", "-ss", "2", "-i", final_video_path,
+                     "-frames:v", "1", "-vf", "scale=640:-1", "-q:v", "3", _frame_path],
+                    capture_output=True, timeout=60,
+                )
+                if os.path.exists(_frame_path) and os.path.getsize(_frame_path) > 500:
+                    with open(_frame_path, "rb") as _f:
+                        _ref = _f.read()
+            except Exception as _re:
+                print(f"[MediaProducer] thumbnail reference frame skip: {_re}")
+            if generate_baked_video_thumbnail(state, hero_scene=thumb_scene,
+                                              output_path=baked_thumb_path, reference_frame=_ref):
+                asset_paths.thumbnail = baked_thumb_path
+                thumbnail_path = baked_thumb_path
+                print(f"[MediaProducer] Baked native-text thumbnail -> {thumbnail_path}")
+                thumb_baked = True
+            else:
+                raise RuntimeError("nano-banana baked thumbnail returned None")
         except Exception as thumb_err:
-            print(f"Warning: Thumbnail generation failed: {thumb_err}")
+            print(f"[MediaProducer] nano-banana baked thumbnail skipped ({thumb_err}); using cv2 path.")
+            thumb_baked = False
+
+        if not thumb_baked:
+            try:
+                from mcp_servers.media_cloud.server import ThumbnailRequest, generate_thumbnail
+                brief = (
+                    state.seo_metadata.thumbnail_brief
+                    if state.seo_metadata and state.seo_metadata.thumbnail_brief
+                    else (state.selected_topic.headline if state.selected_topic else "Market Shift")
+                )
+                art_prompt = ""
+                try:
+                    from src.engine.nano_banana import craft_thumbnail_art_prompt
+                    art_prompt = craft_thumbnail_art_prompt(state, hero_scene=thumb_scene, aspect_ratio="16:9")
+                except Exception as art_err:
+                    print(f"[MediaProducer] nano-banana art prompt analysis skipped: {art_err}")
+                await generate_thumbnail(ThumbnailRequest(
+                    headline_text=brief,
+                    visual_prompt=thumb_scene,
+                    art_prompt=art_prompt,
+                    output_thumbnail_path=thumbnail_path
+                ))
+                asset_paths.thumbnail = thumbnail_path
+                print(f"[MediaProducer] High-CTR Thumbnail successfully generated at {thumbnail_path}")
+            except Exception as thumb_err:
+                print(f"Warning: Thumbnail generation failed: {thumb_err}")
 
         asset_paths.final_video = final_video_path
 

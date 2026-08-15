@@ -1369,7 +1369,215 @@ def case_media_producer_charts_and_thumbnails():
 
 
 # ---------------------------------------------------------------------------
-# Case 20 — Codebase static analysis (0 undefined names, unbound variables, enum integrity)
+# Case 20 — Nano-banana thumbnail art prompt crafting (hermetic, no network)
+# ---------------------------------------------------------------------------
+def case_nano_banana_helpers():
+    import src.engine.nano_banana as nb
+    from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact, SEOMetadata
+
+    st = GlobalState(
+        pipeline_id="test-nano",
+        timestamp="2026-08-15T00:00:00Z",
+        selected_topic=TopicCandidate(
+            candidate_id="c-nano-1",
+            headline="Nvidia Blackwell GPU supercluster powers 2026 AI boom",
+            summary="Massive enterprise AI compute build-out accelerates.",
+            keywords=["gpu", "ai", "compute"],
+            source_url="https://example.com/nvidia",
+            tvs_score=0.9, rpm_score=0.9, idi_score=0.9, sdi_score=0.9, sat_score=0.9
+        ),
+        verified_facts=[
+            VerifiedFact(source_id="v1", source_name="TechWire", headline="GPUs",
+                         summary="AI data centers stage record GPU deployments.", url="https://example.com/v1"),
+        ],
+        script_data=ScriptData(
+            title="The 2026 GPU Gold Rush",
+            target_shots=3,
+            shots=[ShotData(shot_id=1, act_index=1, narration_text="It begins now.",
+                            visual_prompt="Cinematic 16:9 shot: glowing GPU racks", duration_estimate=10.0)]
+        ),
+        seo_metadata=SEOMetadata(
+            title="The 2026 GPU Gold Rush",
+            description="Analysis of the enterprise compute boom.",
+            tags=["gpu", "ai"],
+            thumbnail_brief="GPU GOLD RUSH",
+            act_titles=["The Boom", "The Risk", "The Verdict"],
+        )
+    )
+
+    # 1. Env gate: CSVG_NANO_BANANA_THUMBNAILS=0 ⇒ always unavailable.
+    prev = os.environ.get("CSVG_NANO_BANANA_THUMBNAILS", "1")
+    os.environ["CSVG_NANO_BANANA_THUMBNAILS"] = "0"
+    gate_off = not nb.is_nano_banana_available()
+    os.environ["CSVG_NANO_BANANA_THUMBNAILS"] = prev
+
+    # 2. LLM analysis path: force availability, inject a scripted fake LLM that
+    #    returns a bespoke art prompt. The crafted prompt must come verbatim and
+    #    the call must have used the 'generate' route. No network involved.
+    orig_avail = nb.is_nano_banana_available
+    nb.is_nano_banana_available = lambda: True
+
+    class _FakeLLM:
+        def __init__(self):
+            self.route_seen = None
+
+        def generate_json(self, prompt, system_prompt="", route=None, thinking=None):
+            self.route_seen = route
+            return {"art_prompt": "Photorealistic shot of a glowing GPU chip, dramatic rim light"}
+
+    def _restore():
+        nb.is_nano_banana_available = orig_avail
+
+    try:
+        flm = _FakeLLM()
+        art = nb.craft_thumbnail_art_prompt(st, hero_scene="Cinematic GPU data center", aspect_ratio="16:9", llm=flm)
+        llm_path = "GPU chip" in art and flm.route_seen == "generate"
+
+        # 3. LLM returns unusable -> deterministic fallback (16:9 framing +
+        #    subject + no-text guard), and never raises.
+        class _EmptyLLM:
+            def generate_json(self, prompt, system_prompt="", route=None, thinking=None):
+                return {"art_prompt": "   "}
+
+        fb16 = nb.craft_thumbnail_art_prompt(st, hero_scene="GPU data center", aspect_ratio="16:9", llm=_EmptyLLM())
+        fallback_16 = ("GPU GOLD RUSH" in fb16) and ("16:9" in fb16) and ("no text" in fb16.lower())
+
+        # 4. 9:16 Shorts fallback framing.
+        fb9 = nb.craft_thumbnail_art_prompt(st, aspect_ratio="9:16", llm=_EmptyLLM())
+        fallback_9 = ("9:16" in fb9) and ("1080x1920" in fb9)
+
+        # 5. _write_png: None -> False; bytes -> True with a real file.
+        tmp_dir = os.path.join(os.environ.get("CSVG_STORAGE", "/tmp/csvg_hermetic"), "nano_test")
+        os.makedirs(tmp_dir, exist_ok=True)
+        png_path = os.path.join(tmp_dir, "art.png")
+        write_ok = nb._write_png(b"\x89PNG\r\n\x1a\nabcdef", png_path)
+        write_none = not nb._write_png(None, os.path.join(tmp_dir, "empty.png"))
+        file_ok = write_ok and os.path.getsize(png_path) > 0
+
+        # 6. Public-link mode: video-id parsing (pure, no network).
+        _ids = [
+            ("https://youtu.be/wnswgKlpLmY", "wnswgKlpLmY"),
+            ("https://www.youtube.com/watch?v=wnswgKlpLmY&t=12s", "wnswgKlpLmY"),
+            ("https://www.youtube.com/watch?v=wnswgKlpLmY&list=PLxx", "wnswgKlpLmY"),
+            ("https://www.youtube.com/shorts/wnswgKlpLmY", "wnswgKlpLmY"),
+            ("https://www.youtube.com/embed/wnswgKlpLmY", "wnswgKlpLmY"),
+            ("wnswgKlpLmY", "wnswgKlpLmY"),
+            ("", ""),
+            ("https://www.youtube.com/playlist?list=PLxxZZYY11", ""),
+            ("https://example.com/video", ""),
+            ("not-a-video-link", ""),
+        ]
+        ok_id = all(nb.extract_video_id(u) == expected for u, expected in _ids)
+
+        # 7. craft from raw metadata dict (link mode): LLM path + fallback.
+        meta = nb._meta_from_state(st)
+        meta["hero_scene"] = "GPU server rack"
+        flm2 = _FakeLLM()
+        art_meta = nb.craft_thumbnail_prompt_from_metadata(meta, aspect_ratio="16:9", llm=flm2)
+        link_llm = "GPU chip" in art_meta and flm2.route_seen == "generate"
+        fb_meta = nb.craft_thumbnail_prompt_from_metadata(meta, aspect_ratio="9:16", llm=_EmptyLLM())
+        link_fb = ("9:16" in fb_meta) and ("1080x1920" in fb_meta) and ("no text" in fb_meta.lower())
+
+        # 8. generate_image_edit with no reference -> None (no network attempt).
+        edit_skip = nb.generate_image_edit("prompt", None, "16:9") is None
+
+        # 9. Ready-to-upload text overlay (pure PIL, hermetic): valid PNG +
+        #    correct target dims for both aspects.
+        _text_ok, _dims16, _dims9 = False, False, False
+        try:
+            from io import BytesIO as _BytesIO
+            from PIL import Image as _PILImage
+            _seed_buf = _BytesIO()
+            _PILImage.new("RGB", (1280, 720), (20, 24, 40)).save(_seed_buf, format="PNG")
+            _t16 = nb.add_thumbnail_text(_seed_buf.getvalue(), "GPU GOLD RUSH",
+                                         subtitle="The 2026 GPU Gold Rush", aspect_ratio="16:9")
+            _t9 = nb.add_thumbnail_text(_seed_buf.getvalue(), "GPU GOLD RUSH", aspect_ratio="9:16")
+            if _t16:
+                _im16 = _PILImage.open(_BytesIO(_t16))
+                _dims16 = _im16.size == (1280, 720)
+            if _t9:
+                _im9 = _PILImage.open(_BytesIO(_t9))
+                _dims9 = _im9.size == (1080, 1920)
+            _text_ok = _t16 is not None and _t9 is not None
+        except Exception as _te:
+            print(f"[NANO_BANANA] text overlay test skip: {_te}")
+    # 10. Compliance gate: dark art is brightened and re-encoded as JPEG
+        #     under the 2MB custom-thumbnail cap.
+        _compl = False
+        try:
+            _dark_buf = _BytesIO()
+            _PILImage.new("RGB", (1280, 720), (18, 22, 30)).save(_dark_buf, format="PNG")
+            _cd, _rep = nb.comply_thumbnail(_dark_buf.getvalue(), "16:9")
+            _imc = _PILImage.open(_BytesIO(_cd))
+            _compl = bool(_rep.get("dims_ok") and _rep.get("format") == "jpeg"
+                          and _rep.get("size_kb", 9999) <= 2048 and _imc.size == (1280, 720))
+        except Exception as _exc:
+            print(f"[NANO_BANANA] compliance skip: {_exc}")
+
+        # 11. Native model-rendered text block (pure): exact hook + aspect-
+        #     specific guideline placement.
+        _tb16 = nb._text_render_block("META'S NEW AI", "16:9")
+        _tb9 = nb._text_render_block("META'S NEW AI", "9:16")
+        _block_ok = ("META'S NEW AI" in _tb16 and "META'S NEW AI" in _tb9
+                     and "UPPER-LEFT" in _tb16.upper() and "14%" in _tb16
+                     and "60%" in _tb16 and "one single line" in _tb16.lower())
+
+        # 12. Thematic hook crafting: LLM proposes a theme phrase (not the
+        #     title verbatim), route='generate'; unusable -> title fallback.
+        class _HookLLM:
+            def __init__(self): self.route_seen = None
+            def generate_json(self, prompt, system_prompt="", route=None, thinking=None):
+                self.route_seen = route
+                return {"hook": "WAGES EROSION"}
+
+        _hl = _HookLLM()
+        _hook_llm = nb.craft_ctr_hook(meta, llm=_hl) == "WAGES EROSION" and _hl.route_seen == "generate"
+        class _BadHookLLM:
+            def generate_json(self, prompt, system_prompt="", route=None, thinking=None):
+                return {}
+        _hook_fb = nb.craft_ctr_hook(meta, llm=_BadHookLLM()) == "GPU GOLD RUSH"
+
+        # 13. Option-B baked cover: generate_image stubbed to a tiny PNG, fake
+        #     LLM for hooks/art -> writes a real compliance JPEG (hermetic).
+        _baked = False
+        _orig_gen_img = nb.generate_image
+        try:
+            _tiny = _BytesIO()
+            _PILImage.new("RGB", (270, 480), (12, 14, 30)).save(_tiny, format="PNG")
+            nb.generate_image = lambda prompt, aspect_ratio="16:9", reference=None: _tiny.getvalue()
+            _bout = os.path.join(tmp_dir, "baked.jpg")
+            _bp = nb.generate_baked_shorts_cover(st, output_path=_bout,
+                                                 reference_frame=b"ref", llm=_HookLLM())
+            _baked = bool(_bp and os.path.exists(_bp) and os.path.getsize(_bp) > 0)
+        finally:
+            nb.generate_image = _orig_gen_img
+
+        # 14. Baked regular video (16:9) thumbnail — same design, thumbnails.set-ready.
+        _baked_vid = False
+        try:
+            nb.generate_image = lambda prompt, aspect_ratio="16:9", reference=None: _tiny.getvalue()
+            _vout = os.path.join(tmp_dir, "thumb_video.jpg")
+            _vp = nb.generate_baked_video_thumbnail(st, hero_scene="Server room",
+                                                    output_path=_vout, llm=_HookLLM())
+            _baked_vid = bool(_vp and os.path.exists(_vp) and os.path.getsize(_vp) > 0)
+        finally:
+            nb.generate_image = _orig_gen_img
+    finally:
+        _restore()
+
+    passed = (gate_off and llm_path and fallback_16 and fallback_9 and write_none and file_ok
+              and ok_id and link_llm and link_fb and edit_skip and _text_ok and _dims16 and _dims9
+              and _compl and _block_ok and _hook_llm and _hook_fb and _baked and _baked_vid)
+    record("NANO_BANANA_HELPERS", passed,
+           f"gate_off={gate_off}, llm_path={llm_path}, fb16={fallback_16}, fb9={fallback_9}, "
+           f"write={file_ok}/{write_none}, ids={ok_id}, link_llm={link_llm}, link_fb={link_fb}, "
+           f"edit_skip={edit_skip}, text_16={_dims16}, text_9={_dims9}, comply={_compl}, "
+           f"block={_block_ok}, hook_llm={_hook_llm}, hook_fb={_hook_fb}, baked={_baked}, baked_video={_baked_vid}")
+    return passed
+
+
+# ---------------------------------------------------------------------------
+# Case 21 — Codebase static analysis (0 undefined names, unbound variables, enum integrity)
 # ---------------------------------------------------------------------------
 def case_codebase_static_analysis():
     import subprocess
@@ -1425,7 +1633,7 @@ def case_codebase_static_analysis():
 
 
 # ---------------------------------------------------------------------------
-# Case 21 — Publisher seed comment & seed distributor package generation
+# Case 22 — Publisher seed comment & seed distributor package generation
 # ---------------------------------------------------------------------------
 def case_publisher_and_seed_distribution():
     from src.agents.publisher import PublisherAgent
@@ -1501,6 +1709,7 @@ def main():
     case_synthetic_topic_deduplication()
     case_youtube_retention_and_engagement()
     case_media_producer_charts_and_thumbnails()
+    case_nano_banana_helpers()
     case_publisher_and_seed_distribution()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)

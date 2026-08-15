@@ -38,9 +38,10 @@ _ELLIPSIS_RE = re.compile(r'\s*\[\.\.\.\]\s*')
 # Web-community / advertorial chatter that should never appear in narration
 # (e.g. raw pasted quotes like "Hi all! 24M here...", "ICYMI,", "Log in").
 _WEB_CHATTER_RE = re.compile(
-    r'\b(ICYMI|Log\s?in|Sign\s?up|Sign\s?in|Subscribe|Hi\s?all!|Hi\s?everyone|'
+    r'\b(ICYMI|Log\s?in|Sign\s?up|Sign\s?in|Hi\s?all!|Hi\s?everyone|'
     r'At such short notice|So imagine|Don\'?t miss|Newsletter|Comment\s?below|'
-    r'Follow\s?for|Grab\s?(yours|your)\s?now|Reply\s?to)',
+    r'Follow\s?for|Grab\s?(yours|your)\s?now|Reply\s?to|'
+    r'Add\s+us\s+on|Follow\s+us\s+on)',
     re.IGNORECASE,
 )
 
@@ -113,6 +114,15 @@ def _is_market_ticker_sentence(sent: str) -> bool:
     return bool(_MARKET_TICKER_SENT_RE.search(sent or ""))
 
 
+# Structured field labels ("Title:", "Analysis:", "Summary:", "Source:", etc.)
+# that LLMs sometimes leak verbatim into narration_text as if the JSON key name
+# should be part of the output. These are always a schema leakage bug.
+_STRUCT_LABEL_RE = re.compile(
+    r'^(Title|Analysis|Summary|Source|Description|Conclusion|Overview|Headline|Key\s*Takeaway|Key\s*Point|Key\s*Fact|Note|Comment)\s*:\s*',
+    re.IGNORECASE,
+)
+
+
 def _clean_narration(narr: str) -> str:
     """
     Fixes 2 & 3: strips raw search-tool citation tags (so narration never cites
@@ -126,6 +136,11 @@ def _clean_narration(narr: str) -> str:
     s = _RAW_JUNK_RE.sub(" ", s)
     s = _DATELINE_RE.sub(" ", s)
     sents = re.split(r'(?<=[.!?])\s+', s)
+    sents = [x for x in sents if x.strip() and not re.fullmatch(r'[.!?…\-–]{1,}', x.strip())]
+    # Strip structured field labels ("Title:", "Analysis:", etc.) that LLMs
+    # sometimes leak verbatim into narration text as if the JSON key belongs
+    # in the spoken output.
+    sents = [_STRUCT_LABEL_RE.sub("", x).strip() for x in sents]
     sents = [x for x in sents if x.strip() and not re.fullmatch(r'[.!?…\-–]{1,}', x.strip())]
     sents = [x for x in sents if not _WEB_CHATTER_RE.search(x)]
     sents = [x for x in sents if not _BYLINE_FOLLOW_RE.search(x)]
@@ -166,6 +181,7 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
 # so no single static-image shot is held for a full minute. Keeps total >= 10-min
 # hard floor (Observer runtime gate) because the shot count rises in tandem.
 MAX_SHOT_WORDS = 115
+MAX_OUTRO_WORDS = 85      # Shot 18 (Act 6 outro): tighter cap to avoid rambling CTAs
 
 # Deterministic acronym expansion: the documentary narration must NOT contain
 # unexplained acronyms/initialisms (they read as jargon and trip the Observer's
@@ -1527,16 +1543,18 @@ class StoryDesignerAgent:
             )
         # A1 ceiling: cap every shot to MAX_SHOT_WORDS so the Observer narration-length
         # + runtime-bounds hard aborts cannot fire, and keep the runtime honest.
+        # Shot 18 gets a tighter cap (MAX_OUTRO_WORDS) to prevent rambling CTA filler.
         capped = False
         for shot in script.shots:
-            if len(shot.narration_text.split()) > MAX_SHOT_WORDS:
-                shot.narration_text = _enforce_narration_ceiling(shot.narration_text)
+            cap = MAX_OUTRO_WORDS if shot.shot_id == len(script.shots) else MAX_SHOT_WORDS
+            if len(shot.narration_text.split()) > cap:
+                shot.narration_text = _enforce_narration_ceiling(shot.narration_text, max_words=cap)
                 shot.duration_estimate = max(42.0, round(len(shot.narration_text.split()) / 2.2, 1))
                 capped = True
         if capped:
             total_words = sum(len(s.narration_text.split()) for s in script.shots)
             script.estimated_runtime_seconds = round(total_words / 150.0 * 60.0, 1)
-            logger.info("SCRIPT_DESIGN", f"Post-polish ceiling: {total_words} words total after capping shots to <= {MAX_SHOT_WORDS}.", component="STORY_DESIGNER")
+            logger.info("SCRIPT_DESIGN", f"Post-polish ceiling: {total_words} words total after capping shots.", component="STORY_DESIGNER")
         return script
 
     def _generate_ctr_title(self, headline: str, niche_category: str = "") -> Optional[str]:
@@ -1676,17 +1694,27 @@ class StoryDesignerAgent:
             f"#Infotainment #{topic.niche_category.replace(' ', '')} #Documentary"
         )
         
-        # Punchy, high-CTR on-image brief (short hook, <= ~5 words) for the thumbnail.
-        if ctr_title:
-            words_ = ctr_title.split()
-            brief = " ".join(words_[:4])
-            if len(brief) > 24:
-                brief = " ".join(words_[:3])
-        else:
-            brief = headline.split()[:4]
-            brief = " ".join(brief) if brief else headline
-        if not brief.strip():
-            brief = headline[:24]
+        # Punchy, high-CTR on-image hook for the thumbnail (3-5 words max).
+        # Research rule: the hook must NEVER just repeat the video title — it's a
+        # short punchy canvas headline. Prefer the topic's distinctive niche
+        # keywords; fall back to the title's trailing (payoff) words, skipping
+        # the opener so it always reads distinct from the title.
+        _hook = ""
+        _kw = [str(k).strip() for k in (getattr(topic, "keywords", None) or []) if k and str(k).strip()]
+        _kw = [k for k in _kw if 2 <= len(k) <= 12][:3]
+        if _kw:
+            _hook = " ".join(_kw)
+        if not _hook or not (4 <= len(_hook) <= 18):
+            _title_words = (ctr_title or clean_title or headline).split()
+            if len(_title_words) >= 5:
+                _hook = " ".join(_title_words[-3:])
+            elif len(_title_words) >= 3:
+                _hook = " ".join(_title_words[1:])
+            elif _title_words:
+                _hook = " ".join(_title_words)
+            if len(_hook) > 18:
+                _hook = " ".join(_hook.split()[:2])
+        brief = _hook if _hook.strip() else headline[:24]
 
         return SEOMetadata(
             title=clean_title,

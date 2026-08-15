@@ -301,13 +301,19 @@ class PublisherAgent:
             if (state.channel_phase == "GROWTH" and state.asset_paths.shorts):
                 _short_title = (seo.title if seo and seo.title else title)[:90]
                 _short_ids = []
-                for _sp in state.asset_paths.shorts:
+                _covers = state.asset_paths.shorts_covers if state.asset_paths else []
+                for _ci, _sp in enumerate(state.asset_paths.shorts):
+                    # 9:16 nano-banana cover (parallel to the clip) → custom
+                    # Shorts thumbnail via youtube.thumbnails.set. YouTube
+                    # resizes to the required dims keeping aspect ratio.
+                    _short_thumb = _covers[_ci] if _ci < len(_covers) else None
                     _res = await upload_short(UploadRequest(
                         video_path=_sp,
                         title=f"{_short_title} | Short",
                         description=desc[:4000],
                         tags=(tags or [])[:30] + ["#Shorts"],
                         category_id="22",
+                        thumbnail_path=_short_thumb,
                     ))
                     if _res and _is_real_video_id(_res.get("video_id", "")):
                         _short_ids.append(_res["video_id"])

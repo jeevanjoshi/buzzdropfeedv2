@@ -26,6 +26,14 @@ class InsertCommentRequest(BaseModel):
     comment_text: str
 
 
+class VideoLinkThumbnailRequest(BaseModel):
+    video_id: str
+    aspect: str = "both"                 # "16:9" | "9:16" | "both"
+    text_mode: str = "native"            # "native" (model-rendered text) | "overlay" (PIL) | "none"
+    output_dir: str = "logs/link_thumbnails"
+    apply_to_video: bool = True          # thumbnails.set (owner-only; 403 if not)
+
+
 # Explicit opt-in for the offline/test mock upload path. Production runs
 # (no env) must NEVER silently fall back to a fabricated `demo_*` id — a masked
 # upload failure was previously recorded as PUBLISHED_SUCCESS (see
@@ -51,6 +59,81 @@ def _mock_payload(kind: str = "upload") -> Dict[str, Any]:
     return {"status": "mock", "engine": "mock_youtube_upload",
             "video_id": f"demo_{suffix}", "youtube_url": f"https://www.youtube.com/watch?v=demo_{suffix}",
             "synthetic_flag": True}
+
+
+@app.post("/tools/analyze_youtube_link_generate_thumbnail")
+async def analyze_youtube_link_generate_thumbnail(req: VideoLinkThumbnailRequest):
+    """
+    Analyses a PUBLIC YouTube video link (metadata via videos.list + the video's
+    own frame as an edit reference) with the LLM, generates a click-worthy
+    nano-banana thumbnail (16:9 and/or 9:16), and — when the video belongs to
+    the authenticated channel — publishes it with youtube.thumbnails.set.
+
+    Mirrors web "Nana Banana"-style tools: the front-end fetches the link's
+    context before Gemini can generate; here the server does the fetching.
+    """
+    try:
+        from src.engine.nano_banana import (
+            extract_video_id, fetch_link_video_metadata, generate_link_thumbnail, _thumbmime,
+        )
+        video_id = extract_video_id(req.video_id)
+        if not video_id:
+            raise HTTPException(status_code=400, detail=f"Could not parse a video id from: {req.video_id}")
+
+        meta = fetch_link_video_metadata(video_id)
+
+        aspects = ["16:9", "9:16"] if req.aspect == "both" else [str(req.aspect)]
+        aspects = [a for a in aspects if a in ("16:9", "9:16")]
+        if not aspects:
+            raise HTTPException(status_code=400, detail="aspect must be '16:9', '9:16' or 'both'")
+
+        os.makedirs(req.output_dir, exist_ok=True)
+        text_mode = (req.text_mode or "native").strip().lower()
+        add_text = text_mode != "none"
+        native = text_mode == "native"
+        paths = {}
+        for a in aspects:
+            out = os.path.join(req.output_dir, f"{video_id}_{a}.png")
+            saved = generate_link_thumbnail(meta, aspect_ratio=a, output_path=out,
+                                            add_text=add_text, native_text=native)
+            if saved:
+                paths[a] = saved
+
+        applied = []
+        if req.apply_to_video and paths:
+            credentials = _load_credentials()
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+            youtube = build("youtube", "v3", credentials=credentials)
+            for a in ("16:9", "9:16"):
+                if a not in paths:
+                    continue
+                try:
+                    youtube.thumbnails().set(
+                        videoId=video_id,
+                        media_body=MediaFileUpload(paths[a], mimetype=_thumbmime(paths[a])),
+                    ).execute()
+                    applied.append(a)
+                    print(f"[YouTube] Set custom thumbnail ({a}) for {video_id}")
+                except Exception as e:
+                    print(f"[YouTube] thumbnails.set failed for {a}: {e}")
+
+        return {
+            "status": "success" if paths else "error",
+            "video_id": video_id,
+            "title": meta.get("title", ""),
+            "thumbnail_paths": paths,
+            "applied_aspects": applied,
+            "note": "thumbnails.set requires the video to belong to the authenticated channel",
+            "synthetic_flag": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if _MOCK_ENABLED:
+            print(f"[YouTube Link Thumbnail] MOCK mode active; returning mock: {e}")
+            return {"status": "mock", "video_id": req.video_id, "thumbnail_paths": {}, "applied_aspects": []}
+        raise HTTPException(status_code=502, detail=f"Link thumbnail generation failed: {e}") from e
 
 
 @app.post("/tools/check_quota_available")
@@ -174,6 +257,60 @@ def _load_credentials():
     return credentials
 
 
+def _srt_to_text(srt: bytes) -> str:
+    """Strip SRT cue numbers / timestamps / tags to plain spoken text."""
+    import re as _re
+    text = srt.decode("utf-8", errors="ignore")
+    lines = [ln.strip() for ln in text.splitlines()]
+    out = []
+    for ln in lines:
+        if not ln or ln.isdigit():
+            continue
+        if "-->" in ln or _re.match(r"^\d{1,2}:\d{2}", ln):
+            continue
+        ln = _re.sub(r"<[^>]+>", "", ln)
+        if ln:
+            out.append(ln)
+    return " ".join(out)
+
+
+def fetch_caption_transcript_oauth(video_id: str) -> str:
+    """
+    Best-effort transcript for a video using the SAME OAuth credentials the
+    upload path uses (token.json). Owner-only: downloading captions works for
+    the authenticated account's own videos (and tracks the token's scopes can
+    read). Falls back gracefully to '' on any failure — never raises.
+
+    Prefer this over scraping youtube-transcript-api/yt-dlp from the OCI
+    datacenter IP, which YouTube blocks.
+    """
+    try:
+        credentials = _load_credentials()
+        from googleapiclient.discovery import build
+        youtube = build("youtube", "v3", credentials=credentials)
+
+        tracks = youtube.captions().list(part="snippet", videoId=video_id).execute().get("items", [])
+        if not tracks:
+            return ""
+        cap_id = None
+        for t in tracks:
+            lang = ((t.get("snippet") or {}).get("language") or "").lower()
+            if lang.startswith("en"):
+                cap_id = t.get("id")
+                break
+        if not cap_id:
+            cap_id = tracks[0].get("id")
+        if not cap_id:
+            return ""
+        raw = youtube.captions().download(id=cap_id, tfmt="srt").execute()
+        text = _srt_to_text(bytes(raw))
+        print(f"[YouTube] OAuth caption transcript: {len(text)} chars for {video_id}")
+        return text
+    except Exception as e:
+        print(f"[YouTube] OAuth caption transcript unavailable for {video_id}: {e}")
+        return ""
+
+
 def _resumable_upload(youtube, body: Dict[str, Any], video_path: str, thumbnail_path: Optional[str]) -> Dict[str, Any]:
     """Chunked resumable insert + optional custom thumbnail; returns {status, video_id, youtube_url}."""
     import httplib2
@@ -201,7 +338,8 @@ def _resumable_upload(youtube, body: Dict[str, Any], video_path: str, thumbnail_
 
     if thumbnail_path and os.path.exists(thumbnail_path):
         try:
-            media_thumb = MediaFileUpload(thumbnail_path, mimetype="image/png")
+            _thumb_mime = "image/jpeg" if thumbnail_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+            media_thumb = MediaFileUpload(thumbnail_path, mimetype=_thumb_mime)
             youtube.thumbnails().set(videoId=video_id, media_body=media_thumb).execute()
             print(f"[YouTube Upload] Successfully set custom thumbnail: {thumbnail_path}")
         except Exception as thumb_err:

@@ -58,6 +58,8 @@ _RAW_JUNK_IN_NARR_RE = re.compile(
     r'|\bBy[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+'
     r'|You\'?re\s+currently\s+following\s+this\s+(?:author|writer)'
     r'|\b(?:Subscribe|Sign)\s+(?:to\s+continue|for\s+(?:updates|more))'
+    r'|\bAdd\s+us\s+on\b'
+    r'|\bFollow\s+us\s+on\b'
     r'|#\s+[A-Z][A-Za-z]+',
     re.IGNORECASE,
 )
