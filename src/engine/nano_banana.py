@@ -29,6 +29,8 @@ import re as _re
 import time
 from typing import Optional, List, Dict, Any
 
+from src.engine.api_usage import api_usage
+
 NANO_BANANA_MODEL = "gemini-2.5-flash-image"
 
 
@@ -124,6 +126,7 @@ def generate_image(prompt: str, aspect_ratio: str = "16:9",
                 )
                 data = _extract_inline_png(resp)
                 if data:
+                    api_usage.record_visual("google", images=1)
                     return bytes(data)
             except Exception as e1:
                 last_err = e1
@@ -152,6 +155,7 @@ def generate_image(prompt: str, aspect_ratio: str = "16:9",
                 if image is not None and getattr(image, "image", None) is not None:
                     gdata = getattr(image.image, "image_bytes", None)
                     if gdata:
+                        api_usage.record_visual("google", images=1)
                         return bytes(gdata)
             except Exception as e2:
                 print(f"[NanoBanana] generate_images failed ({e2}).")

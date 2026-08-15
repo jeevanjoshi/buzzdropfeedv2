@@ -118,6 +118,7 @@ fn route(root: &str, path: &str, raw_path: &str) -> (u16, &'static str, Vec<u8>)
         "/api/logs" => json_response(&api_logs(root)),
         "/api/published" => json_response(&api_published(root)),
         "/api/budget" => json_response(&api_budget(root)),
+        "/api/usage" => json_response(&api_provider_usage(root)),
         "/api/runs" => json_response(&api_runs(root)),
         "/api/seeding" => json_response(&api_seeding(root)),
         "/api/seeding/logs" => json_response(&api_seeding_logs(root)),
@@ -608,6 +609,25 @@ fn api_cron_update(_root: &str, raw_path: &str) -> Value {
         ("success", Value::Bool(success)),
         ("error", s(&err)),
     ])
+}
+
+// ── /api/usage ──────────────────────────────────────────────────────────────
+// Realtime provider API-usage (fal / Google / OpenRouter): live-capture ledger
+// + authoritative provider pulls, written by src/engine/api_usage.py.
+
+fn api_provider_usage(root: &str) -> Value {
+    let v = read_json(root, "logs/provider_usage.json");
+    match v {
+        Value::Null => obj(&[
+            ("schema", s("provider_usage/v1")),
+            ("updated_at", s("—")),
+            ("live", obj(&[])),
+            ("daily", obj(&[])),
+            ("provider_pull", obj(&[])),
+            ("missing", Value::Bool(true)),
+        ]),
+        other => other,
+    }
 }
 
 // ── /api/budget ────────────────────────────────────────────────────────────

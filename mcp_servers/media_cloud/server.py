@@ -10,6 +10,15 @@ from pydantic import BaseModel
 app = FastAPI(title="OCI Cloud Media Production MCP Server")
 
 
+def _record_visual(provider: str, images: int = 1) -> None:
+    """Best-effort realtime visual-usage capture. Never raises."""
+    try:
+        from src.engine.api_usage import api_usage
+        api_usage.record_visual(provider, images=images)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class ImageGenRequest(BaseModel):
     prompt: str
     image_size: str = "landscape_16_9"
@@ -191,6 +200,7 @@ async def generate_flux_image(req: ImageGenRequest):
             img_data = requests.get(image_url).content
             with open(req.output_image_path, "wb") as f:
                 f.write(img_data)
+            _record_visual("fal", images=1)
             return {"status": "success", "engine": "fal_flux_schnell", "path": req.output_image_path}
         except Exception as e:
             print(f"Fal.ai Image Gen Exception (switching to Replicate): {e}")
@@ -228,6 +238,7 @@ async def generate_flux_image(req: ImageGenRequest):
                         img_bytes = requests.get(img_url).content
                         with open(req.output_image_path, "wb") as f:
                             f.write(img_bytes)
+                        _record_visual("replicate", images=1)
                         return {"status": "success", "engine": "replicate_flux_schnell", "path": req.output_image_path}
         except Exception as e:
             print(f"Replicate Image Gen Exception: {e}")
@@ -469,6 +480,7 @@ async def generate_thumbnail(req: ThumbnailRequest):
                     res = handler.get()
                     img_url = res["images"][0]["url"]
                     bg_data = requests.get(img_url).content
+                    _record_visual("fal", images=1)
                     print("[Thumbnail] Successfully generated background image via Fal.ai")
                 except Exception as e:
                     print(f"[Thumbnail] Fal.ai background generation failed: {e}")

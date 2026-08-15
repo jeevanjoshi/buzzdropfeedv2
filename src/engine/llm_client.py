@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 from src.engine.logger import logger
 from src.engine.run_budget import run_budget
+from src.engine.api_usage import api_usage
 
 load_dotenv()
 
@@ -13,6 +14,26 @@ load_dotenv()
 def _trunc(s: str, n: int = 2000) -> str:
     s = s or ""
     return s if len(s) <= n else s[:n] + f"...<truncated {len(s) - n} chars>"
+
+
+def _record_llm_usage(provider: str, model: Optional[str], usage: Any,
+                      gen_id: Optional[str] = None) -> None:
+    """Record REAL token usage from an LLM response into the realtime provider
+    ledger. Fully guarded — never raises, never breaks an LLM call."""
+    try:
+        if (usage is None) or (not api_usage.is_enabled()):
+            return
+        if provider == "openrouter":
+            in_tok, out_tok = api_usage.parse_openrouter_usage(usage)
+            if in_tok or out_tok:
+                api_usage.record_openroute(model=model, in_tokens=in_tok,
+                                           out_tokens=out_tok, gen_id=gen_id)
+            return
+        in_tok, out_tok = api_usage.parse_gemini_usage(usage)
+        if in_tok or out_tok:
+            api_usage.record_llm(provider, model=model, in_tokens=in_tok, out_tokens=out_tok)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class LLMClient:
@@ -223,7 +244,7 @@ class LLMClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/buzzdropfeedv2",
-                "X-Title": "CSVG Autonomous Pipeline"
+                "X-Title": "buzzdropfeed",
             }
             # Model routing: primary -> route-pinned -> LLM_FALLBACK_MODEL ->
             # LLM_FALLBACK_MODEL2 (Point 4). Default fallback is a cheap DeepSeek
@@ -302,6 +323,8 @@ class LLMClient:
 
                         parsed = self._clean_and_parse_json(content)
                         if parsed is not None:
+                            _record_llm_usage("openrouter", model, data.get("usage"),
+                                              gen_id=data.get("id"))
                             logger.info(
                                 "LLM_CALL",
                                 f"{model} OK status {response.status_code}, len {len(content)}, finish_reason: {finish_reason}",
@@ -373,6 +396,8 @@ class LLMClient:
 
                         parsed = self._clean_and_parse_json(content)
                         if parsed is not None:
+                            _record_llm_usage("google", native_model or model,
+                                              getattr(response, "usage_metadata", None))
                             logger.info(
                                 "LLM_CALL",
                                 f"Vertex AI {native_model} OK, len {len(content)}",
@@ -441,6 +466,8 @@ class LLMClient:
 
                         parsed = self._clean_and_parse_json(content)
                         if parsed is not None:
+                            _record_llm_usage("google", native_model or model,
+                                              getattr(response, "usage_metadata", None))
                             logger.info(
                                 "LLM_CALL",
                                 f"Native Gemini {native_model} OK, len {len(content)}",

@@ -37,6 +37,7 @@ os.environ.setdefault("CSVG_STORAGE", "/tmp/csvg_hermetic")
 os.environ["ALLOW_SOFT_APPROVAL"] = "1"
 os.environ.pop("USE_SEMANTIC_GATES", None)   # TF-IDF/NLTK path (no torch)
 os.environ.pop("CSVG_OUTLINE_FIRST", None)
+os.environ["CSVG_API_USAGE"] = "0"           # keep provider-usage ledger writes off in tests
 
 import asyncio
 
@@ -1577,6 +1578,140 @@ def case_nano_banana_helpers():
 
 
 # ---------------------------------------------------------------------------
+# Case 20b — Realtime provider API-usage module (hermetic, no network)
+# ---------------------------------------------------------------------------
+def case_api_usage():
+    import tempfile
+    import shutil
+    from types import SimpleNamespace
+    from src.engine import api_usage as au
+
+    ok = True
+
+    # 1. token-parse helpers are pure and handle dict + attribute shapes.
+    ok &= au.parse_openrouter_usage({"prompt_tokens": 100, "completion_tokens": 50}) == (100, 50)
+    ok &= au.parse_openrouter_usage({"total_tokens": 9}) == (0, 0)
+    ok &= au.parse_openrouter_usage(None) == (0, 0)
+    ok &= au.parse_gemini_usage({"promptTokenCount": 10, "candidatesTokenCount": 7}) == (10, 7)
+    ok &= au.parse_gemini_usage({"totalTokenCount": 42}) == (42, 0)
+    ok &= au.parse_gemini_usage(SimpleNamespace(promptTokenCount=3, candidatesTokenCount=2)) == (3, 2)
+
+    # 2. cost estimator: known model (gemini-2.5-flash 1M/1M = $0.30 + $2.50).
+    ok &= abs(au.estimate_model_usd("google/gemini-2.5-flash", 1_000_000, 1_000_000) - 2.8) < 1e-6
+    ok &= au.estimate_model_usd("unknown-model-xyz", 0, 0) <= 0.0
+
+    # 3. disabled ledger is a strict no-op: no file created, no crash on empty provider.
+    tmpdir = tempfile.mkdtemp(prefix="csvg_api_usage_")
+    try:
+        tmp = os.path.join(tmpdir, "provider_usage.json")
+        lg = au.ProviderUsageLedger(path=tmp, enabled=False)
+        lg.record("", images=99)
+        lg.record_llm("openrouter", in_tokens=1, out_tokens=1)
+        lg.flush()
+        ok &= not os.path.exists(tmp)
+
+        # 4. enabled ledger records REAL counts + est cost, persists atomically,
+        #    and merges provider pulls. (Use an isolated tmp file — never the
+        #    production logs/provider_usage.json.)
+        lg2 = au.ProviderUsageLedger(path=tmp, enabled=True)
+        lg2.record_llm("openrouter", model="deepseek/deepseek-v4-flash-0731",
+                       in_tokens=1000, out_tokens=500)
+        lg2.record_visual("fal", images=1)
+        lg2.record("google", images=1)
+        lg2.record("", images=7)  # empty provider must be ignored
+        lg2.set_provider_pull("openrouter", {"ok": True, "total_credits": 5.0})
+        lg2.flush()
+        live = lg2.payload()["live"]
+        ok &= live["openrouter"]["calls"] == 1
+        ok &= live["openrouter"]["in_tokens"] == 1000
+        ok &= live["openrouter"]["out_tokens"] == 500
+        ok &= live["openrouter"]["est_usd"] > 0.0
+        ok &= live["google"]["calls"] == 1          # empty-provider record() was dropped
+        ok &= live["google"]["images"] == 1
+        ok &= live["fal"]["calls"] == 1 and live["fal"]["images"] == 1
+        ok &= len(lg2.payload()["daily"]) >= 1      # at least today
+        ok &= lg2.payload()["provider_pull"]["openrouter"]["total_credits"] == 5.0
+
+        # 5. file round-trips atomically (no .tmp leftover) and reloads identical.
+        ok &= not os.path.exists(tmp + ".tmp")
+        lg3 = au.ProviderUsageLedger(path=tmp, enabled=True)
+        ok &= lg3.payload()["live"]["openrouter"]["in_tokens"] == 1000
+
+        # 5b. per-run attribution: outcome buckets (failed / published /
+        #     till-upload / aborted / retried-success) + OpenRouter gen ids.
+        lg4 = au.ProviderUsageLedger(path=tmp, enabled=True)
+        lg4.reset()
+        lg4.begin_run("r-fail")
+        lg4.record_openroute(model="google/gemini-2.5-flash", in_tokens=10, out_tokens=5,
+                             gen_id="gen-0000000001")
+        lg4.end_run("r-fail", status="failed", stage="MEDIA_PRODUCED")
+        ok &= lg4.payload()["runs"]["r-fail"]["result"] == "failed"
+        lg4.begin_run("r-fail")   # resume after failure -> retried success
+        lg4.record_openroute(model="deepseek/deepseek-v4-flash-0731", in_tokens=30, out_tokens=15,
+                             gen_id="gen-0000000002")
+        lg4.record_visual("fal", images=1)
+        lg4.end_run("r-fail", status="success", stage="PUBLISHED_SUCCESS")
+        rf = lg4.payload()["runs"]["r-fail"]
+        ok &= rf["result"] == "retried_success"
+        ok &= rf["retried"] is True
+        ok &= rf["attempts"] == 2
+        ok &= rf["totals"]["in_tokens"] == 40
+        ok &= rf["totals"]["out_tokens"] == 20
+        ok &= rf["totals"]["images"] == 1
+        ok &= len(rf["sessions"]) == 2
+        ok &= rf["sessions"][0]["openrouter_ids"] == ["gen-0000000001"]
+        ok &= rf["sessions"][1]["openrouter_ids"] == ["gen-0000000002"]
+        ok &= rf["costs"]["fal"]["images"] == 1
+        lg4.begin_run("r-till")
+        lg4.end_run("r-till", status="success", stage="QUALITY_VERIFIED")
+        ok &= lg4.payload()["runs"]["r-till"]["result"] == "till_upload"
+        lg4.begin_run("r-abort")
+        lg4.end_run("r-abort", status="success", stage="MEDIA_READY")  # interrupted mid-stage
+        ok &= lg4.payload()["runs"]["r-abort"]["result"] == "aborted"
+        lg4.begin_run("r-live")
+        ok &= lg4.payload()["runs"]["r-live"]["result"] == "in_progress"
+        lg4.end_run("r-live", status="success", stage="PUBLISHED_SUCCESS")
+        ok &= lg4.payload()["runs"]["r-live"]["result"] == "published"
+        ok &= (lg4.payload().get("runs") or {}).get("r-live") and True
+        # runs survive reload from disk (costs/totals persisted, sessions stripped)
+        lg5 = au.ProviderUsageLedger(path=tmp, enabled=True)
+        ok &= lg5.payload()["runs"]["r-fail"]["totals"]["in_tokens"] == 40
+        ok &= lg5.payload()["runs"]["r-fail"]["result"] == "retried_success"
+
+        # 6. provider-fetch guards short-circuit offline (env keys cleared ⇒
+        #    return ok:False without any network call — hermetic).
+        saved = {k: os.environ.get(k) for k in
+                 ("FAL_KEY", "OPENROUTER_MANAGEMENT_KEY", "OPENROUTER_API_KEY",
+                  "GOOGLE_CLOUD_PROJECT")}
+        for k in saved:
+            os.environ.pop(k, None)
+        try:
+            fal = au.fetch_fal_usage(days=1)
+            ok &= (not fal["ok"]) and "FAL_KEY" in (fal.get("error") or "")
+            orc = au.fetch_openrouter_usage()
+            ok &= (not orc["ok"]) and "OPENROUTER_API_KEY" in (orc.get("error") or "")
+            gcb = au.fetch_google_vertex_billing()
+            ok &= (not gcb["ok"]) and "GOOGLE_CLOUD_PROJECT" in (gcb.get("error") or "")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        # 7. _err pulls provider-style error messages.
+        ok &= au._err({"error": {"message": "boom"}}) == "boom"
+        ok &= au._err("not-a-map") is None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    record("API_USAGE", ok, "parsers/estimator/ledger/persistence/offline-guards/err-extract")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Case 21 — Codebase static analysis (0 undefined names, unbound variables, enum integrity)
+# ---------------------------------------------------------------------------
 # Case 21 — Codebase static analysis (0 undefined names, unbound variables, enum integrity)
 # ---------------------------------------------------------------------------
 def case_codebase_static_analysis():
@@ -1710,6 +1845,7 @@ def main():
     case_youtube_retention_and_engagement()
     case_media_producer_charts_and_thumbnails()
     case_nano_banana_helpers()
+    case_api_usage()
     case_publisher_and_seed_distribution()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)

@@ -375,7 +375,7 @@ const STAGE_IDX = {};
 STAGES.forEach((s,i)=>STAGE_IDX[s]=i);
 
 let tab = 'overview';
-const DATA = { status:null, logs:null, budget:null, runs:[], published:[], objFailed:false };
+const DATA = { status:null, logs:null, budget:null, usage:null, runs:[], published:[], objFailed:false };
 let EDITOR_STATE = { pipeline: [], seeder: [], initialized: false };
 
 const pill = (kind, txt) => {
@@ -394,10 +394,10 @@ async function fetchJ(path){
 async function loadAll(){
   try {
     const s0 = await fetchJ('/api/status');
-    const [budget, runs, published, logs, seeding, seedingLogs, cron] = await Promise.all([
-      fetchJ('/api/budget'), fetchJ('/api/runs'), fetchJ('/api/published'), fetchJ('/api/logs'), fetchJ('/api/seeding'), fetchJ('/api/seeding/logs'), fetchJ('/api/cron')
+    const [budget, usage, runs, published, logs, seeding, seedingLogs, cron] = await Promise.all([
+      fetchJ('/api/budget'), fetchJ('/api/usage'), fetchJ('/api/runs'), fetchJ('/api/published'), fetchJ('/api/logs'), fetchJ('/api/seeding'), fetchJ('/api/seeding/logs'), fetchJ('/api/cron')
     ]);
-    DATA.status = s0; DATA.budget = budget; DATA.runs = runs; DATA.published = published; DATA.logs = logs; DATA.seeding = seeding; DATA.seedingLogs = seedingLogs; DATA.cron = cron;
+    DATA.status = s0; DATA.budget = budget; DATA.usage = usage; DATA.runs = runs; DATA.published = published; DATA.logs = logs; DATA.seeding = seeding; DATA.seedingLogs = seedingLogs; DATA.cron = cron;
     if (!EDITOR_STATE.initialized && cron) {
       EDITOR_STATE.pipeline = [...(cron.pipeline_cron || [])];
       EDITOR_STATE.seeder = [...(cron.seeder_cron || [])];
@@ -543,6 +543,97 @@ function budgetPanel(){
       <table><thead><tr>
         <th>Run / status</th><th class="r">Est. $</th><th class="r">YT units</th><th>Stage</th><th>Categories</th>
       </tr></thead><tbody>${rows}</tbody></table>
+    </div>
+  </div>`;
+}
+
+function usagePanel(){
+  const u = DATA.usage;
+  if(!u || !u.live || !Object.keys(u.live).length){
+    return `<div class="panel"><h3>Provider API usage</h3><div class="empty">No realtime provider usage captured yet. It appears live here once the pipeline talks to fal/Google/OpenRouter (<code>logs/provider_usage.json</code>) — run <code>python3 get_api_usage.py</code> to also pull provider billing APIs.</div></div>`;
+  }
+  const live = u.live||{};
+  let totIn=0, totOut=0, totImg=0, totEst=0, totCalls=0;
+  Object.values(live).forEach(c=>{ totIn+=c.in_tokens||0; totOut+=c.out_tokens||0; totImg+=c.images||0; totEst+=c.est_usd||0; totCalls+=c.calls||0; });
+
+  const provLabel = {fal:'fal (visuals)', google:'google (gemini/vertex)', openrouter:'openrouter (llm)'};
+  const rows = Object.entries(live).map(([p,c])=>{
+    const pull = (u.provider_pull||{})[p];
+    let pullTxt = '<span class="muted">no provider pull</span>';
+    if(pull){
+      if(!pull.ok){ pullTxt = `<span style="color:#f87171" title="${esc(pull.error||'')}">provider: ERROR</span>`; }
+      else if(p==='fal'){ pullTxt = `provider: <b>$${num(pull.used_usd)}</b> used · bal $${num(pull.balance_usd)}`; }
+      else if(p==='openrouter'){ pullTxt = `provider: bal <b>$${num(pull.total_credits)}</b> · used <b>$${num(pull.total_usage)}</b>`; }
+      else if(p==='google'){ pullTxt = `vertex billing: <b>${pull.billing_enabled?'enabled':'disabled'}</b>`; }
+    }
+    return `<tr>
+      <td class="mono">${esc(provLabel[p]||p)}</td>
+      <td class="r">${num(c.calls,0)}</td>
+      <td class="r">${num(c.in_tokens,0)}</td>
+      <td class="r">${num(c.out_tokens,0)}</td>
+      <td class="r">${num(c.images,0)}</td>
+      <td class="r">${money(c.est_usd||0)}</td>
+      <td>${pullTxt}</td>
+    </tr>`;
+  }).join('');
+
+  const lastDays = Object.entries(u.daily||{}).slice(-7);
+  const dayRows = lastDays.map(([d,provs])=>{
+    let dIn=0,dOut=0,dImg=0,dEst=0;
+    Object.values(provs).forEach(c=>{ dIn+=c.in_tokens||0; dOut+=c.out_tokens||0; dImg+=c.images||0; dEst+=c.est_usd||0; });
+    return `<tr><td class="mono">${esc(d)}</td><td class="r">${num(dIn,0)}</td><td class="r">${num(dOut,0)}</td><td class="r">${num(dImg,0)}</td><td class="r">${money(dEst)}</td></tr>`;
+  }).join('');
+
+  const outcomeBadge = (o)=>{
+    const c = {published:'#34d399', till_upload:'#22d3ee', failed:'#f87171',
+               aborted:'#fbbf24', retried_success:'#a78bfa', in_progress:'#60a5fa'}[o] || '#94a3b8';
+    const label = o==='till_upload' ? 'till-upload' : (o==='retried_success' ? 'retried ✓' : o);
+    return `<span style="display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;color:#0b0f14;background:${c}">${esc(label)}</span>`;
+  };
+  const runs = Object.entries(u.runs||{}).sort((a,b)=>
+    (b[1].finished_at||b[1].started_at||'').localeCompare(a[1].finished_at||a[1].started_at||'')).slice(0,15);
+  const runRows = runs.map(([pid,r])=>{
+    const t = r.totals||{};
+    const ids = (r.sessions||[]).reduce((n,s)=>n+(s.openrouter_ids||[]).length,0);
+    const retry = (r.attempts||0)>1 ? ` · <span style="color:#fbbf24" title="resumed ${r.attempts}x">retry×${r.attempts}</span>` : '';
+    return `<tr>
+      <td class="mono" title="${esc(pid)}">${esc((pid||'').slice(0,20))}</td>
+      <td>${outcomeBadge(r.result)}${retry}</td>
+      <td class="r">${money(t.est_usd)}</td>
+      <td class="r">${num(t.calls,0)}</td>
+      <td class="r">${num(t.in_tokens,0)}</td>
+      <td class="r">${num(t.out_tokens,0)}</td>
+      <td class="r">${num(t.images,0)}</td>
+      <td class="r" title="OpenRouter generation ids captured">${ids}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="grid">
+    ${card('Live est. $', money(totEst), totCalls+' calls tracked', '#34d399')}
+    ${card('Input tokens', num(totIn,0), 'across all LLM providers', '#60a5fa')}
+    ${card('Output tokens', num(totOut,0), 'real token counts', '#a78bfa')}
+    ${card('Images gen', num(totImg,0), 'fal/google visuals', '#fbbf24')}
+  </div>
+  <div class="panel"><h3>Realtime provider usage</h3>
+    <div class="table-wrapper">
+      <table><thead><tr><th>Provider</th><th class="r">Calls</th><th class="r">In-tokens</th><th class="r">Out-tokens</th><th class="r">Images</th><th class="r">Est. $</th><th>Provider pull</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="7" class="empty">—</td></tr>'}</tbody></table>
+    </div>
+  </div>
+  <div class="panel"><h3>Last 7 days</h3>
+    <div class="table-wrapper">
+      <table><thead><tr><th>Day</th><th class="r">In-tokens</th><th class="r">Out-tokens</th><th class="r">Images</th><th class="r">Est. $</th></tr></thead>
+      <tbody>${dayRows||'<tr><td colspan="5" class="empty">—</td></tr>'}</tbody></table>
+    </div>
+  </div>
+  <div class="panel"><h3>API cost per run</h3>
+    <div class="table-wrapper">
+      <table><thead><tr>
+        <th>Run</th><th>Outcome</th><th class="r">Est. $</th><th class="r">Calls</th>
+        <th class="r">In-tok</th><th class="r">Out-tok</th><th class="r">Img</th><th class="r">OR ids</th>
+      </tr></thead>
+      <tbody>${runRows||'<tr><td colspan="8" class="empty">No attributed runs yet — runs appear as the pipeline begins/ends.</td></tr>'}</tbody></table>
     </div>
   </div>`;
 }
@@ -1104,6 +1195,7 @@ function renderOverview(){
     ${controlPanel()}
     ${statCards()}
     ${budgetPanel()}
+    ${usagePanel()}
   `;
 }
 
@@ -1120,6 +1212,7 @@ function renderAnalytics(){
     ${statCards()}
     <div class="panel"><h3>Published Videos</h3>${publishedList()}</div>
     ${budgetPanel()}
+    ${usagePanel()}
   `;
 }
 

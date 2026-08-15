@@ -20,6 +20,7 @@ from src.engine.rag_retriever import rag_retriever
 from src.engine.logger import logger
 from src.engine.tracer import tracer
 from src.engine.run_budget import run_budget
+from src.engine.api_usage import api_usage
 
 
 # Violation strings embed "Shot #N" deterministically (observer.py). Split a
@@ -160,6 +161,7 @@ class OrchestratorAgent:
 
         # Begin per-run budget tracking (reset counters for this pipeline_id).
         run_budget.start(p_id)
+        api_usage.begin_run(p_id)
 
         try:
             # 1. Fact Retrieval & Topic Selection (phase-aware TOPSIS)
@@ -655,6 +657,7 @@ class OrchestratorAgent:
                     extra={"topic": state.selected_topic.headline if state.selected_topic else None,
                            "video_id": state.upload_metadata.video_id if state.upload_metadata else None},
                 )
+                api_usage.end_run(p_id, status=budget_status, stage=budget_stage)
                 logger.info(
                     "BUDGET",
                     f"Run {p_id} :: est ${_t['est_usd']:.4f} | {_t['yt_units']} YT units | "

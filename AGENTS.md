@@ -30,6 +30,7 @@ Need to change something? Start here, not with a global grep.
 | Video/quality audit of an uploaded video | `run_video_verifier.py`, `src/engine/youtube_video_verifier.py` |
 | Post-publish distribution (seed, Reddit, Shorts) | `src/engine/seed_distributor.py`, `active_thread_seeder.py`, `reddit_browser_poster.py`, `reddit_json_client.py`, `reddit_link_seeder.py`, `reddit_warmup.py`, `post_reddit_links.py`, `cleanup_pi.py`, `src/schemas/seed_distribution.py` |
 | Budget / quota ledgers | `src/engine/run_budget.py` |
+| Realtime provider API usage (fal/Google/OpenRouter): live token/image capture + provider billing pulls + per-run cost attribution (outcome = failed / published / till-upload / aborted / retried_success) | `src/engine/api_usage.py`, `get_api_usage.py` (writes `logs/provider_usage.json`, served via dashboard `/api/usage`; the orchestrator calls `api_usage.begin_run/end_run` for per-run costs; OpenRouter calls are brand-attributed to "buzzdropfeed" via `X-Title` + store their `gen-` ids per run; fal real-cost pull needs a FAL key with Platform API access, OpenRouter `/credits` pull needs a management key `OPENROUTER_MANAGEMENT_KEY`, Google pull = Vertex billing status via ADC) |
 | Dashboard (Rust) | `rust_dashboard/` |
 | Tests | `run_tests.py`, `tests/test_hermetic_e2e.py` |
 | OAuth token for YouTube | `get_youtube_token.py` (token.json + client_secret.json) |
