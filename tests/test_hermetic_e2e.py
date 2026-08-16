@@ -1915,9 +1915,14 @@ def case_playlists_and_analytics_feedback():
 
     # 3. get_audience_bias: write a temp store, confirm bias favours the
     #    subscriber-converting niche and is neutral (1.0) elsewhere.
+    # 4. Shorts are included in discovery: a state checkpoint with a long-form
+    #    video_id AND a comma-joined shorts_video_id must yield both, tagged
+    #    with their format.
     orig_file = af._FEEDBACK_FILE
+    orig_glob = af._STATES_GLOB
     tmpdir = tempfile.mkdtemp(prefix="csvg_af_")
     tmp_store = os.path.join(tmpdir, "analytics_feedback.json")
+    shorts_state = os.path.join(tmpdir, "state_test.json")
     try:
         af._FEEDBACK_FILE = tmp_store
         with open(tmp_store, "w", encoding="utf-8") as f:
@@ -1936,17 +1941,37 @@ def case_playlists_and_analytics_feedback():
             and bias_tech == 1.0
             and bias_unknown == 1.0
         )
+
+        af._STATES_GLOB = os.path.join(tmpdir, "state_*.json")
+        with open(shorts_state, "w", encoding="utf-8") as f:
+            json.dump({
+                "timestamp": "2026-08-16T00:00:00Z",
+                "upload_metadata": {
+                    "video_id": "LONGVID123",
+                    "shorts_video_id": "SHORT1abc,SHORT2def",
+                },
+                "selected_topic": {"headline": "H", "audience_type": "investor", "niche_category": "Finance"},
+            }, f)
+        disc = af._discover_videos()
+        by_id = {d["video_id"]: d for d in disc}
+        ok_shorts = (
+            by_id.get("LONGVID123", {}).get("format") == "long"
+            and by_id.get("SHORT1abc", {}).get("format") == "short"
+            and by_id.get("SHORT2def", {}).get("format") == "short"
+            and by_id.get("SHORT1abc", {}).get("audience_type") == "investor"
+        )
     finally:
         af._FEEDBACK_FILE = orig_file
+        af._STATES_GLOB = orig_glob
         try:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
 
-    passed = ok_map and ok_signal and ok_bias
+    passed = ok_map and ok_signal and ok_bias and ok_shorts
     record("PLAYLISTS_AND_ANALYTICS_FEEDBACK", passed,
-           f"outcome_map={ok_map}, signal={ok_signal}, bias={ok_bias}, master='{_MASTER_PLAYLIST_TITLE}'")
+           f"outcome_map={ok_map}, signal={ok_signal}, bias={ok_bias}, shorts={ok_shorts}, master='{_MASTER_PLAYLIST_TITLE}'")
     return passed
 
 

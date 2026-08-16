@@ -105,8 +105,10 @@ def _is_real_video_id(video_id: Optional[str]) -> bool:
 def _discover_videos() -> List[Dict[str, Any]]:
     """Scan ``logs/state_*.json`` checkpoints for real published video ids and
     correlate them back to the topic (headline / audience_type / niche) and
-    publish time. Returns a list of {video_id, headline, audience_type,
-    niche_category, published_at} records (deduped by video_id)."""
+    publish time. Returns a list of {video_id, format, headline, audience_type,
+    niche_category, published_at} records (deduped by video_id) covering BOTH
+    the long-form master AND any published Shorts (``upload_metadata.shorts_video_id``,
+    comma-joined), so Shorts discovery analytics also feed the niche signal."""
     out: Dict[str, Dict[str, Any]] = {}
     for state_path in glob.glob(_STATES_GLOB):
         try:
@@ -117,17 +119,22 @@ def _discover_videos() -> List[Dict[str, Any]]:
         if not isinstance(state, dict):
             continue
         um = state.get("upload_metadata") or {}
-        vid = (um or {}).get("video_id")
-        if not _is_real_video_id(vid):
-            continue
         topic = state.get("selected_topic") or {}
-        out[vid] = {
-            "video_id": vid,
+        topic_meta = {
             "headline": (topic or {}).get("headline", ""),
             "audience_type": (topic or {}).get("audience_type", ""),
             "niche_category": (topic or {}).get("niche_category", ""),
             "published_at": state.get("timestamp", ""),
         }
+
+        def _add(vid: str, fmt: str) -> None:
+            if not _is_real_video_id(vid):
+                return
+            out[vid] = {"video_id": vid, "format": fmt, **topic_meta}
+
+        _add((um or {}).get("video_id"), "long")
+        for short_id in str((um or {}).get("shorts_video_id") or "").split(","):
+            _add(short_id.strip(), "short")
     return list(out.values())
 
 
@@ -194,6 +201,7 @@ def refresh(max_videos: int = _MAX_REFRESH_VIDEOS, force: bool = False) -> Dict[
             vals = rows[0]
             record = {
                 "video_id": vid,
+                "format": v.get("format", "long"),
                 "headline": v.get("headline", ""),
                 "audience_type": v.get("audience_type", ""),
                 "niche_category": v.get("niche_category", ""),

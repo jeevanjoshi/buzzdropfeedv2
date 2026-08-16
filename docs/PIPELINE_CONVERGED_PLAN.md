@@ -369,7 +369,8 @@ Two API-verified subscriber-growth features (both non-fatal, env-gated, quota-aw
 - **Analytics feedback loop ("top growth drivers" / "hook retention"):**
   `src/engine/analytics_feedback.py` pulls per-video `views`/`estimatedMinutesWatched`/
   `averageViewDuration`/`averageViewPercentage`/`subscribersGained` from the YouTube Analytics API
-  v2, correlates each back to its topic via `logs/state_*.json`, persists
+  v2 for **both the long-form master and its published Shorts** (`upload_metadata.shorts_video_id`,
+  tagged `format: long|short`), correlates each back to its topic via `logs/state_*.json`, persists
   `logs/analytics_feedback.json`, and computes a normalized **niche signal**. `FactRetriever`
   applies it as a soft, non-fatal TOPSIS tie-break (`get_audience_bias`, no signal ⇒ no-op) so the
   channel "doubles down on what works". Refresh is rate-limited (default 6h,
