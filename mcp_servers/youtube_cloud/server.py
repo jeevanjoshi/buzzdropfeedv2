@@ -355,8 +355,8 @@ def _resumable_upload(youtube, body: Dict[str, Any], video_path: str, thumbnail_
 
 class UpsertPlaylistRequest(BaseModel):
     video_id: str
-    playlist_title: str = "LumenLoop AI Documentaries"
-    description: Optional[str] = "Deep-dive financial and technological storytelling documentaries."
+    playlist_title: str = "AI, Tech & Innovation Deep-Dives"
+    description: Optional[str] = "In-depth documentaries on AI, technology, business and scientific breakthrough stories."
 
 
 class ListCommentsRequest(BaseModel):
@@ -441,13 +441,21 @@ async def upsert_playlist_add_video(req: UpsertPlaylistRequest):
 
             if credentials:
                 youtube = build("youtube", "v3", credentials=credentials)
-                
+
+                def _norm(s: str) -> str:
+                    """Normalize a playlist title for case/whitespace/punctuation
+                    tolerant reuse (prevents minting a duplicate playlist when the
+                    requested title differs only by case or punctuation)."""
+                    return "".join(c.lower() for c in str(s or "") if c.isalnum())
+
+                target_norm = _norm(req.playlist_title)
+
                 # 1. Check existing playlists (playlists.list with mine=true)
                 playlist_id = None
                 list_req = youtube.playlists().list(part="snippet", mine=True, maxResults=50)
                 list_res = list_req.execute()
                 for item in (list_res or {}).get("items", []):
-                    if item.get("snippet", {}).get("title", "").strip().lower() == req.playlist_title.strip().lower():
+                    if _norm(item.get("snippet", {}).get("title", "")) == target_norm:
                         playlist_id = item.get("id")
                         break
 

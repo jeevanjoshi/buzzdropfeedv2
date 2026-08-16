@@ -35,47 +35,58 @@ def _is_real_video_id(video_id: Optional[str]) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Outcome-based playlist mapping (vidIQ growth tactic: build bingeable playlists
-# that promise a clear result, so viewers watch multiple videos in a row — the
-# moment most subscriptions happen). Every published video is chained into the
-# master playlist PLUS an "outcome" playlist grouped by the topic's audience/
-# niche, so the subscriber path (discovery → related playlist → channel) is
-# frictionless within a theme. Keyed by ``TopicCandidate.audience_type``.
+# Themed outcome-based playlist mapping (vidIQ growth tactic: build bingeable
+# playlists grouped by the topic's audience/niche so the subscriber path
+# (discovery → related playlist → channel) is frictionless within a theme).
+# Keyed by ``TopicCandidate.audience_type``. These MUST match the playlists
+# that already exist on the channel, so the find-or-create in
+# ``upsert_playlist_add_video`` REUSES them instead of minting a fresh playlist
+# every run (which previously produced duplicate/orphan masters).
 # ─────────────────────────────────────────────────────────────────────────────
 _OUTCOME_PLAYLISTS = {
-    "tech":     ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "business": ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "science":  ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "space":    ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "history":  ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
     "investor":     ("Finance, Markets & Wealth Stories",
                      "Documentary storytelling on markets, investing, money and the people behind them."),
     "finance_edu":  ("Finance, Markets & Wealth Stories",
                      "Documentary storytelling on markets, investing, money and the people behind them."),
     "real_estate":  ("Finance, Markets & Wealth Stories",
                      "Documentary storytelling on markets, investing, money and the people behind them."),
-    "health":   ("Health, Wellness & Human Science",
-                 "Documentary deep-dives on health, medicine and human science."),
+    "tech":     ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "business": ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "science":  ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "health":   ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "space":    ("Space, Cosmology & Economic History",
+                 "Documentary deep-dives on space, the cosmos and economic history."),
+    "history":  ("Space, Cosmology & Economic History",
+                 "Documentary deep-dives on space, the cosmos and economic history."),
+    "general":  ("Global Trends & Infotainment",
+                 "Global trends, culture and infotainment documentaries."),
 }
 
-# Master playlist title is env-configurable (default kept for back-compat).
-_MASTER_PLAYLIST_TITLE = os.getenv("YOUTUBE_PLAYLIST_TITLE", "LumenLoop AI Documentaries")
+# Optional explicit override: when set, every video is chained into this single
+# playlist title instead of the theme-matched one.
+_MASTER_PLAYLIST_TITLE = os.getenv("YOUTUBE_PLAYLIST_TITLE", "")
+
+# Channel handle for the subscribe deep-link baked into seed comments.
+_SUBSCRIBE_URL = os.getenv(
+    "YOUTUBE_SUBSCRIBE_URL",
+    "https://www.youtube.com/@lumenloop-ai?sub_confirmation=1",
+).strip()
 
 
 def _outcome_playlist_for(audience_type: str) -> Optional[tuple]:
-    """Return (title, description) for the outcome playlist matching an
-    audience_type, or None when the topic has no themed playlist (e.g. general)."""
+    """Return (title, description) for the themed playlist matching an
+    audience_type, or None when the topic has no themed playlist."""
+    if os.getenv("YOUTUBE_PLAYLIST_TITLE", "").strip():
+        return (_MASTER_PLAYLIST_TITLE.strip(),
+                "Documentary storytelling series on global trends, finance and innovation.")
     if not audience_type:
         return None
     tpl = _OUTCOME_PLAYLISTS.get(str(audience_type).strip().lower())
-    if tpl and tpl[0].strip().lower() != _MASTER_PLAYLIST_TITLE.strip().lower():
-        return tpl
-    return None
+    return tpl if tpl else None
 
 
 class PublisherAgent:
@@ -153,9 +164,10 @@ class PublisherAgent:
         lines = [f"📌 {grounded_question}"]
 
         if phase == "GROWTH":
-            lines.append("🔔 Subscribe to the channel & tap the bell so you never miss an in-depth breakdown.")
+            lines.append(f"🔔 Subscribe to the channel & tap the bell so you never miss an in-depth breakdown: {_SUBSCRIBE_URL}")
             lines.append("💬 Tell us below: what topic or company should we investigate next?")
         else:
+            lines.append(f"🔔 Subscribe for more in-depth documentaries: {_SUBSCRIBE_URL}")
             lines.append("💬 Share your thoughts and questions below — we read and reply to every comment!")
 
         if playlist_url:
@@ -276,42 +288,34 @@ class PublisherAgent:
             )
 
         # 3a. Auto-Playlist Chaining (watch-time amplifier). The video is chained
-        # into BOTH the master playlist AND its themed "outcome" playlist (when
-        # one exists for the topic's audience), so viewers binge within a theme
-        # — the subscriber path that converts discovery into subscriptions.
+        # into a SINGLE themed playlist matched to the topic's audience (the
+        # bingeable subscriber path). The find-or-create REUSES existing channel
+        # playlists by normalized title, so no duplicate/orphan master playlists
+        # are created. The seed comment below links this playlist.
         playlist_id, playlist_url = None, None
         outcome_playlists = []
         try:
             if os.getenv("YOUTUBE_AUTO_PLAYLIST", "1").strip().lower() not in ("0", "false", "no"):
-                pl_res = await upsert_playlist_add_video(UpsertPlaylistRequest(
-                    video_id=video_id,
-                    playlist_title=_MASTER_PLAYLIST_TITLE,
-                    description="Deep-dive financial and technological storytelling documentaries."
-                ))
-                if pl_res.get("status") in ("success", "mock") and pl_res.get("playlist_id"):
-                    playlist_id = pl_res.get("playlist_id")
-                    playlist_url = pl_res.get("playlist_url")
-                    print(f"[Publisher] Video chained into master playlist '{_MASTER_PLAYLIST_TITLE}' (id={playlist_id})")
-
-                    # Theme/outcome playlist (best binge path → seed comment links it).
-                    aud = getattr(state.selected_topic, "audience_type", "") if state.selected_topic else ""
-                    outcome = _outcome_playlist_for(aud)
-                    if outcome:
-                        out_title, out_desc = outcome
-                        out_res = await upsert_playlist_add_video(UpsertPlaylistRequest(
-                            video_id=video_id,
-                            playlist_title=out_title,
-                            description=out_desc,
-                        ))
-                        if out_res.get("status") in ("success", "mock") and out_res.get("playlist_id"):
-                            outcome_playlists.append({
-                                "title": out_title,
-                                "playlist_id": out_res.get("playlist_id"),
-                                "playlist_url": out_res.get("playlist_url"),
-                            })
-                            print(f"[Publisher] Video chained into outcome playlist '{out_title}' (id={out_res.get('playlist_id')})")
-                            # Seed comment points viewers at the bingeable theme playlist.
-                            playlist_url = out_res.get("playlist_url")
+                aud = getattr(state.selected_topic, "audience_type", "") if state.selected_topic else ""
+                outcome = _outcome_playlist_for(aud)
+                if outcome:
+                    out_title, out_desc = outcome
+                    pl_res = await upsert_playlist_add_video(UpsertPlaylistRequest(
+                        video_id=video_id,
+                        playlist_title=out_title,
+                        description=out_desc,
+                    ))
+                    if pl_res.get("status") in ("success", "mock") and pl_res.get("playlist_id"):
+                        playlist_id = pl_res.get("playlist_id")
+                        playlist_url = pl_res.get("playlist_url")
+                        outcome_playlists.append({
+                            "title": out_title,
+                            "playlist_id": pl_res.get("playlist_id"),
+                            "playlist_url": pl_res.get("playlist_url"),
+                        })
+                        print(f"[Publisher] Video chained into themed playlist '{out_title}' (id={playlist_id})")
+                else:
+                    print(f"[Publisher] No themed playlist for audience '{aud}'; skipping chaining.")
         except Exception as e:
             print(f"[Publisher] Auto-playlist chaining skipped (non-fatal): {e}")
 

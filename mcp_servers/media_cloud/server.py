@@ -954,6 +954,16 @@ def _bgm_duck_filter(narration_stream: str, bgm_stream: str, total_duration: flo
     bgm_vol = os.getenv("BGM_VOLUME", "0.15")
     sc_thresh = os.getenv("BGM_SIDECHAIN_THRESHOLD", "0.02")
     sc_ratio = os.getenv("BGM_SIDECHAIN_RATIO", "12")
+    bgm_tempo = os.getenv("BGM_TEMPO", "1.1")
+
+    tempo_f = ""
+    try:
+        t = float(bgm_tempo)
+        at = min(max(t, 0.5), 2.0)
+        if abs(at - 1.0) > 0.001:
+            tempo_f = f",atempo={at:.3f}"
+    except Exception:
+        tempo_f = ""
     
     bgm_fade = ""
     if total_duration and total_duration > 1.5:
@@ -963,7 +973,7 @@ def _bgm_duck_filter(narration_stream: str, bgm_stream: str, total_duration: flo
         bgm_fade = ",afade=t=in:ss=0:d=0.3"
 
     return (
-        f"{bgm_stream}volume={bgm_vol}{bgm_fade}[bgm];"
+        f"{bgm_stream}volume={bgm_vol}{tempo_f}{bgm_fade}[bgm];"
         f"{narration_stream}highpass=f=80,equalizer=f=6000:width_type=q:width=2:g=-3,loudnorm=I=-16:TP=-1.5:LRA=7,asplit=2[voice][sc];"
         f"[bgm][sc]sidechaincompress=threshold={sc_thresh}:ratio={sc_ratio}:attack=120:release=1000[duck];"
         f"[voice][duck]amix=inputs=2:duration=first,alimiter=limit=0.9:level=false,"

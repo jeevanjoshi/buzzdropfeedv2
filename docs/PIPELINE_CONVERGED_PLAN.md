@@ -296,6 +296,7 @@ placeholder audio (`src/agents/media_producer.py`):
 - **Subtitle Wrapping for Shorts Aspect Ratio:** Restricts subtitle text boundaries to the center 600px safe zone (`MarginL=660, MarginR=660` relative to `PlayResX=1920`) in both `mcp_servers/audio_edge/server.py` and `src/agents/media_producer.py` so they wrap properly and don't clip when center-cropped to vertical 9:16 Shorts.
 - **Intro Audio Delay & Subtitle Sync:** Prepends a 0.5s start delay (`adelay=500` filter) to the first shot's audio and shifts its subtitle timestamps by 0.5s in the master subtitle merge function to prevent an abrupt voice jump on play, keeping narration aligned with visuals.
 - **Audio Fade In & Out:** Applies a 0.3s audio fade-in and a 1.5s audio fade-out to the final output video mix (both BGM and narration streams) in `mcp_servers/media_cloud/server.py` to ensure smooth audio transitions at the start and end of the video.
+- **BGM Tempo:** the background-music stream is sped up to `atempo=1.1` by default (env `BGM_TEMPO`, clamped 0.5-2.0; `1.0` disables) in `_bgm_duck_filter` (`mcp_servers/media_cloud/server.py`) and the moviepy fallback (`afx.speedx`) so the track feels more energetic without overwhelming narration.
 - **Modern Minimalist Matplotlib Charts:** Completely restyled visual data charts inside `mcp_servers/media_cloud/server.py` using a premium dark background (`#090d16`), clean annotations, a uniform sky-cyan (`#00e5ff`) color scheme (no cluttering rainbow colors), area glow fill under line trends, smart label prefix/suffix formatting, and 20-degree x-axis label rotation to prevent overlapping.
 - **Chart background vs Gate 7 placeholder discrimination:** The matplotlib plot axis background (`ax.set_facecolor`) uses `#0a1526` RGB `(10,21,38)` — deliberately outside the `#0f141e` synthetic-PIL-placeholder detection window in `quality_verifier.py:_is_synthetic_placeholder` (r∈[9,17], g∈[15,23], b∈[22,34]). This prevents real, correctly-rendered charts with large empty dark plot areas from being **falsely flagged** as "synthetic PIL placeholder" and hard-aborting Gate 7 before publish. If the chart background or the detector window ever changes, keep the two colors from overlapping.
 - **Static Outro & Chart Frames:** Added `disable_motion` to `KenBurnsRequest` so the final outro screen and all dynamic data charts render as high-quality static looped video clips instead of applying the Ken Burns pan-and-zoom effect, improving readability of text and graphs.
@@ -306,11 +307,23 @@ placeholder audio (`src/agents/media_producer.py`):
 - **High-Quality Semantic Novelty Checks:** `calculate_semantic_novelty_index` in `src/engine/text_embeddings.py` utilizes the active MiniLM SentenceTransformer semantic embedding backend when `USE_SEMANTIC_GATES=1` is configured. This provides a deep semantic cosine-similarity comparison against past published topics, falling back gracefully to a stop-word-filtered TF-IDF vectorizer when the neural backend is unavailable.
 - **Synthesized Topic Gating:** The topic deduplication similarity check is applied directly inside `_measure_and_gate_synthetic` within `src/agents/fact_retriever.py` before querying the YouTube API for demand stats. This prevents synthesized evergreen tool-topics from bypassing the deduplication checks and ensures they are culled if they are semantically similar to any topic in `published_topics.json`.
 
-### 1.14 YouTube Retention: Auto-Playlists, End-Cards, and Comment Engagement
+### 1.14 YouTube Retention: Auto-Playlists, Outro CTA, and Comment Engagement
 
-- **Auto-Playlist Chaining:** `mcp_servers/youtube_cloud/server.py` implements `/tools/upsert_playlist_add_video` to search for or create the channel's thematic documentary playlist (default: `"LumenLoop AI Documentaries"`) and append the published video into it. Gated by `YOUTUBE_AUTO_PLAYLIST=1` (default on) and records `playlist_id`/`playlist_url` on `UploadMetadata`.
-- **Burned-in Subscribe End-Card:** `src/agents/media_producer.py` renders an aesthetic, modern 6-second subscribe outro clip (`generate_subscribe_endcard`) via FFmpeg `drawtext` and appends it to the master concat timeline at zero API cost. Configured via `CSVG_END_CARD_SECONDS` (default 6, `0` disables).
-- **Grounded Seed Comments & State Persistence:** `src/agents/publisher.py` automatically builds dynamic, topic-grounded seed comments from the video's Act 6 verdict questions, converts viewers with phase-aware CTAs, and attaches the comment text/ID to `UploadMetadata.pinned_comment_text` for real-time visibility on the Rust dashboard (`/api/runs`).
+- **Auto-Playlist Chaining (reuse — never duplicate):** `mcp_servers/youtube_cloud/server.py`
+  implements `/tools/upsert_playlist_add_video` to search for or create a playlist BY
+  NORMALIZED TITLE (case/punctuation/whitespace-insensitive) and append the published video
+  into it — so existing channel playlists are REUSED instead of minting duplicate/orphan
+  masters each run. Gated by `YOUTUBE_AUTO_PLAYLIST=1` (default on) and records
+  `playlist_id`/`playlist_url` on `UploadMetadata`. Reconciliation helper:
+  `python reconcile_playlists.py [--apply]` (dry-run by default; lists channel playlists,
+  flags non-themed/orphan playlists, reports which uploads sit in a themed playlist).
+- **Outro CTA (no separate end-card):** the final script shot gets the glassmorphic
+  "LIKE & SUBSCRIBE TO THE CHANNEL" overlay baked directly onto its frame
+  (`_apply_outro_cta_overlay` in `src/agents/media_producer.py`). A separate appended
+  subscribe end-card clip is intentionally NOT rendered (previously `generate_subscribe_endcard`
+  / `CSVG_END_CARD_SECONDS` appended a second 6s like/subscribe frame — a duplicate CTA that was
+  removed). The outro CTA is baked onto the final shot only.
+- **Grounded Seed Comments & State Persistence:** `src/agents/publisher.py` automatically builds dynamic, topic-grounded seed comments from the video's Act 6 verdict questions, converts viewers with phase-aware CTAs (subscribe deep-link `YOUTUBE_SUBSCRIBE_URL`, default `https://www.youtube.com/@lumenloop-ai?sub_confirmation=1`), and attaches the comment text/ID to `UploadMetadata.pinned_comment_text` for real-time visibility on the Rust dashboard (`/api/runs`).
 - **YouTube Comment-Reply Bot:** `src/engine/youtube_engagement.py` queries top viewer comments and uses `LLMClient` to post fact-grounded replies via `/tools/reply_comment` to drive channel comment velocity and dwell time.
 
 ---
@@ -325,7 +338,18 @@ Google's image model. Core module: `src/engine/nano_banana.py`. Gated by
 **Design rules baked into every prompt** (simplicity = 2-3 elements; high-contrast palette that
 pops in light+dark mode; rule-of-thirds with 30-40% negative space; genuine-emotion face;
 native-rendered bold 3-5 word hook with outline/shadow in safe zones). Compliance pass
-enforces exact 1280x720 / 1080x1920, brightness lift, and JPEG ≤2 MB.
+enforces exact 1280x720 / 1080x1920, target-driven brightness lift (~mean_lum≥100 so thumbs
+pop in the feed), an unsharp-mask sharpen after the final resize, and JPEG ≤2 MB.
+
+**Design diversity (no repeated pattern):** `pick_thumbnail_variant(pipeline_id)` derives a
+DETERMINISTIC design per run from 7 layout templates × 5 color palettes × 2 text styles
+(hero-object / reaction-face / before-after / bold-color-block / question-symbol / minimalist /
+split-subject; red-white / orange-black / neon-blue-pink / yellow-purple / cyan-dark). The
+variant drives the art-prompt builders (`_fallback_prompt_from_meta`, `_llm_art_prompt`),
+the native-text instruction (`_text_render_block`), and the PIL overlay accent color
+(`add_thumbnail_text`), so no two videos repeat the same "yellow text one side, face the
+other" pattern. Force a layout for A/B testing via `CSVG_THUMBNAIL_VARIANT` (e.g.
+`reaction-face`). Output resolution: `CSVG_NANO_BANANA_IMAGE_SIZE` (default 2K; 1K/2K/4K).
 
 - **Thematic hook:** `craft_ctr_hook` derives a 3-5 word curiosity-driven hook from the video's
   transcript/narration + facts (never the title verbatim).
@@ -358,14 +382,19 @@ enforces exact 1280x720 / 1080x1920, brightness lift, and JPEG ≤2 MB.
 
 Two API-verified subscriber-growth features (both non-fatal, env-gated, quota-aware).
 
-- **Outcome-based playlists:** `src/agents/publisher.py` chains every publish into the master
-  playlist (`YOUTUBE_PLAYLIST_TITLE`, default "LumenLoop AI Documentaries") **plus** a themed
-  "outcome" playlist grouped by the topic's `audience_type` (`_OUTCOME_PLAYLISTS`:
-  tech/business/science/space/history → "AI, Tech & Innovation Deep-Dives"; investor/finance_edu/
-  real_estate → "Finance, Markets & Wealth Stories"; health → "Health, Wellness & Human Science").
-  This creates a bingeable subscriber path (discovery → theme playlist → channel), and the seed
-  comment links the theme playlist (not just the master). Outcome playlist IDs/URLs persist on
-  `UploadMetadata.extra_metadata["outcome_playlists"]`. Gated by `YOUTUBE_AUTO_PLAYLIST=1`.
+- **Themed playback playlists (reuse — never duplicate):** `src/agents/publisher.py` chains
+  every publish into a SINGLE themed playlist matched to the topic's `audience_type`
+  (`_OUTCOME_PLAYLISTS`), using titles that already exist on the channel:
+  investor/finance_edu/real_estate → "Finance, Markets & Wealth Stories";
+  tech/business/science/health → "AI, Tech & Innovation Deep-Dives"; space/history →
+  "Space, Cosmology & Economic History"; general → "Global Trends & Infotainment". The
+  find-or-create (`upsert_playlist_add_video`) matches by NORMALIZED title, so existing
+  playlists are reused instead of minting duplicate/orphan masters each run. This creates a
+  bingeable subscriber path (discovery → theme playlist → channel), and the seed comment links
+  the theme playlist. Playlist IDs/URLs persist on `UploadMetadata.extra_metadata
+  ["outcome_playlists"]`. Set `YOUTUBE_PLAYLIST_TITLE` to override chaining to a single fixed
+  title. Gated by `YOUTUBE_AUTO_PLAYLIST=1`. Channel audit: `python reconcile_playlists.py
+  [--apply]`.
 - **Analytics feedback loop ("top growth drivers" / "hook retention"):**
   `src/engine/analytics_feedback.py` pulls per-video `views`/`estimatedMinutesWatched`/
   `averageViewDuration`/`averageViewPercentage`/`subscribersGained` from the YouTube Analytics API

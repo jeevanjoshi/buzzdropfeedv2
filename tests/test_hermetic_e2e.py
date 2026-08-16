@@ -1268,22 +1268,15 @@ def case_synthetic_topic_deduplication():
 
 
 # ---------------------------------------------------------------------------
-# Case 18 — YouTube retention features: playlist chaining, endcard & comment replies
+# Case 18 — YouTube retention features: comment replies & playlist chaining
 # ---------------------------------------------------------------------------
 def case_youtube_retention_and_engagement():
     import asyncio
     from src.agents.publisher import PublisherAgent
-    from src.agents.media_producer import generate_subscribe_endcard
     from src.schemas.state import GlobalState, ScriptData, ShotData, AssetPaths, TopicCandidate
     import mcp_servers.youtube_cloud.server as yt_server
 
-    # 1. Test subscribe end-card generator (clean FFmpeg generation)
-    test_endcard_path = "/tmp/test_subscribe_endcard.mp4"
-    endcard_ok = generate_subscribe_endcard(test_endcard_path, duration_sec=1.5)
-    if os.path.exists(test_endcard_path):
-        os.remove(test_endcard_path)
-
-    # 2. Test mock playlist creation endpoint
+    # 1. Mock playlist creation endpoint
     async def _test_playlist():
         orig_mock = yt_server._MOCK_ENABLED
         yt_server._MOCK_ENABLED = True
@@ -1296,9 +1289,9 @@ def case_youtube_retention_and_engagement():
 
     playlist_ok = asyncio.run(_test_playlist())
 
-    passed = endcard_ok and playlist_ok
+    passed = playlist_ok
     record("YOUTUBE_RETENTION_ENGAGEMENT", passed,
-           f"endcard_generated={endcard_ok}, playlist_mock_ok={playlist_ok}")
+           f"playlist_mock_ok={playlist_ok}")
     return passed
 
 
@@ -1564,17 +1557,42 @@ def case_nano_banana_helpers():
         except Exception as _te:
             print(f"[NANO_BANANA] text overlay test skip: {_te}")
     # 10. Compliance gate: dark art is brightened and re-encoded as JPEG
-        #     under the 2MB custom-thumbnail cap.
+        #     under the 2MB custom-thumbnail cap, and the brightness lift is
+        #     strong enough to be "catchy" (not a barely-lifted near-black).
         _compl = False
+        _bright_ok = False
         try:
             _dark_buf = _BytesIO()
             _PILImage.new("RGB", (1280, 720), (18, 22, 30)).save(_dark_buf, format="PNG")
             _cd, _rep = nb.comply_thumbnail(_dark_buf.getvalue(), "16:9")
             _imc = _PILImage.open(_BytesIO(_cd))
+            _gray = _imc.convert("L")
+            _h = _gray.histogram()
+            _tot = sum(_h)
+            _mlum = (sum(i * g for i, g in enumerate(_h)) / _tot) if _tot else 0
+            _bright_ok = _mlum >= 0.24 * 255
             _compl = bool(_rep.get("dims_ok") and _rep.get("format") == "jpeg"
-                          and _rep.get("size_kb", 9999) <= 2048 and _imc.size == (1280, 720))
+                          and _rep.get("size_kb", 9999) <= 2048 and _imc.size == (1280, 720)
+                          and _bright_ok)
         except Exception as _exc:
             print(f"[NANO_BANANA] compliance skip: {_exc}")
+
+        # 10b. Design-diversity: variant selection is deterministic per pipeline
+        #     id AND varies across different ids (so thumbnails don't all share
+        #     one layout/palette). Forcing a template pins it deterministically.
+        _v1 = nb.pick_thumbnail_variant("csvg-exec-AAA")
+        _v2 = nb.pick_thumbnail_variant("csvg-exec-BBB")
+        _v1b = nb.pick_thumbnail_variant("csvg-exec-AAA")
+        _det_ok = (_v1 == _v1b) and (_v1.get("template", {}).get("id") != _v2.get("template", {}).get("id")
+                                     or _v1.get("palette", {}).get("id") != _v2.get("palette", {}).get("id"))
+        _forced = nb.pick_thumbnail_variant("any")
+        import os as _os
+        _os.environ["CSVG_THUMBNAIL_VARIANT"] = "reaction-face"
+        _vf = nb.pick_thumbnail_variant("any")
+        _os.environ.pop("CSVG_THUMBNAIL_VARIANT", None)
+        _force_ok = _vf.get("template", {}).get("id") == "reaction-face"
+        _tb16v = nb._text_render_block("META'S NEW AI", "16:9", variant=_v1)
+        _variant_ok = _det_ok and _force_ok and "#" in _tb16v
 
         # 11. Native model-rendered text block (pure): exact hook + aspect-
         #     specific guideline placement.
@@ -1629,12 +1647,14 @@ def case_nano_banana_helpers():
 
     passed = (gate_off and llm_path and fallback_16 and fallback_9 and write_none and file_ok
               and ok_id and link_llm and link_fb and edit_skip and _text_ok and _dims16 and _dims9
-              and _compl and _block_ok and _hook_llm and _hook_fb and _baked and _baked_vid)
+              and _compl and _block_ok and _hook_llm and _hook_fb and _baked and _baked_vid
+              and _variant_ok)
     record("NANO_BANANA_HELPERS", passed,
            f"gate_off={gate_off}, llm_path={llm_path}, fb16={fallback_16}, fb9={fallback_9}, "
            f"write={file_ok}/{write_none}, ids={ok_id}, link_llm={link_llm}, link_fb={link_fb}, "
            f"edit_skip={edit_skip}, text_16={_dims16}, text_9={_dims9}, comply={_compl}, "
-           f"block={_block_ok}, hook_llm={_hook_llm}, hook_fb={_hook_fb}, baked={_baked}, baked_video={_baked_vid}")
+           f"bright={_bright_ok}, variant={_variant_ok}, block={_block_ok}, hook_llm={_hook_llm}, "
+           f"hook_fb={_hook_fb}, baked={_baked}, baked_video={_baked_vid}")
     return passed
 
 
@@ -1870,13 +1890,14 @@ def case_publisher_and_seed_distribution():
     pub = PublisherAgent()
     comment = pub._build_seed_comment("The 2026 AI Chip Revolution", st, playlist_url="https://youtube.com/playlist?list=PL123")
     ok_comment = "Will custom silicon replace standard architectures by 2030?" in comment and "https://youtube.com/playlist?list=PL123" in comment
+    ok_subscribe = "sub_confirmation=1" in comment and "@lumenloop-ai" in comment
 
     pkg = seed_distributor.create_seed_package(st, "https://youtube.com/watch?v=mock123")
     ok_pkg = len(pkg.reddit_drafts) >= 1 and "Data centers invest billions" in pkg.reddit_drafts[0].body_markdown
 
-    passed = ok_comment and ok_pkg
+    passed = ok_comment and ok_subscribe and ok_pkg
     record("PUBLISHER_AND_SEED_DISTRIBUTION", passed,
-           f"comment_question={ok_comment}, seed_pkg_drafts={len(pkg.reddit_drafts)}")
+           f"comment_question={ok_comment}, subscribe_link={ok_subscribe}, seed_pkg_drafts={len(pkg.reddit_drafts)}")
     return passed
 
 
@@ -1889,14 +1910,23 @@ def case_playlists_and_analytics_feedback():
     from src.agents.publisher import _outcome_playlist_for, _MASTER_PLAYLIST_TITLE
     import src.engine.analytics_feedback as af
 
-    # 1. Outcome playlist mapping is pure and theme-correct.
+    # 1. Outcome playlist mapping is pure and theme-correct. Every audience maps
+    #    to a THEMED playlist title that exists on the channel (reuse, no dupes);
+    #    general maps to its own 4th playlist rather than None.
     inv = _outcome_playlist_for("investor")
     tech = _outcome_playlist_for("tech")
+    space = _outcome_playlist_for("space")
+    history = _outcome_playlist_for("history")
     general = _outcome_playlist_for("general")
+    unknown = _outcome_playlist_for("does_not_exist")
     ok_map = (
         inv is not None and "Finance" in inv[0]
-        and tech is not None and "Tech" in tech[0]
-        and general is None
+        and tech is not None and "AI, Tech" in tech[0]
+        and space is not None and "Space" in space[0]
+        and history is not None and space[0] == history[0]
+        and general is not None and "Global Trends" in general[0]
+        and unknown is None
+        and _MASTER_PLAYLIST_TITLE == ""
     )
 
     # 2. Niche signal: subscriber-gaining niche must carry a positive signal,

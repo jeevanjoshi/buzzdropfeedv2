@@ -742,48 +742,6 @@ def _apply_outro_cta_overlay(img_path: str) -> None:
         print(f"[MediaProducer] Warning: Outro CTA card render failed ({e}).")
 
 
-def generate_subscribe_endcard(output_mp4_path: str, duration_sec: float = 6.0) -> bool:
-    """
-    Renders an aesthetic 1080p burned-in subscribe end-card clip via FFmpeg filter
-    drawtext. Gives peak-intent viewers a clear call to subscribe with bell notification.
-    Zero external API quota/cost.
-    """
-    if duration_sec <= 0.0:
-        return False
-    try:
-        import subprocess
-        # FFmpeg drawtext filter with dark modern background (#090d16) and cyan/white text
-        font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        font_opt = f":fontfile='{font_file}'" if os.path.exists(font_file) else ""
-
-        # Draw a dark background, a floating card outline, and clear subscribe prompt
-        vf_filter = (
-            f"drawbox=x=0:y=0:w=1920:h=1080:color=#090d16@1:t=fill,"
-            f"drawbox=x=360:y=300:w=1200:h=480:color=#00e5ff@0.2:t=fill,"
-            f"drawbox=x=360:y=300:w=1200:h=480:color=#00e5ff@0.8:t=3,"
-            f"drawtext=text='SUBSCRIBE FOR DAILY DOCUMENTARIES'{font_opt}:fontsize=52:fontcolor=white:x=(w-text_w)/2:y=420,"
-            f"drawtext=text='Tap the bell to never miss an in-depth breakdown'{font_opt}:fontsize=30:fontcolor=#00e5ff:x=(w-text_w)/2:y=540"
-        )
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=#090d16:s=1920x1080:d={duration_sec}:r=25",
-            "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={duration_sec}",
-            "-vf", vf_filter,
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-            "-c:a", "aac", "-b:a", "192k",
-            output_mp4_path
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if res.returncode == 0 and os.path.exists(output_mp4_path) and os.path.getsize(output_mp4_path) > 1000:
-            print(f"[MediaProducer] Generated {duration_sec}s burned-in subscribe end-card -> {output_mp4_path}")
-            return True
-        else:
-            print(f"[MediaProducer] Warning: FFmpeg end-card exited with code {res.returncode}: {res.stderr[:200]}")
-    except Exception as e:
-        print(f"[MediaProducer] Warning: Subscribe end-card generation failed: {e}")
-    return False
-
-
 def _extract_search_keywords(raw_prompt: str, anchors: Optional[List[str]] = None) -> str:
     """Builds a topical stock search query from the visual prompt (text after the
     first ':'), dropping camera/lighting noise. Falls back to topic anchor words
@@ -1488,14 +1446,6 @@ class MediaProducerAgent:
 
         exec_suffix = (getattr(state, "pipeline_id", "") or "csgv").strip() or "csgv"
 
-        # Append burned-in subscribe end-card if configured (CSVG_END_CARD_SECONDS, default 6s)
-        end_card_sec = float(os.getenv("CSVG_END_CARD_SECONDS", "6").strip() or 0.0)
-        if end_card_sec > 0.0:
-            end_card_path = os.path.join(self.storage_dir, f"subscribe_endcard_{exec_suffix}.mp4")
-            if generate_subscribe_endcard(end_card_path, duration_sec=end_card_sec):
-                concat_lines.append(f"file '{end_card_path}'")
-                shot_timings.append(end_card_sec)
-
         # Create Concat List File for FFmpeg
         concat_list_path = os.path.join(self.storage_dir, "concat_list.txt")
         with open(concat_list_path, "w") as f:
@@ -1573,7 +1523,7 @@ class MediaProducerAgent:
                 _frame_path = os.path.join(self.storage_dir, f"thumbref_{exec_suffix}.jpg")
                 _sp.run(
                     ["ffmpeg", "-y", "-ss", "2", "-i", final_video_path,
-                     "-frames:v", "1", "-vf", "scale=640:-1", "-q:v", "3", _frame_path],
+                     "-frames:v", "1", "-vf", "scale=1280:-1", "-q:v", "2", _frame_path],
                     capture_output=True, timeout=60,
                 )
                 if os.path.exists(_frame_path) and os.path.getsize(_frame_path) > 500:
@@ -1662,7 +1612,7 @@ class MediaProducerAgent:
         try:
             from moviepy.editor import (
                 VideoFileClip, AudioFileClip, CompositeAudioClip,
-                CompositeVideoClip, concatenate_videoclips
+                CompositeVideoClip, concatenate_videoclips, afx
             )
         except Exception as e:
             print(f"[MoviePy] moviepy not installed or import failed: {e}. "
@@ -1692,9 +1642,15 @@ class MediaProducerAgent:
         if os.path.exists(bgm_path) and os.path.getsize(bgm_path) > 1000:
             try:
                 bgm = AudioFileClip(bgm_path)
+                try:
+                    tempo = min(max(float(os.getenv("BGM_TEMPO", "1.1")), 0.5), 2.0)
+                except Exception:
+                    tempo = 1.1
+                if abs(tempo - 1.0) > 0.001:
+                    bgm = afx.speedx(bgm, factor=tempo)
                 bgm = bgm.audio_loop(duration=video.duration).volumex(BGM_VOLUME)
                 video = video.set_audio(CompositeAudioClip([narration, bgm]))
-                print("[MoviePy] Background music mixed under narration.")
+                print("[MoviePy] Background music mixed under narration (tempo x%s)." % (round(tempo, 3),))
             except Exception as e:
                 print(f"[MoviePy] BGM mix skipped (keeping narration only): {e}")
         else:
