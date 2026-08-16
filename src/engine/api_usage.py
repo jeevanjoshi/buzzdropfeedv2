@@ -453,6 +453,20 @@ def _http_get(url: str, headers: dict, timeout: float) -> Tuple[int, Any]:
         return 0, {"error": str(e)}
 
 
+def _http_post(url: str, headers: dict, payload: dict, timeout: float) -> Tuple[int, Any]:
+    """Small POST wrapper that never raises."""
+    import requests
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        try:
+            body = resp.json()
+        except ValueError:
+            body = resp.text
+        return resp.status_code, body
+    except Exception as e:  # noqa: BLE001
+        return 0, {"error": str(e)}
+
+
 def fetch_fal_usage(days: int = 7, timeout: float = 15.0) -> dict:
     """Realtime fal usage + credit balance via the fal Platform API.
 
@@ -481,6 +495,15 @@ def fetch_fal_usage(days: int = 7, timeout: float = 15.0) -> dict:
         "top": [{"endpoint": r.get("endpoint_id"), "quantity": r.get("quantity"),
                  "unit": r.get("unit"), "cost_usd": r.get("cost_usd")} for r in top],
     }
+    # Lifetime/cumulative usage ("used so far") — wide window, fal clamps it to
+    # the account's billing history.
+    life_code, life_body = _http_get(
+        f"{FAL_BASE}/models/usage?start=2000-01-01&end={end.isoformat()}&expand=summary",
+        headers, timeout)
+    if life_code == 200 and isinstance(life_body, dict):
+        life_summary = life_body.get("summary") or []
+        result["used_lifetime_usd"] = round(sum(float(r.get("cost_total") or 0.0)
+                                                for r in life_summary), 6)
     bill_code, bill = _http_get(f"{FAL_BASE}/account/billing?expand=credits", headers, timeout)
     if bill_code == 200 and isinstance(bill, dict):
         creds = bill.get("credits") or {}
@@ -489,29 +512,117 @@ def fetch_fal_usage(days: int = 7, timeout: float = 15.0) -> dict:
     return result
 
 
-def fetch_openrouter_usage(timeout: float = 15.0) -> dict:
-    """OpenRouter credits + usage via /credits. Requires a management key.
+def fetch_openrouter_usage(timeout: float = 15.0, analytics_days: int = 7) -> dict:
+    """OpenRouter credits + usage via /credits (Bearer <API key>), the run-key's
+    OWN usage via /auth/key, plus a per-model breakdown filtered to that key via
+    /analytics/query (management key).
 
-    Normal ``sk-or-...`` keys get a 403 from OpenRouter; that is surfaced
-    instead of guessed. Set ``OPENROUTER_MANAGEMENT_KEY`` (pk-...) to unlock
-    real balance + lifetime usage numbers."""
-    key = os.getenv("OPENROUTER_MANAGEMENT_KEY") or os.getenv("OPENROUTER_API_KEY", "")
+    The regular ``sk-or-...`` key legitimately returns /auth/key (its own usage,
+    weekly/monthly/daily + limit) and /credits; per-key history needs a
+    management key. The analytics results are filtered to the pipeline's own
+    key (OPENROUTER_FILTER_API_KEY, default ``buzzdropfeedv2`` = the .ea4 key)."""
+    api_key = os.getenv("OPENROUTER_API_KEY", "")
+    mgmt_key = os.getenv("OPENROUTER_MANAGEMENT_KEY", "")
+    key = mgmt_key or api_key
     if not key or len(key) < 5:
         return {"ok": False, "error": "OPENROUTER_API_KEY not set in .env",
                 "hint": "set OPENROUTER_API_KEY (or a pk_ management key)"}
     status, body = _http_get(f"{OPENROUTER_BASE}/credits",
                              {"Authorization": f"Bearer {key}"}, timeout)
+    if status != 200 or not isinstance(body, dict):
+        hint = None
+        if status == 403:
+            hint = ("/credits needs a management key — create one at openrouter.ai/keys"
+                    " and set OPENROUTER_MANAGEMENT_KEY.")
+        return {"ok": False, "code": status, "error": _err(body) or f"HTTP {status}", "hint": hint}
+    d = body.get("data") or {}
+    result = {"ok": True, "source": "openrouter /credits + /auth/key", "fetched_at": _utcnow(),
+              "total_credits": d.get("total_credits"),
+              "total_usage": d.get("total_usage"),
+              "usage_usd": d.get("total_usage"),
+              "key_type": "management" if mgmt_key else "regular"}
+    if api_key:
+        result["run_key"] = fetch_openrouter_key_usage(api_key, timeout=timeout)
+    if mgmt_key:
+        filter_key = os.getenv("OPENROUTER_FILTER_API_KEY", "buzzdropfeedv2").strip()
+        result["analytics"] = fetch_openrouter_analytics(mgmt_key, days=analytics_days,
+                                                         api_key_id=filter_key or None,
+                                                         timeout=timeout)
+    else:
+        result["analytics_unavailable"] = True
+        result["hint"] = ("regular sk-or- key: /credits + /auth/key only (own usage). "
+                          "Set a management key (pk_...) + OPENROUTER_FILTER_API_KEY "
+                          "to unlock per-key analytics.")
+    return result
+
+
+def fetch_openrouter_key_usage(key: str, timeout: float = 10.0) -> dict:
+    """Usage/limits for THIS api key via /auth/key (works with any key)."""
+    status, body = _http_get(f"{OPENROUTER_BASE}/auth/key",
+                             {"Authorization": f"Bearer {key}"}, timeout)
     if status == 200 and isinstance(body, dict):
-        d = (body.get("data") or {})
-        return {"ok": True, "source": "openrouter /credits", "fetched_at": _utcnow(),
-                "total_credits": d.get("total_credits"),
-                "total_usage": d.get("total_usage"),
-                "usage_usd": d.get("total_usage")}
-    hint = None
-    if status == 403:
-        hint = ("/credits needs a management key — create one at openrouter.ai/keys"
-                " and set OPENROUTER_MANAGEMENT_KEY (sk-or- keys are 403 here).")
-    return {"ok": False, "code": status, "error": _err(body) or f"HTTP {status}", "hint": hint}
+        d = body.get("data") or {}
+        return {"ok": True, "label": d.get("label"),
+                "usage": d.get("usage"), "usage_daily": d.get("usage_daily"),
+                "usage_weekly": d.get("usage_weekly"), "usage_monthly": d.get("usage_monthly"),
+                "limit": d.get("limit"), "limit_remaining": d.get("limit_remaining"),
+                "limit_reset": d.get("limit_reset")}
+    return {"ok": False, "code": status, "error": _err(body) or f"HTTP {status}"}
+
+
+def fetch_openrouter_analytics(key: str, days: int = 7, api_key_id: Optional[str] = None,
+                               timeout: float = 15.0) -> dict:
+    """Per-model usage breakdown via OpenRouter /analytics/query (management key
+    only). When ``api_key_id`` is given, only rows attributed to that key are
+    aggregated (the pipeline's own run key). Metrics: real request_count +
+    total_usage ($ cost). Never raises."""
+    import datetime as _dt
+    start = _dt.date.today() - _dt.timedelta(days=max(1, days))
+    payload = {
+        "metrics": ["request_count", "total_usage"],
+        "dimensions": ["api_key_id", "model"],
+        "granularity": "day",
+        "time_range": {"start": f"{start.isoformat()}T00:00:00Z",
+                       "end": _dt.date.today().isoformat() + "T23:59:59Z"},
+        "limit": 200,
+    }
+    status, resp = _http_post(f"{OPENROUTER_BASE}/analytics/query",
+                              {"Authorization": f"Bearer {key}"}, payload, timeout)
+    if status != 200 or not isinstance(resp, dict):
+        return {"ok": False, "code": status, "error": _err(resp) or f"HTTP {status}",
+                "hint": "/analytics/query requires a management (pk_) key"}
+    inner = resp.get("data")
+    if isinstance(inner, dict):
+        rows = inner.get("data") or inner.get("rows") or []
+    elif isinstance(inner, list):
+        rows = inner
+    else:
+        rows = resp.get("rows") or []
+    by_model: Dict[str, dict] = {}
+    total_req = 0
+    total_cost = 0.0
+    matched_key = None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("api_key_id") or ""
+        if api_key_id and rid != api_key_id:
+            continue
+        matched_key = matched_key or rid
+        model = str(r.get("model") or "unknown")
+        cnt = int(r.get("request_count") or 0)
+        cost = float(r.get("total_usage") or 0.0)
+        entry = by_model.setdefault(model, {"requests": 0, "cost_usd": 0.0})
+        entry["requests"] += cnt
+        entry["cost_usd"] = round(entry["cost_usd"] + cost, 6)
+        total_req += cnt
+        total_cost = round(total_cost + cost, 6)
+    top = sorted(by_model.items(), key=lambda kv: kv[1]["requests"], reverse=True)[:12]
+    return {"ok": True, "period_days": days,
+            "api_key_id": matched_key or api_key_id or None,
+            "total_requests": total_req, "total_cost_usd": total_cost,
+            "per_model": [{"model": m, "requests": v["requests"], "cost_usd": v["cost_usd"]}
+                          for m, v in top]}
 
 
 def fetch_google_vertex_billing(project: Optional[str] = None, timeout: float = 15.0) -> dict:

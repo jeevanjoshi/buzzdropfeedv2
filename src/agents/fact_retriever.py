@@ -411,6 +411,26 @@ class FactRetrieverAgent:
         # Rank candidates using phase-aware TOPSIS Decision Engine
         ranked_candidates = self.topsis_engine.rank_candidates(candidates, channel_phase=channel_phase)
 
+        # ── Analytics feedback tie-break ("top growth drivers") ────────────────
+        # A soft, non-fatal bias that "doubles down on what works": candidates
+        # whose audience/niche historically converts (subscriber-gain + retention
+        # signal from logs/analytics_feedback.json) get a small boost to their
+        # TOPSIS score before ordering. No signal → no-op (identical to before).
+        # Gated by CSVG_ANALYTICS_FEEDBACK=1 (default on) and never raises.
+        try:
+            if os.getenv("CSVG_ANALYTICS_FEEDBACK", "1").strip().lower() not in ("0", "false", "no"):
+                from src.engine.analytics_feedback import analytics_feedback
+                _biased = []
+                for _c in ranked_candidates:
+                    _aud = getattr(_c, "audience_type", "") or ""
+                    _bias = analytics_feedback.get_audience_bias(_aud)
+                    if _bias > 1.0 and _c.topsis_score is not None:
+                        _c.topsis_score = round(_c.topsis_score * _bias, 4)
+                    _biased.append(_c)
+                ranked_candidates = sorted(_biased, key=lambda x: x.topsis_score or 0.0, reverse=True)
+        except Exception as e:
+            print(f"[FactRetriever] Analytics feedback bias skipped (non-fatal): {e}")
+
         # Drop previously-tried topics (e.g. topics whose RAG corpus was
         # undersupplied) so a retry picks the next-best candidate.
         if exclude_headlines:

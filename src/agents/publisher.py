@@ -34,6 +34,50 @@ def _is_real_video_id(video_id: Optional[str]) -> bool:
     return vid.lower() not in ("demo_id", "uploaded_demo_id") and not vid.lower().startswith("demo_")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Outcome-based playlist mapping (vidIQ growth tactic: build bingeable playlists
+# that promise a clear result, so viewers watch multiple videos in a row — the
+# moment most subscriptions happen). Every published video is chained into the
+# master playlist PLUS an "outcome" playlist grouped by the topic's audience/
+# niche, so the subscriber path (discovery → related playlist → channel) is
+# frictionless within a theme. Keyed by ``TopicCandidate.audience_type``.
+# ─────────────────────────────────────────────────────────────────────────────
+_OUTCOME_PLAYLISTS = {
+    "tech":     ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "business": ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "science":  ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "space":    ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "history":  ("AI, Tech & Innovation Deep-Dives",
+                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
+    "investor":     ("Finance, Markets & Wealth Stories",
+                     "Documentary storytelling on markets, investing, money and the people behind them."),
+    "finance_edu":  ("Finance, Markets & Wealth Stories",
+                     "Documentary storytelling on markets, investing, money and the people behind them."),
+    "real_estate":  ("Finance, Markets & Wealth Stories",
+                     "Documentary storytelling on markets, investing, money and the people behind them."),
+    "health":   ("Health, Wellness & Human Science",
+                 "Documentary deep-dives on health, medicine and human science."),
+}
+
+# Master playlist title is env-configurable (default kept for back-compat).
+_MASTER_PLAYLIST_TITLE = os.getenv("YOUTUBE_PLAYLIST_TITLE", "LumenLoop AI Documentaries")
+
+
+def _outcome_playlist_for(audience_type: str) -> Optional[tuple]:
+    """Return (title, description) for the outcome playlist matching an
+    audience_type, or None when the topic has no themed playlist (e.g. general)."""
+    if not audience_type:
+        return None
+    tpl = _OUTCOME_PLAYLISTS.get(str(audience_type).strip().lower())
+    if tpl and tpl[0].strip().lower() != _MASTER_PLAYLIST_TITLE.strip().lower():
+        return tpl
+    return None
+
+
 class PublisherAgent:
     """
     Publisher Agent managing YouTube MCP upload tools, checking daily API quotas,
@@ -231,20 +275,43 @@ class PublisherAgent:
                 f"Check the YouTube OAuth token/scopes (get_youtube_token.py)."
             )
 
-        # 3a. Auto-Playlist Chaining (watch-time amplifier)
+        # 3a. Auto-Playlist Chaining (watch-time amplifier). The video is chained
+        # into BOTH the master playlist AND its themed "outcome" playlist (when
+        # one exists for the topic's audience), so viewers binge within a theme
+        # — the subscriber path that converts discovery into subscriptions.
         playlist_id, playlist_url = None, None
+        outcome_playlists = []
         try:
             if os.getenv("YOUTUBE_AUTO_PLAYLIST", "1").strip().lower() not in ("0", "false", "no"):
-                playlist_title = os.getenv("YOUTUBE_PLAYLIST_TITLE", "LumenLoop AI Documentaries")
                 pl_res = await upsert_playlist_add_video(UpsertPlaylistRequest(
                     video_id=video_id,
-                    playlist_title=playlist_title,
+                    playlist_title=_MASTER_PLAYLIST_TITLE,
                     description="Deep-dive financial and technological storytelling documentaries."
                 ))
                 if pl_res.get("status") in ("success", "mock") and pl_res.get("playlist_id"):
                     playlist_id = pl_res.get("playlist_id")
                     playlist_url = pl_res.get("playlist_url")
-                    print(f"[Publisher] Video chained into playlist '{playlist_title}' (id={playlist_id})")
+                    print(f"[Publisher] Video chained into master playlist '{_MASTER_PLAYLIST_TITLE}' (id={playlist_id})")
+
+                    # Theme/outcome playlist (best binge path → seed comment links it).
+                    aud = getattr(state.selected_topic, "audience_type", "") if state.selected_topic else ""
+                    outcome = _outcome_playlist_for(aud)
+                    if outcome:
+                        out_title, out_desc = outcome
+                        out_res = await upsert_playlist_add_video(UpsertPlaylistRequest(
+                            video_id=video_id,
+                            playlist_title=out_title,
+                            description=out_desc,
+                        ))
+                        if out_res.get("status") in ("success", "mock") and out_res.get("playlist_id"):
+                            outcome_playlists.append({
+                                "title": out_title,
+                                "playlist_id": out_res.get("playlist_id"),
+                                "playlist_url": out_res.get("playlist_url"),
+                            })
+                            print(f"[Publisher] Video chained into outcome playlist '{out_title}' (id={out_res.get('playlist_id')})")
+                            # Seed comment points viewers at the bingeable theme playlist.
+                            playlist_url = out_res.get("playlist_url")
         except Exception as e:
             print(f"[Publisher] Auto-playlist chaining skipped (non-fatal): {e}")
 
@@ -280,7 +347,8 @@ class PublisherAgent:
             pinned_comment_text=pinned_comment_text,
             status="PUBLISHED",
             retry_count=0,
-            synthetic_content_flag=True
+            synthetic_content_flag=True,
+            extra_metadata={"outcome_playlists": outcome_playlists} if outcome_playlists else None,
         )
         state.upload_metadata = meta
         state.execution_stage = "PUBLISHED_SUCCESS"
@@ -294,12 +362,16 @@ class PublisherAgent:
         except Exception as e:
             print(f"[MicroContentProducer] Notice: {e}")
 
-        # 4b. GROWTH phase: PUBLISH the Shorts as YouTube Shorts (#1 discovery lever
+# 4b. GROWTH phase: PUBLISH the Shorts as YouTube Shorts (#1 discovery lever
         # for a pre-YPP channel — the master is monetized long-form, the clips feed
         # subscriptions + watch hours). Non-fatal; quota-shared with long-form.
+        # Each Short points back at the full documentary (description link +
+        # pinned comment) so Shorts discovery funnels into the monetizable
+        # long-form; YouTube's related-video picker itself is app-only, not API.
         try:
             if (state.channel_phase == "GROWTH" and state.asset_paths.shorts):
                 _short_title = (seo.title if seo and seo.title else title)[:90]
+                _main_url = f"https://youtu.be/{video_id}"
                 _short_ids = []
                 _covers = state.asset_paths.shorts_covers if state.asset_paths else []
                 for _ci, _sp in enumerate(state.asset_paths.shorts):
@@ -307,10 +379,11 @@ class PublisherAgent:
                     # Shorts thumbnail via youtube.thumbnails.set. YouTube
                     # resizes to the required dims keeping aspect ratio.
                     _short_thumb = _covers[_ci] if _ci < len(_covers) else None
+                    _short_desc = f"{desc}\n\n▶ Full video: {_main_url}"[:4900]
                     _res = await upload_short(UploadRequest(
                         video_path=_sp,
                         title=f"{_short_title} | Short",
-                        description=desc[:4000],
+                        description=_short_desc,
                         tags=(tags or [])[:30] + ["#Shorts"],
                         category_id="22",
                         thumbnail_path=_short_thumb,
@@ -318,6 +391,14 @@ class PublisherAgent:
                     if _res and _is_real_video_id(_res.get("video_id", "")):
                         _short_ids.append(_res["video_id"])
                         run_budget.record_yt("upload")
+                        # Pinned comment on the Short linking the long-form master.
+                        try:
+                            await insert_pinned_comment(InsertCommentRequest(
+                                video_id=_res["video_id"],
+                                comment_text=f"Watch the full video ▶ {_main_url}",
+                            ))
+                        except Exception as _short_pin_err:
+                            print(f"[Publisher] Short pin comment skipped (non-fatal): {_short_pin_err}")
                 if _short_ids:
                     meta.shorts_video_id = ",".join(_short_ids)
                     print(f"[Publisher] Published {len(_short_ids)} YouTube Short(s) for GROWTH discovery.")
@@ -351,6 +432,24 @@ class PublisherAgent:
                 self._trigger_pi_warmup(title, state)
         except Exception as e:
             print(f"[PiWarmup] Notice: {e}")
+
+        # 5d. Analytics feedback refresh (background, non-fatal, rate-limited):
+        # pull per-video growth metrics into logs/analytics_feedback.json so the
+        # next run's topic selection can bias toward the top growth drivers
+        # ("double down on what works"). Never blocks or fails the publish.
+        try:
+            if _is_real_video_id(video_id) and os.getenv("CSVG_ANALYTICS_FEEDBACK", "1").strip().lower() not in ("0", "false", "no"):
+                import threading as _th
+                def _refresh():
+                    try:
+                        from src.engine.analytics_feedback import analytics_feedback
+                        analytics_feedback.refresh(force=False)
+                    except Exception as _e:
+                        print(f"[AnalyticsFeedback] background refresh failed: {_e}")
+                _th.Thread(target=_refresh, daemon=True).start()
+                print("[AnalyticsFeedback] background refresh launched (rate-limited).")
+        except Exception as e:
+            print(f"[AnalyticsFeedback] Notice: {e}")
 
         # Record to persistent deduplication history so future runs skip this topic
         from src.engine.topic_deduplicator import topic_deduplicator

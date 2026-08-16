@@ -65,12 +65,23 @@ def _print_provider_pull(name: str, p: dict) -> None:
               f"[{p.get('period_start')} → {p.get('period_end')}], "
               f"balance {_fmt_usd(p.get('balance_usd'))} {p.get('currency','')} ({p.get('source')})")
     elif name == "openrouter":
-        print(f"  provider pull : credits {_fmt_usd(p.get('total_credits'))}, "
-              f"used {_fmt_usd(p.get('total_usage'))} ({p.get('source')})")
+        rk = p.get("run_key") or {}
+        ana = p.get("analytics") or {}
+        print(f"  key (buzzdropfeedv2): {_fmt_usd(rk.get('usage_monthly'))} this month, "
+              f"{_fmt_usd(rk.get('usage_weekly'))} this week, {_fmt_usd(rk.get('usage_daily'))} today"
+              + (f" | limit {_fmt_usd(rk.get('limit'))}, {_fmt_usd(rk.get('limit_remaining'))} remaining ({rk.get('limit_reset')})"
+                 if rk.get("limit") else ""))
+        if ana and ana.get("ok"):
+            top = ana.get("per_model") or []
+            print(f"  usage 7d      : key '{ana.get('api_key_id')}' → "
+                  f"{ana.get('total_requests', 0)} req, {_fmt_usd(ana.get('total_cost_usd'))} in last {ana.get('period_days')}d"
+                  + ("; " + ", ".join(f"{m['model']}={m['requests']}" for m in top[:5]) if top else ""))
+        print(f"  account       : balance {_fmt_usd(p.get('total_credits'))} (all keys)")
     elif name == "google":
         ba = p.get("billing_account")
-        print(f"  provider pull : vertex billing {'enabled' if p.get('billing_enabled') else 'DISABLED'}"
-              + (f" — {ba}" if ba else "") + " (dollar totals need BigQuery export)")
+        print(f"  provider pull : project {p.get('project')} · vertex billing {'enabled' if p.get('billing_enabled') else 'DISABLED'}"
+              + (f" — {ba}" if ba else ""))
+        print(f"                 {p.get('hint') or ''}")
 
 
 def main() -> int:

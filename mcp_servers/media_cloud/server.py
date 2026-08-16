@@ -55,6 +55,27 @@ class ChartRequest(BaseModel):
     output_mp4_path: str
 
 
+def _wrap_chart_title(title: str, max_chars: int = 36, max_lines: int = 2) -> str:
+    """Word-boundary wrap a chart title into up to ``max_lines`` lines so the
+    renderer never clips long titles off the right edge of the 16:9 canvas."""
+    if not title:
+        return "KEY STATISTICS"
+    words = str(title).split()
+    lines: list = []
+    cur = ""
+    for word in words:
+        candidate = f"{cur} {word}".strip()
+        if len(candidate) <= max_chars:
+            cur = candidate
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur or not lines:
+        lines.append(cur)
+    return "\n".join(lines[:max_lines]) or title
+
+
 class PlaywrightSVGRequest(BaseModel):
     chart_type: str = "animated_line_chart"  # 'animated_line_chart', 'glowing_counter', 'stock_ticker'
     title: str = "MARKET CAPITALIZATION SHIFT"
@@ -642,7 +663,7 @@ async def generate_dynamic_chart(req: ChartRequest):
         os.makedirs(os.path.dirname(os.path.abspath(req.output_mp4_path)), exist_ok=True)
         chart_png = req.output_mp4_path.replace(".mp4", "_chart.png")
 
-        chart_title = req.title.upper()
+        chart_title = _wrap_chart_title(req.title.upper())
 
         try:
             import matplotlib.pyplot as plt
@@ -667,8 +688,14 @@ async def generate_dynamic_chart(req: ChartRequest):
             # Deep cinematic background
             fig.patch.set_facecolor('#070a12')
 
-            # Floating glassmorphic card container for depth perception
-            ax = fig.add_axes([0.10, 0.16, 0.80, 0.64])
+            title_lines = chart_title.count("\n") + 1
+            # Floating glassmorphic card container for depth perception (a
+            # 2-line title gets a slightly shorter plot so header typography
+            # never collides with the data area).
+            if title_lines >= 2:
+                ax = fig.add_axes([0.10, 0.12, 0.80, 0.60])
+            else:
+                ax = fig.add_axes([0.10, 0.16, 0.80, 0.64])
             ax.set_facecolor('#0a1526')
 
             # Clean borders
@@ -735,10 +762,10 @@ async def generate_dynamic_chart(req: ChartRequest):
             ax.tick_params(axis='both', colors='#64748b', labelsize=12)
             plt.setp(ax.get_xticklabels(), rotation=15, ha='right')
 
-            # Modern header typography
-            fig.text(0.10, 0.89, chart_title, fontsize=22, fontweight='bold', color='white', family='sans-serif')
+            # Modern header typography (wrapped so titles never clip on the right)
+            fig.text(0.10, 0.90, chart_title, fontsize=22, fontweight='bold', color='white', family='sans-serif')
             subtitle = f"DATA METRIC: {req.unit_symbol}" if req.unit_symbol else "HISTORICAL MARKET METRICS"
-            fig.text(0.10, 0.85, subtitle.upper(), fontsize=12, fontweight='bold', color='#00ffd8', family='sans-serif')
+            fig.text(0.10, 0.90 - 0.05 * title_lines, subtitle.upper(), fontsize=12, fontweight='bold', color='#00ffd8', family='sans-serif')
 
             plt.savefig(chart_png, bbox_inches='tight', facecolor=fig.get_facecolor(), dpi=120)
             plt.close(fig)

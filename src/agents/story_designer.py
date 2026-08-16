@@ -357,7 +357,7 @@ def extract_numeric_chart_spec(state: Optional[GlobalState]) -> Optional[Dict[st
                 entries.append((label, val))
         headline = (state.selected_topic.headline if state.selected_topic else "") or "KEY STATISTICS"
         return {
-            "title": headline[:45],
+            "title": _truncate_chart_title(headline),
             "labels": [e[0] for e in entries],
             "values": [e[1] for e in entries],
             "unit": "%",
@@ -390,7 +390,7 @@ def extract_numeric_chart_spec(state: Optional[GlobalState]) -> Optional[Dict[st
                 entries.append((label, val))
         headline = (state.selected_topic.headline if state.selected_topic else "") or "KEY STATISTICS"
         return {
-            "title": headline[:45],
+            "title": _truncate_chart_title(headline),
             "labels": [e[0] for e in entries],
             "values": [e[1] for e in entries],
             "unit": "units",
@@ -398,6 +398,24 @@ def extract_numeric_chart_spec(state: Optional[GlobalState]) -> Optional[Dict[st
         }
 
     return None
+
+
+def _truncate_chart_title(title: Any, max_len: int = 60) -> str:
+    """Word-boundary chart-title truncation so titles never cut a word in half.
+
+    The matplotlib renderer draws titles on a 16:9 canvas; very long titles are
+    wrapped by the renderer, but the title here should still be capped so a
+    single title stays on one readable line. Cutting at a word boundary keeps
+    "Percentage of Workers Seeking Higher-Paying Raises" from becoming
+    "...Higher-Paying R" (the mid-word truncation bug).
+    """
+    title = str(title or "KEY STATISTICS").strip()
+    if len(title) <= max_len:
+        return title
+    cut = title[:max_len]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut
 
 
 def _sanitize_chart_spec(spec: Any) -> Optional[Dict[str, Any]]:
@@ -424,7 +442,7 @@ def _sanitize_chart_spec(spec: Any) -> Optional[Dict[str, Any]]:
     if ctype not in ("bar", "line"):
         ctype = "bar"
     return {
-        "title": str(spec.get("title") or "KEY STATISTICS")[:45],
+        "title": _truncate_chart_title(spec.get("title")),
         "labels": labels,
         "values": values,
         "unit": str(spec.get("unit") or spec.get("unit_symbol") or "%"),

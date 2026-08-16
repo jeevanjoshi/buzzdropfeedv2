@@ -1307,7 +1307,8 @@ def case_youtube_retention_and_engagement():
 # ---------------------------------------------------------------------------
 def case_media_producer_charts_and_thumbnails():
     from src.agents.media_producer import (
-        _extract_chart_numbers, _has_numeric_theme, _derive_chart_data, _build_thumbnail_scene
+        _extract_chart_numbers, _has_numeric_theme, _derive_chart_data, _build_thumbnail_scene,
+        _topic_relevant_facts, _shot_wants_data_chart,
     )
     from src.schemas.state import GlobalState, ScriptData, ShotData, TopicCandidate, VerifiedFact
 
@@ -1334,6 +1335,66 @@ def case_media_producer_charts_and_thumbnails():
         shot_mock, {}, narr, "Cinematic chart: revenue trajectory", []
     )
     ok_narr_derive = len(vals_n) >= 2 and "%" in unit_n
+
+    # 4b. Off-topic fact leak guards (Samsung-Galaxy regression): the chart
+    # facts fallback must only use facts about the SELECTED topic, and a
+    # standard-image shot whose prompt merely MENTIONS "stock chart" (a scene
+    # description, no numeric claims) must NOT be routed to a real chart.
+    topic_leak = TopicCandidate(
+        candidate_id="pay-c1", headline="Worker Pay Isn't Keeping Up With Inflation Once Again",
+        summary="Wages failed to keep pace, new research shows the pattern is repeating.",
+        source_url="https://example.com/pay", keywords=["worker", "wages", "inflation", "pay"],
+        tvs_score=0.8, rpm_score=0.8, idi_score=0.8, sdi_score=0.8, sat_score=0.8
+    )
+    leak_facts = [
+        VerifiedFact(source_id="off1", headline="Samsung has new Galaxy headphones in the works",
+                     summary="Strings of code in Samsung's Galaxy Wearable app hint at an upcoming pair of over-ear headphones.",
+                     url="https://example.com/samsung", source_name="The Verge"),
+        VerifiedFact(source_id="on1", headline="Worker Pay Isn't Keeping Up With Inflation Once Again",
+                     summary="71% of workers reported their most recent raise was below 3% inflation.",
+                     url="https://example.com/pay", source_name="NYT"),
+    ]
+    rel_facts = _topic_relevant_facts(leak_facts, topic_leak)
+    ok_rel_filter = any("samsung" in (f.headline or "").lower() for f in rel_facts) is False
+    ok_rel_keep = any("worker pay" in (f.headline or "").lower() for f in rel_facts)
+
+    src_shot = ShotData(shot_id=18, act_index=6, narration_text="Please share your stories below.",
+                        visual_prompt="Cinematic 16:9 slow dolly out from a glowing laptop displaying colorful stock charts on a desk",
+                        duration_estimate=10.0, visual_type=VisualType.STANDARD_IMAGE)
+    ok_routing_nochart = _shot_wants_data_chart(src_shot, {}, src_shot.narration_text, src_shot.visual_prompt) is False
+
+    ok_grounded_chart = _shot_wants_data_chart(
+        ShotData(shot_id=1, act_index=6, narration_text="Revenue grew 5% YoY to 12 billion.",
+                 visual_prompt="Cinematic shot of a bar graph", duration_estimate=5.0,
+                 visual_type=VisualType.STANDARD_IMAGE),
+        {}, "Revenue grew 5% YoY to 12 billion.", "Cinematic shot of a bar graph",
+    )
+
+    _labels_ml, _vals_ml, _unit_ml, _title_ml, _type_ml = _derive_chart_data(
+        ShotData(shot_id=1, act_index=6, narration_text="n", visual_prompt="p", duration_estimate=5.0,
+                 visual_type=VisualType.MATPLOTLIB_CHART),
+        {}, src_shot.narration_text, src_shot.visual_prompt, leak_facts, topic_leak,
+    )
+    ok_no_samsung_chart = "Samsung" not in " ".join(_labels_ml or [])
+    ok_leak_guards = (ok_rel_filter and ok_rel_keep and ok_routing_nochart
+                      and ok_grounded_chart and ok_no_samsung_chart)
+
+    # 4c. Chart-title truncation must never cut a word in half, and the chart
+    # renderer wraps long titles instead of clipping them off the right edge.
+    from src.agents.story_designer import _truncate_chart_title, _sanitize_chart_spec
+    from mcp_servers.media_cloud.server import _wrap_chart_title
+
+    def _is_word_prefix(txt, raw):
+        return txt == raw or raw.startswith(txt + " ")
+
+    long_t = "Percentage of Workers Seeking Higher-Paying Raises Through All the Inflationary Decades"
+    t_trunc = _truncate_chart_title(long_t)
+    ok_title_word = len(t_trunc) <= 60 and _is_word_prefix(t_trunc, long_t)
+    sanitized = _sanitize_chart_spec({"title": long_t, "labels": ["A", "B"], "values": [10, 20], "unit": "%"})
+    ok_sanitized_word = sanitized is not None and _is_word_prefix(sanitized["title"], long_t)
+    wrapped = _wrap_chart_title(long_t.upper())
+    ok_wrap = "\n" in wrapped and all(not ln.startswith(" ") and not ln.endswith(" ") for ln in wrapped.split("\n"))
+    ok_title_guards = ok_title_word and ok_sanitized_word and ok_wrap
 
     # 5. Thumbnail scene building
     st = GlobalState(
@@ -1363,9 +1424,9 @@ def case_media_producer_charts_and_thumbnails():
         )
         assert test_shot.visual_type == vt
 
-    passed = ok_nums and ok_theme_pos and ok_theme_neg and ok_spec and ok_narr_derive and ok_scene
+    passed = ok_nums and ok_theme_pos and ok_theme_neg and ok_spec and ok_narr_derive and ok_scene and ok_leak_guards and ok_title_guards
     record("MEDIA_PRODUCER_CHARTS_AND_THUMBNAILS", passed,
-           f"nums={ok_nums}, theme_pos={ok_theme_pos}, theme_neg={ok_theme_neg}, spec={ok_spec}, narr_derive={ok_narr_derive}, scene={ok_scene}")
+           f"nums={ok_nums}, theme_pos={ok_theme_pos}, theme_neg={ok_theme_neg}, spec={ok_spec}, narr_derive={ok_narr_derive}, scene={ok_scene}, leak_guards={ok_leak_guards}, title_guards={ok_title_guards}")
     return passed
 
 
@@ -1820,6 +1881,76 @@ def case_publisher_and_seed_distribution():
 
 
 # ---------------------------------------------------------------------------
+# Case 23 — Outcome-based playlists (vidIQ bingeable-playlist tactic) + the
+# analytics-feedback niche signal / bias helpers (hermetic: temp file, no network)
+# ---------------------------------------------------------------------------
+def case_playlists_and_analytics_feedback():
+    import tempfile
+    from src.agents.publisher import _outcome_playlist_for, _MASTER_PLAYLIST_TITLE
+    import src.engine.analytics_feedback as af
+
+    # 1. Outcome playlist mapping is pure and theme-correct.
+    inv = _outcome_playlist_for("investor")
+    tech = _outcome_playlist_for("tech")
+    general = _outcome_playlist_for("general")
+    ok_map = (
+        inv is not None and "Finance" in inv[0]
+        and tech is not None and "Tech" in tech[0]
+        and general is None
+    )
+
+    # 2. Niche signal: subscriber-gaining niche must carry a positive signal,
+    #    and higher than a zero-subscriber niche (retention alone keeps it >0).
+    videos = [
+        {"video_id": "a", "audience_type": "investor", "views": 100, "subscribers_gained": 20, "avg_view_percentage": 45.0},
+        {"video_id": "b", "audience_type": "investor", "views": 150, "subscribers_gained": 30, "avg_view_percentage": 50.0},
+        {"video_id": "c", "audience_type": "tech", "views": 300, "subscribers_gained": 0, "avg_view_percentage": 60.0},
+    ]
+    sig = af._compute_niche_signal(videos)
+    ok_signal = (
+        sig.get("investor", {}).get("videos") == 2
+        and sig.get("investor", {}).get("subscribers_gained") == 50
+        and sig.get("investor", {}).get("signal", 0.0) > sig.get("tech", {}).get("signal", 0.0)
+    )
+
+    # 3. get_audience_bias: write a temp store, confirm bias favours the
+    #    subscriber-converting niche and is neutral (1.0) elsewhere.
+    orig_file = af._FEEDBACK_FILE
+    tmpdir = tempfile.mkdtemp(prefix="csvg_af_")
+    tmp_store = os.path.join(tmpdir, "analytics_feedback.json")
+    try:
+        af._FEEDBACK_FILE = tmp_store
+        with open(tmp_store, "w", encoding="utf-8") as f:
+            json.dump({
+                "schema": "analytics_feedback/v1",
+                "videos": videos,
+                "niche_signal": sig,
+                "captured_at": "2026-08-15T00:00:00Z",
+            }, f)
+        bias_investor = af.get_audience_bias("investor")
+        bias_tech = af.get_audience_bias("tech")
+        bias_unknown = af.get_audience_bias("history")
+        ok_bias = (
+            bias_investor > 1.0
+            and bias_investor <= 1.30
+            and bias_tech == 1.0
+            and bias_unknown == 1.0
+        )
+    finally:
+        af._FEEDBACK_FILE = orig_file
+        try:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
+    passed = ok_map and ok_signal and ok_bias
+    record("PLAYLISTS_AND_ANALYTICS_FEEDBACK", passed,
+           f"outcome_map={ok_map}, signal={ok_signal}, bias={ok_bias}, master='{_MASTER_PLAYLIST_TITLE}'")
+    return passed
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def main():
@@ -1847,6 +1978,7 @@ def main():
     case_nano_banana_helpers()
     case_api_usage()
     case_publisher_and_seed_distribution()
+    case_playlists_and_analytics_feedback()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

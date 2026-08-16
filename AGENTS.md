@@ -14,7 +14,7 @@ Need to change something? Start here, not with a global grep.
 | Run orchestration, phase wiring, soft approval | `src/agents/orchestrator.py` (single entrypoint `run_pipeline()`) |
 | Production wrapper (health check, detach, email, auto-resume) | `run_production.sh`, `healthcheck.py`, `send_pipeline_email.py` |
 | Cron scheduling / daily publish cadence | `cron_publish.sh` |
-| Deploy / sync to Pi | `deploy.sh`, `sync_to_pi.sh`, `pull_from_oci.sh` |
+| Deploy / sync to Pi | `sync_to_pi.sh`, `pull_from_oci.sh` |
 | Agents (sequential A2A) | `src/agents/fact_retriever.py`, `story_designer.py`, `observer.py`, `media_producer.py`, `publisher.py` |
 | Pydantic models / checkpoint schema | `src/schemas/state.py`, `a2a.py`, `seed_distribution.py` |
 | LLM client + per-role routing | `src/engine/llm_client.py` |
@@ -28,7 +28,9 @@ Need to change something? Start here, not with a global grep.
 | Grounded-search POC | `poc_grounded_search.py` |
 | MCP servers (external service endpoints) | `mcp_servers/audio_edge/server.py`, `media_cloud/server.py`, `youtube_cloud/server.py` |
 | Video/quality audit of an uploaded video | `run_video_verifier.py`, `src/engine/youtube_video_verifier.py` |
-| Post-publish distribution (seed, Reddit, Shorts) | `src/engine/seed_distributor.py`, `active_thread_seeder.py`, `reddit_browser_poster.py`, `reddit_json_client.py`, `reddit_link_seeder.py`, `reddit_warmup.py`, `post_reddit_links.py`, `cleanup_pi.py`, `src/schemas/seed_distribution.py` |
+| Post-publish distribution (seed, Reddit, Shorts) | `src/engine/seed_distributor.py`, `active_thread_seeder.py`, `reddit_browser_poster.py`, `reddit_json_client.py`, `reddit_link_seeder.py`, `reddit_warmup.py`, `post_reddit_links.py`, `src/schemas/seed_distribution.py` |
+| Post-publish growth (outcome playlists + analytics feedback loop) | `src/agents/publisher.py` (outcome-playlist chaining), `src/engine/analytics_feedback.py`, `run_analytics_feedback.py` |
+| Disk maintenance (host-aware media/log cleanup, space-pressure guard) | `cleanup.py` (cron on OCI + Pi; dashboard `/api/cleanup/run`) |
 | Budget / quota ledgers | `src/engine/run_budget.py` |
 | Realtime provider API usage (fal/Google/OpenRouter): live token/image capture + provider billing pulls + per-run cost attribution (outcome = failed / published / till-upload / aborted / retried_success) | `src/engine/api_usage.py`, `get_api_usage.py` (writes `logs/provider_usage.json`, served via dashboard `/api/usage`; the orchestrator calls `api_usage.begin_run/end_run` for per-run costs; OpenRouter calls are brand-attributed to "buzzdropfeed" via `X-Title` + store their `gen-` ids per run; fal real-cost pull needs a FAL key with Platform API access, OpenRouter `/credits` pull needs a management key `OPENROUTER_MANAGEMENT_KEY`, Google pull = Vertex billing status via ADC) |
 | Dashboard (Rust) | `rust_dashboard/` |
@@ -56,6 +58,10 @@ Need to change something? Start here, not with a global grep.
 - **MediaProducer Testing Invariant**: Because the E2E pipeline run uses `StubMediaProducer` to keep the test hermetic without requiring GPU/FFmpeg/TTS hardware, all helper functions, chart extractors, prompt formatters, and method calls in `src/agents/media_producer.py` MUST be explicitly tested via dedicated unit test cases in `tests/test_hermetic_e2e.py` to prevent untested helper/scope regressions.
 - **Static Integrity & Zero-Regression Gate**: `ruff check src/ mcp_servers/ tests/ *.py --select F821,F822,F823` is enforced in both `tests/test_hermetic_e2e.py` and `healthcheck.py`. Zero undefined variables, unbound locals, or missing imports are tolerated across the codebase. All commits must be clean under `ruff check --select F821,F822,F823` and `python run_tests.py`.
 
+## Post-publish growth (vidIQ playbook)
+- **Outcome-based playlists**: every publish chains the video into the master playlist (`YOUTUBE_PLAYLIST_TITLE`, default "LumenLoop AI Documentaries") PLUS a themed "outcome" playlist grouped by the topic's `audience_type` (`_OUTCOME_PLAYLISTS` in `publisher.py`: tech/business/science/space/history → "AI, Tech & Innovation Deep-Dives"; investor/finance_edu/real_estate → "Finance, Markets & Wealth Stories"; health → "Health, Wellness & Human Science"). The seed comment links the bingeable theme playlist. Gate: `YOUTUBE_AUTO_PLAYLIST=1` (default).
+- **Analytics feedback loop** ("top growth drivers" / "hook retention"): `src/engine/analytics_feedback.py` pulls per-video `views`/`estimatedMinutesWatched`/`averageViewDuration`/`averageViewPercentage`/`subscribersGained` from the YouTube Analytics API v2 (correlated back to the topic via each run's `logs/state_*.json`), persists `logs/analytics_feedback.json`, and computes a normalized **niche signal**. `FactRetriever` applies it as a soft TOPSIS tie-break favouring audiences that historically convert (`get_audience_bias`). Refresh is rate-limited (default 6h, `CSVG_ANALYTICS_REFRESH_MIN_AGE_SEC`, max `CSVG_ANALYTICS_MAX_VIDEOS`) and triggers non-fatally in a background thread at publish; run manually/from cron via `python run_analytics_feedback.py [--force] [--max-videos N]`. Env gates: `CSVG_ANALYTICS_FEEDBACK=1` (default on). Requires the OAuth token to have the `youtubeAnalytics` scope (re-run `get_youtube_token.py`). Served via dashboard `/api/analytics`.
+
 ## Env & secrets
 - `.env` is gitignored; copy `example.env` -> `.env` and fill real keys. NEVER commit `.env`, `token.json`, or `client_secret.json` (YouTube OAuth).
 - LLM fallback chain: primary model -> `LLM_FALLBACK_MODEL` -> `LLM_FALLBACK_MODEL2`. There's NO template/boilerplate fallback — if the LLM is unavailable the run **aborts** rather than emit canned content.
@@ -71,11 +77,11 @@ Need to change something? Start here, not with a global grep.
 - `src/agents/` — sequential A2A agents wired by `orchestrator.py`: `fact_retriever` -> `story_designer` -> `observer` (quality gates + bounded 3-revision **surgical per-shot repair** loop, driving the Observer's `REVISE_SCRIPT` message with state_hash enforcement) -> `media_producer` -> `publisher`. `orchestrator.run_pipeline()` is the single entrypoint.
 - `src/engine/` — stateless/stateful helpers (RAG, TOPSIS, quality_verifier, llm_client, channel_phase_manager, etc.). See the "Where to look" table above for which file owns which concern; otherwise random leaf files; no surprises here.
 - `src/schemas/` — pydantic models (`state.py`, `a2a.py`); `GlobalState` is the checkpoint schema.
-- `mcp_servers/` — three standalone FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi), `media_cloud` (fal/flux visuals + ffmpeg, port 8001), `youtube_cloud` (upload/quota, port 8002). Only `audio_edge` has a committed systemd unit (`kokoro_tts.service`, port 8000, Pi); `media_cloud`/`youtube_cloud` run via `uvicorn.run` (no committed unit; `deploy.sh` only restarts `kokoro_tts`). Add new model/http endpoints here, not in `src/engine`.
+- `mcp_servers/` — three standalone FastAPI apps: `audio_edge` (Kokoro TTS + Whisper .ass, on the Pi), `media_cloud` (fal/flux visuals + ffmpeg, port 8001), `youtube_cloud` (upload/quota, port 8002). Only `audio_edge` has a committed systemd unit (`kokoro_tts.service`, port 8000, Pi); `media_cloud`/`youtube_cloud` run via `uvicorn.run` (no committed unit). Add new model/http endpoints here, not in `src/engine`.
 
 ## Dashboard (Rust) — Runs on Raspberry Pi 5 Edge Node
 - `rust_dashboard/` — zero-dependency (std-only) high-performance Rust web dashboard that **runs on the Raspberry Pi 5 (`csvg_rust_dashboard.service`, port 8080)**. Replaces the deprecated Python `dashboard_server.py` + legacy `index.html`.
-- **Pi Deployment & Build**: Because the Pi is ARM64, `rust_dashboard` is compiled natively on the Pi via `cargo build --release` (`deploy.sh`), and the systemd unit `csvg_rust_dashboard.service` runs under user `jeevanjoshi` with `CSVG_ROOT=/home/jeevanjoshi/buzzdropfeedv2`.
+- **Pi Deployment & Build**: Because the Pi is ARM64, `rust_dashboard` is compiled natively on the Pi via `cargo build --release` (deploy manually: `rsync` the working tree to the Pi, then `cargo build --release` there and restart `csvg_rust_dashboard.service`), and the systemd unit `csvg_rust_dashboard.service` runs under user `jeevanjoshi` with `CSVG_ROOT=/home/jeevanjoshi/buzzdropfeedv2`.
 - **Sync & State Visibility**: During live runs on OCI, `run_production.sh` periodically syncs `logs/pipeline_heartbeat.json`, `logs/pipeline_run.log`, `logs/state_*.json`, and `channel_stats.json` to the Pi via SSH/rsync so the Pi dashboard renders live telemetry, structured logs, published video cards, and pinned seed comments in real time.
 - **Embedded SPA & Endpoints**: Serves a self-contained single-page application (`rust_dashboard/web/index.html`, embedded via `include_str!`) with JSON endpoints: `/api/status` (heartbeat freshness + channel phase stats), `/api/logs` (`pipeline_run.log` tail + `csvg_execution.log`), `/api/published` (`published_topics.json`), `/api/budget` (`logs/run_budget.json`), `/api/runs` (`logs/state_*.json` checkpoints including pinned seed comments and playlist links), and `/api/cron` (bidirectional OCI/Pi crontab sync).
 
@@ -85,7 +91,6 @@ Need to change something? Start here, not with a global grep.
   1. **Audio/TTS Edge**: Kokoro-82M TTS + faster-whisper word alignment (`audio_edge` FastAPI server on port 8000 via `kokoro_tts.service`).
   2. **Dashboard Host**: Rust SPA dashboard server on port 8080 (`csvg_rust_dashboard.service`).
   3. **Residential Reddit Automation**: `reddit_browser_poster.py` / `reddit_warmup.py` running from the Pi's residential IP to avoid datacenter IP bans.
-- `deploy.sh` git-clones/reset-hards the repo to both nodes over SSH, builds the Rust dashboard binary on the Pi, and restarts `kokoro_tts` and `csvg_rust_dashboard` services.
 - `sync_to_pi.sh` rsyncs the working tree to the Pi (excludes logs/media/venv/`rust_dashboard/target/`).
 - `run_production.sh` pushes logs/state/heartbeat to the Pi so the dashboard reflects live pipeline runs.
 

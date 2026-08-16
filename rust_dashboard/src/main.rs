@@ -119,6 +119,7 @@ fn route(root: &str, path: &str, raw_path: &str) -> (u16, &'static str, Vec<u8>)
         "/api/published" => json_response(&api_published(root)),
         "/api/budget" => json_response(&api_budget(root)),
         "/api/usage" => json_response(&api_provider_usage(root)),
+        "/api/analytics" => json_response(&api_analytics(root)),
         "/api/runs" => json_response(&api_runs(root)),
         "/api/seeding" => json_response(&api_seeding(root)),
         "/api/seeding/logs" => json_response(&api_seeding_logs(root)),
@@ -132,6 +133,8 @@ fn route(root: &str, path: &str, raw_path: &str) -> (u16, &'static str, Vec<u8>)
             json_response(&api_cron_update(root, raw_path))
         }
         "/api/healthcheck/run" => json_response(&api_healthcheck_run(root)),
+        "/api/cleanup/run" => json_response(&api_cleanup_run(root, raw_path)),
+        "/api/usage/refresh" => json_response(&api_usage_refresh(root)),
         "/api/pipeline/start" | "/api/pipeline/resume" => json_response(&api_pipeline_control(root, path, raw_path)),
         "/api/pipeline/stop" => json_response(&api_pipeline_stop(root)),
         "/api/seeding/stop" => json_response(&api_seeding_stop(root)),
@@ -609,6 +612,23 @@ fn api_cron_update(_root: &str, raw_path: &str) -> Value {
         ("success", Value::Bool(success)),
         ("error", s(&err)),
     ])
+}
+
+// ── /api/analytics ──────────────────────────────────────────────────────────
+// Analytics feedback loop: per-video growth metrics + niche signal written by
+// src/engine/analytics_feedback.py (FactRetriever's "top growth drivers" bias).
+
+fn api_analytics(root: &str) -> Value {
+    let v = read_json(root, "logs/analytics_feedback.json");
+    match v {
+        Value::Null => obj(&[
+            ("schema", s("analytics_feedback/v1")),
+            ("videos", Value::Arr(Vec::new())),
+            ("niche_signal", obj(&[])),
+            ("captured_at", s("—")),
+        ]),
+        other => other,
+    }
 }
 
 // ── /api/usage ──────────────────────────────────────────────────────────────
@@ -1144,11 +1164,13 @@ fn is_budget_exceeded(root: &str) -> bool {
 
 fn api_healthcheck_run(root: &str) -> Value {
     let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
-    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
-    let python_bin = format!("{}/venv/bin/python", root_dir);
-    let health_script = format!("{}/healthcheck.py", root_dir);
+    // Remote commands run on the OCI master (repo is /home/ubuntu/...), while
+    // local execution runs against the dashboard host's own root.
+    let remote_root = if is_pi { OCI_ROOT_DIR } else { root };
+    let python_bin = format!("{}/venv/bin/python", remote_root);
+    let health_script = format!("{}/healthcheck.py", remote_root);
 
-    let cmd_str = format!("cd {} && ./venv/bin/python healthcheck.py", root_dir);
+    let cmd_str = format!("cd {} && ./venv/bin/python healthcheck.py", remote_root);
     let output = if is_pi {
         std::process::Command::new("ssh")
             .args(&[
@@ -1160,7 +1182,7 @@ fn api_healthcheck_run(root: &str) -> Value {
     } else {
         std::process::Command::new(python_bin)
             .arg(health_script)
-            .current_dir(root_dir)
+            .current_dir(root)
             .output()
     };
 
@@ -1174,6 +1196,77 @@ fn api_healthcheck_run(root: &str) -> Value {
         Err(e) => (false, e.to_string()),
     };
 
+    obj(&[
+        ("success", Value::Bool(success)),
+        ("output", s(&log_out)),
+    ])
+}
+
+// ── /api/cleanup/run ─────────────────────────────────────────────────────────
+// Runs cleanup.py on the OCI master (via ssh oci-prod when the dashboard lives
+// on the Pi). `?force=1` tightens keep-counts (aggressive prune).
+
+const OCI_ROOT_DIR: &str = "/home/ubuntu/buzzdropfeedv2";
+
+fn run_remote_or_local(root: &str, cmd_str: &str) -> (bool, String) {
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let output = if is_pi {
+        std::process::Command::new("ssh")
+            .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", cmd_str])
+            .output()
+    } else {
+        std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(cmd_str)
+            .current_dir(root)
+            .output()
+    };
+    match output {
+        Ok(out) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            (out.status.success(), combined)
+        }
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+fn api_cleanup_run(root: &str, raw_path: &str) -> Value {
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let target_root = if is_pi { OCI_ROOT_DIR } else { root };
+    let mut cmd = format!("cd {} && ./venv/bin/python cleanup.py", target_root);
+    if raw_path.contains("force") {
+        cmd.push_str(" --force");
+    }
+    let (success, log_out) = run_remote_or_local(root, &cmd);
+    obj(&[
+        ("success", Value::Bool(success)),
+        ("output", s(&log_out)),
+    ])
+}
+
+// ── /api/usage/refresh ───────────────────────────────────────────────────────
+// Re-runs get_api_usage.py on the OCI master (keys live there) to re-pull
+// authoritative fal/OpenRouter/Google usage, then rsyncs the refreshed
+// logs/provider_usage.json back to the Pi so the dashboard reflects it.
+
+fn api_usage_refresh(root: &str) -> Value {
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let target_root = if is_pi { OCI_ROOT_DIR } else { root };
+    let cmd = format!("cd {} && ./venv/bin/python get_api_usage.py", target_root);
+    let (success, log_out) = run_remote_or_local(root, &cmd);
+    if is_pi && success {
+        let _ = std::process::Command::new("rsync")
+            .args(&[
+                "-az",
+                &format!("oci-prod:{}/logs/provider_usage.json", OCI_ROOT_DIR),
+                "/home/jeevanjoshi/buzzdropfeedv2/logs/",
+            ])
+            .output();
+    }
     obj(&[
         ("success", Value::Bool(success)),
         ("output", s(&log_out)),

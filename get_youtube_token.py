@@ -8,6 +8,7 @@ def main():
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/youtube.readonly",
         "https://www.googleapis.com/auth/youtube.force-ssl",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
     ]
     client_secret_path = "client_secret.json"
     token_path = "token.json"

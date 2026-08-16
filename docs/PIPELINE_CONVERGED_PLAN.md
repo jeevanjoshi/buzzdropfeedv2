@@ -265,15 +265,14 @@ placeholder audio (`src/agents/media_producer.py`):
   `src/engine`.
 - **Distributed layout:** master pipeline (agents, media_cloud, youtube_cloud) on the OCI cloud
   host; audio/TTS (`audio_edge`, Kokoro, Whisper) on a Raspberry Pi 5 edge node via
-  `AUDIO_EDGE_URL`/`LLAMA_CPP_URL`; `deploy.sh` git-clones/reset-hards to both nodes and restarts
-  services; `sync_to_pi.sh` rsyncs the working tree (excludes logs/media/venv/`rust_dashboard/
-  target/`).
+  `AUDIO_EDGE_URL`/`LLAMA_CPP_URL`; `sync_to_pi.sh` rsyncs the working tree to the Pi (excludes
+  logs/media/venv/`rust_dashboard/target/`).
 - **Dashboard (Rust)** — `rust_dashboard/` (std-only, `cargo build --release`), run as
   `csvg_rust_dashboard.service` (port 8080, `CSVG_ROOT` env). Self-contained SPA
   (`web/index.html` via `include_str!`) + `/api/status`, `/api/logs`, `/api/published`,
   `/api/budget`, `/api/runs`, `/health`. Minimal JSON parser in `src/json.rs`; built per-node
-  (OCI x86 build not pushed to Pi; `deploy.sh` builds on the Pi). Replaces the deprecated Python
-  `dashboard_server.py`.
+  on the Pi via `cargo build --release` (OCI x86 build not pushed to Pi). Replaces the deprecated
+  Python `dashboard_server.py`.
 - **Runtime/generated files** (gitignored, auto-created per run): `logs/state_<pipeline_id>.json`
   (checkpoint/resume), `channel_stats.json` (phase GROWTH/REVENUE/SCALE), `published_topics.json`
   (dedup), `yt_demand_pools.json` + `yt_demand_quota.json` (competitor-demand budget). Large fixed
@@ -352,6 +351,32 @@ enforces exact 1280x720 / 1080x1920, brightness lift, and JPEG ≤2 MB.
   videos).
 - Fallbacks preserve previous behavior: any generation/LLM/API failure degrades to the Flux/cv2
   art path or the extracted-frame cover. Hermetically tested in `case_nano_banana_helpers`.
+
+---
+
+### 1.16 Outcome-Based Playlists + Analytics Feedback Loop (vidIQ growth playbook) — SHIPPED
+
+Two API-verified subscriber-growth features (both non-fatal, env-gated, quota-aware).
+
+- **Outcome-based playlists:** `src/agents/publisher.py` chains every publish into the master
+  playlist (`YOUTUBE_PLAYLIST_TITLE`, default "LumenLoop AI Documentaries") **plus** a themed
+  "outcome" playlist grouped by the topic's `audience_type` (`_OUTCOME_PLAYLISTS`:
+  tech/business/science/space/history → "AI, Tech & Innovation Deep-Dives"; investor/finance_edu/
+  real_estate → "Finance, Markets & Wealth Stories"; health → "Health, Wellness & Human Science").
+  This creates a bingeable subscriber path (discovery → theme playlist → channel), and the seed
+  comment links the theme playlist (not just the master). Outcome playlist IDs/URLs persist on
+  `UploadMetadata.extra_metadata["outcome_playlists"]`. Gated by `YOUTUBE_AUTO_PLAYLIST=1`.
+- **Analytics feedback loop ("top growth drivers" / "hook retention"):**
+  `src/engine/analytics_feedback.py` pulls per-video `views`/`estimatedMinutesWatched`/
+  `averageViewDuration`/`averageViewPercentage`/`subscribersGained` from the YouTube Analytics API
+  v2, correlates each back to its topic via `logs/state_*.json`, persists
+  `logs/analytics_feedback.json`, and computes a normalized **niche signal**. `FactRetriever`
+  applies it as a soft, non-fatal TOPSIS tie-break (`get_audience_bias`, no signal ⇒ no-op) so the
+  channel "doubles down on what works". Refresh is rate-limited (default 6h,
+  `CSVG_ANALYTICS_REFRESH_MIN_AGE_SEC`, max `CSVG_ANALYTICS_MAX_VIDEOS`), fires in a background
+  thread at publish, and can run from cron via `run_analytics_feedback.py [--force] [--max-videos N]`.
+  Requires the `yt-analytics.readonly` OAuth scope (added to `get_youtube_token.py`; re-run the
+  token flow to grant). Served via dashboard `/api/analytics`.
 
 ---
 

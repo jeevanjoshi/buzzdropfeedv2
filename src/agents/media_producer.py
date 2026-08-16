@@ -127,16 +127,105 @@ def _has_numeric_theme(prompt: str) -> bool:
     return any(k in low for k in keywords)
 
 
+# Only these facts may feed the narrative-stats chart fallback: facts that are
+# thematically tied to the SELECTED topic. The RAG verified-facts pool also
+# carries the day's unrelated RSS corpus (e.g. "Samsung Galaxy H1 headphones"),
+# and leaking a few of those headlines into a chart is the off-topic chart leak.
+_TOPIC_CHART_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "by",
+    "from", "that", "this", "these", "those", "was", "were", "is", "are", "its",
+    "it", "as", "at", "be", "been", "being", "has", "have", "had", "not", "but",
+    "up", "down", "over", "under", "than", "into", "about", "after", "their",
+    "they", "his", "her", "you", "your", "we", "our", "who", "what", "when",
+    "how", "where", "which", "new", "two", "one", "becomes", "become",
+}
+
+
+def _topic_relevant_facts(facts: List[Any], topic: Any) -> List[Any]:
+    """Filter the verified-facts pool down to facts about the selected topic.
+
+    A fact is relevant only when it shares distinctive content WORDS with the
+    topic's headline/summary (length >= 4, stopword- and year-filtered) or when
+    it matches >=2 of the topic's keywords. Word-membership (not substring)
+    matching plus a minimum-hit score keeps generic cross-corpus words
+    ("research", "2026", "shows") from dragging unrelated daily news into the
+    chart's fallback data. With no topic (or no terms) we return [] so the chart
+    can never fall back onto unrelated headlines.
+    """
+    if not topic or not facts:
+        return []
+    headline_terms: set = set()
+    keyword_terms: set = set()
+    for kw in (getattr(topic, "keywords", None) or []):
+        for tok in re.split(r"[^a-z0-9]+", str(kw).lower()):
+            if tok.isdigit() or len(tok) < 3:
+                continue
+            keyword_terms.add(tok)
+    for tok in re.split(r"[^a-z0-9]+", str(getattr(topic, "headline", "") or "").lower()):
+        if tok.isdigit() or len(tok) < 5 or tok in _TOPIC_CHART_STOPWORDS:
+            continue
+        headline_terms.add(tok)
+    keyword_terms -= _TOPIC_CHART_STOPWORDS
+    if not headline_terms and not keyword_terms:
+        return []
+    relevant = []
+    for f in facts:
+        f_words = set(
+            re.split(
+                r"[^a-z0-9]+",
+                f"{getattr(f, 'headline', '') or ''} {getattr(f, 'summary', '') or ''}".lower(),
+            )
+        )
+        strong_hits = headline_terms & f_words
+        kw_hits = keyword_terms & f_words
+        if strong_hits or len(kw_hits) >= 2:
+            relevant.append(f)
+    return relevant
+
+
+def _shot_wants_data_chart(shot, chart_spec: Dict[str, Any], clean_narration: str, raw_visual_prompt: str) -> bool:
+    """True only when a shot is actually GROUNDED to render a real data chart.
+
+    A shot carries numeric grounding when its chart_spec has values or its
+    narration makes >=2 numeric claims. Cinematic prompts that merely MENTION
+    charts ("a laptop displaying colorful stock charts", "market graph on a
+    wall") are scene descriptions, not data requests — routing them to a real
+    chart forces the facts/ticker fallback, which leaks unrelated RSS headlines
+    (e.g. Samsung Galaxy) into the visual. LLM-declared matplotlib-chart shots
+    and explicit ``[chart: label]`` tags keep their priority.
+    """
+    v_type = getattr(shot, "visual_type", None)
+    prompt_lower = (raw_visual_prompt or "").lower()
+    if v_type in (VisualType.GIF_MEME, VisualType.GIF_STICKER):
+        return False
+    if v_type == VisualType.MATPLOTLIB_CHART or "[chart:" in prompt_lower:
+        return True
+    if v_type == VisualType.SVG_TICKER or "[svg:" in prompt_lower:
+        return True
+    grounded_numeric = bool(chart_spec and chart_spec.get("values")) or len(
+        _extract_chart_numbers(clean_narration or "")
+    ) >= 2
+    if not grounded_numeric:
+        return False
+    return bool(
+        _has_numeric_theme(raw_visual_prompt or "")
+        or "stock chart" in prompt_lower
+        or "market graph" in prompt_lower
+    )
+
+
 def _derive_chart_data(
     shot,
     chart_spec: Dict[str, Any],
     narration: str,
     prompt: str,
     facts: List[Any],
+    topic: Any = None,
 ) -> Tuple[List[str], List[float], str, str, str]:
     """
     Derives (labels, values, unit, title, chart_type) for a grounded chart visual.
-    Prefers shot.chart_spec; falls back to scanned numbers from narration or verified facts.
+    Prefers shot.chart_spec; falls back to scanned numbers from narration or
+    verified facts RELEVANT to the selected topic (never unrelated daily news).
     """
     if chart_spec and chart_spec.get("values"):
         values = [float(v) for v in chart_spec["values"]]
@@ -160,7 +249,7 @@ def _derive_chart_data(
         if m:
             title = m.group(1).strip().upper()
     elif prompt:
-        words = [w for w in re.findall(r'[A-Za-z0-9]+', prompt) if w.lower() not in _QUERY_NOISE_WORDS]
+        words = [w for w in re.findall(r'[A-Za-z0-9]+', prompt) if w.lower() not in _QUERY_NOISE_WORDS and not w.isdigit()]
         if words:
             title = " ".join(words[:4]).upper()
 
@@ -170,10 +259,10 @@ def _derive_chart_data(
         ctype = "bar" if len(values) <= 4 else "line"
         return labels, values, unit, title, ctype
 
-    # Fallback to facts
+    # Fallback to facts RELEVANT to the selected topic (never unrelated RSS news)
     if facts:
         fact_entries = []
-        for f in facts:
+        for f in _topic_relevant_facts(facts, topic):
             f_text = f"{getattr(f, 'headline', '')} {getattr(f, 'summary', '')}"
             f_nums = _extract_chart_numbers(f_text)
             if f_nums:
@@ -1160,24 +1249,21 @@ class MediaProducerAgent:
             # Check 0: Real, grounded stat chart from RAG data (chart_spec OR
             #             >=2 numeric claims) — renders an annotated matplotlib
             #             line/bar chart with the correct numbers, never the
-            #             silent PIL placeholder.
+            #             silent PIL placeholder. Only shots that carry actual
+            #             numeric grounding become charts: a cinematic prompt
+            #             that merely MENTIONS charts ("laptop displaying
+            #             colorful stock charts") is a scene description, not a
+            #             data request, and must NOT force an off-topic
+            #             facts/ticker fallback (the Samsung-Galaxy chart leak).
+            chart_spec = getattr(shot, "chart_spec", None) or {}
+            grounded_chart = _shot_wants_data_chart(shot, chart_spec, clean_narration, raw_visual_prompt)
             explicit_chart = (
                 v_type == VisualType.MATPLOTLIB_CHART
                 or "[chart:" in prompt_lower
-                or "stock chart" in prompt_lower
-                or "market graph" in prompt_lower
+                or grounded_chart
             )
-            chart_spec = getattr(shot, "chart_spec", None) or {}
-            numeric_route = (
-                v_type in (VisualType.STANDARD_IMAGE, VisualType.MATPLOTLIB_CHART)
-                and (
-                    bool(chart_spec.get("values"))
-                    or len(_extract_chart_numbers(clean_narration)) >= 2
-                    or _has_numeric_theme(raw_visual_prompt)
-                )
-            )
-            if explicit_chart or numeric_route:
-                print(f"Processing real stat chart visual for {shot_key} (spec={bool(chart_spec)}, explicit={explicit_chart})")
+            if explicit_chart:
+                print(f"Processing real stat chart visual for {shot_key} (spec={bool(chart_spec.get('values'))}, explicit={explicit_chart})")
                 try:
                     labels, values, unit, title, ctype = _derive_chart_data(
                         shot=shot,
@@ -1185,6 +1271,7 @@ class MediaProducerAgent:
                         narration=clean_narration,
                         prompt=raw_visual_prompt,
                         facts=getattr(state, "verified_facts", []) or [],
+                        topic=getattr(state, "selected_topic", None),
                     )
                     await generate_dynamic_chart(ChartRequest(
                         title=title[:48],
@@ -1214,8 +1301,10 @@ class MediaProducerAgent:
                 except Exception as gif_err:
                     print(f"Warning: GIF generation failed: {gif_err}. Falling back to normal image rendering.")
 
-            # Check 2: Dynamic Stock/Data Chart segment
-            elif v_type == VisualType.MATPLOTLIB_CHART or "[chart:" in prompt_lower or "stock chart" in prompt_lower or "market graph" in prompt_lower:
+            # Check 2: Dynamic Stock/Data Chart segment (only when the shot is actually
+            #            grounded — never for scene descriptions that merely say
+            #            "stock chart", which would render a meaningless index).
+            elif grounded_chart and (v_type == VisualType.MATPLOTLIB_CHART or "[chart:" in prompt_lower or "stock chart" in prompt_lower or "market graph" in prompt_lower):
                 match = re.search(r'\[chart:\s*([^\]]+)\]', prompt_lower)
                 _explicit_label = match.group(1).strip() if match else ""
                 print(f"Processing AI dynamic data chart segment for {shot_key} (Label: '{_explicit_label or 'market'}')")
@@ -1546,13 +1635,10 @@ class MediaProducerAgent:
             except Exception as arch_err:
                 print(f"Warning: Final archive copy failed: {arch_err}")
 
-        # Generate vertical Shorts clips (free ffmpeg) to drive growth toward YPP
-        try:
-            asset_paths.shorts = self._generate_shorts(final_video_path, n=3)
-            print(f"[MediaProducer] Generated {len(asset_paths.shorts)} Shorts clip(s).")
-        except Exception as e:
-            print(f"Warning: Shorts generation failed: {e}")
-
+        # Shorts clips are produced once, at publish time, by
+        # micro_content_producer (act-aware 9:16 cuts) — the old redundant
+        # 3-cut media_producer pass was removed so each run only encodes the
+        # 2 Shorts it actually uploads.
         state.asset_paths = asset_paths
         state.execution_stage = "MEDIA_PRODUCED"
         return asset_paths
@@ -1671,53 +1757,6 @@ class MediaProducerAgent:
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, (start, end, text) in enumerate(subs, start=1):
                 f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
-
-    def _generate_shorts(self, final_video: str, n: int = 3, seg_len: float = 45.0) -> List[str]:
-        """
-        Cuts 'n' vertical 1080x1920 Shorts clips from the final 16:9 master using
-        ffmpeg (free). Picks ~3 evenly spaced ~45s segments with the master's audio.
-        Returns list of output paths; empty on any error (never breaks the pipeline).
-        """
-        import subprocess
-        if not final_video or not os.path.exists(final_video):
-            return []
-        try:
-            dur = None
-            r = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", final_video],
-                capture_output=True, text=True, timeout=30
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                dur = float(r.stdout.strip())
-        except Exception:
-            dur = None
-        if not dur or dur < 60:
-            return []
-        max_seg = max(15.0, min(seg_len, dur / 2.0))
-        starts = [dur * f for f in (0.18, 0.42, 0.66)][:n]
-        out_dir = os.path.join(self.storage_dir, "shorts")
-        os.makedirs(out_dir, exist_ok=True)
-        paths = []
-        for i, st in enumerate(starts, start=1):
-            out = os.path.join(out_dir, f"short_{i}.mp4")
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", f"{st:.1f}", "-t", f"{max_seg:.1f}",
-                "-i", final_video,
-                "-vf", "crop=ih*9/16:ih,scale=1080:1920,setsar=1",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                "-maxrate", "6M", "-bufsize", "12M",
-                "-c:a", "aac", "-b:a", "128k",
-                "-movflags", "+faststart", out
-            ]
-            try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            except Exception:
-                continue
-            if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 1000:
-                paths.append(out)
-        return paths
 
     async def process(self, state: GlobalState, dummy_frames: bool = False, renderer: Optional[str] = None, crossfade: Optional[float] = None, pad_after_narration: Optional[float] = None) -> A2AMessage:
         """

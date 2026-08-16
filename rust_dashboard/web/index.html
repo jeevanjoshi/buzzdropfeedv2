@@ -391,6 +391,29 @@ async function fetchJ(path){
   return r.json();
 }
 
+// Fire a control endpoint (usage refresh / cleanup) and surface the outcome.
+async function runAction(path, id, confirmMsg){
+  const btn = document.getElementById(id);
+  const fb = document.getElementById(id+'-fb');
+  if(!btn) return;
+  if(confirmMsg && !confirm(confirmMsg)) return;
+  btn.disabled = true;
+  if(fb){ fb.style.color = 'var(--amber)'; fb.textContent = 'running…'; }
+  try{
+    const r = await fetch(path, {cache:'no-store'});
+    const res = await r.json();
+    if(fb){
+      if(res.success){ fb.style.color = 'var(--green)'; fb.textContent = 'ok'; }
+      else { fb.style.color = 'var(--red)'; fb.textContent = 'error: ' + String(res.output||res.error||'').slice(-160); }
+    }
+  }catch(e){
+    if(fb){ fb.style.color = 'var(--red)'; fb.textContent = 'network error'; }
+  }finally{
+    if(btn) btn.disabled = false;
+    setTimeout(loadAll, 1500);
+  }
+}
+
 async function loadAll(){
   try {
     const s0 = await fetchJ('/api/status');
@@ -549,40 +572,62 @@ function budgetPanel(){
 
 function usagePanel(){
   const u = DATA.usage;
-  if(!u || !u.live || !Object.keys(u.live).length){
-    return `<div class="panel"><h3>Provider API usage</h3><div class="empty">No realtime provider usage captured yet. It appears live here once the pipeline talks to fal/Google/OpenRouter (<code>logs/provider_usage.json</code>) — run <code>python3 get_api_usage.py</code> to also pull provider billing APIs.</div></div>`;
+  const actions = `
+    <span style="float:right; display:flex; gap:8px; align-items:center;">
+      <span id="usage-refresh-fb" class="muted" style="font-size:11px"></span>
+      <button id="usage-refresh" class="btn" onclick="runAction('/api/usage/refresh','usage-refresh',null)">${ICONS.bolt} Refresh</button>
+    </span>`;
+  const hasLive = !!(u && u.live && Object.keys(u.live).length);
+  const hasPull = !!(u && u.provider_pull && Object.keys(u.provider_pull).length);
+  if(!u || (!hasLive && !hasPull)){
+    return `<div class="panel"><h3>Provider API usage ${actions}</h3><div class="empty">No provider usage or billing data yet. Press <b>Refresh</b> to pull fal/Google/OpenRouter usage now (it also appears here live while the pipeline runs via <code>logs/provider_usage.json</code>).</div></div>`;
   }
   const live = u.live||{};
   let totIn=0, totOut=0, totImg=0, totEst=0, totCalls=0;
   Object.values(live).forEach(c=>{ totIn+=c.in_tokens||0; totOut+=c.out_tokens||0; totImg+=c.images||0; totEst+=c.est_usd||0; totCalls+=c.calls||0; });
 
   const provLabel = {fal:'fal (visuals)', google:'google (gemini/vertex)', openrouter:'openrouter (llm)'};
-  const rows = Object.entries(live).map(([p,c])=>{
-    const pull = (u.provider_pull||{})[p];
-    let pullTxt = '<span class="muted">no provider pull</span>';
-    if(pull){
-      if(!pull.ok){ pullTxt = `<span style="color:#f87171" title="${esc(pull.error||'')}">provider: ERROR</span>`; }
-      else if(p==='fal'){ pullTxt = `provider: <b>$${num(pull.used_usd)}</b> used · bal $${num(pull.balance_usd)}`; }
-      else if(p==='openrouter'){ pullTxt = `provider: bal <b>$${num(pull.total_credits)}</b> · used <b>$${num(pull.total_usage)}</b>`; }
-      else if(p==='google'){ pullTxt = `vertex billing: <b>${pull.billing_enabled?'enabled':'disabled'}</b>`; }
-    }
-    return `<tr>
-      <td class="mono">${esc(provLabel[p]||p)}</td>
-      <td class="r">${num(c.calls,0)}</td>
-      <td class="r">${num(c.in_tokens,0)}</td>
-      <td class="r">${num(c.out_tokens,0)}</td>
-      <td class="r">${num(c.images,0)}</td>
-      <td class="r">${money(c.est_usd||0)}</td>
-      <td>${pullTxt}</td>
-    </tr>`;
-  }).join('');
+  const pulls = u.provider_pull||{};
+  const falPull = pulls.fal||{};
+  const orPull = pulls.openrouter||{};
+  const googPull = pulls.google||{};
+  const rk = orPull.run_key||{};
+  const ana = orPull.analytics||{};
 
-  const lastDays = Object.entries(u.daily||{}).slice(-7);
-  const dayRows = lastDays.map(([d,provs])=>{
-    let dIn=0,dOut=0,dImg=0,dEst=0;
-    Object.values(provs).forEach(c=>{ dIn+=c.in_tokens||0; dOut+=c.out_tokens||0; dImg+=c.images||0; dEst+=c.est_usd||0; });
-    return `<tr><td class="mono">${esc(d)}</td><td class="r">${num(dIn,0)}</td><td class="r">${num(dOut,0)}</td><td class="r">${num(dImg,0)}</td><td class="r">${money(dEst)}</td></tr>`;
-  }).join('');
+  // ── "used so far" per provider ─────────────────────────────────────────
+  const orUsed = rk.ok ? (rk.usage || rk.usage_monthly || 0) : null;   // key lifetime
+  const falUsed = (falPull.ok && falPull.used_lifetime_usd != null) ? falPull.used_lifetime_usd
+                : (falPull.ok ? falPull.used_usd : null);
+  const googUsed = (live.google||{}).est_usd || 0;
+
+const usedRows = [
+    ['openrouter (buzzdropfeedv2)',
+     orUsed!=null ? `<b>${money(orUsed)}</b>` : '<span class="muted">live only</span>',
+     `${num((live.openrouter||{}).calls||0,0)} calls · ${num((live.openrouter||{}).in_tokens||0,0)} in · ${num((live.openrouter||{}).out_tokens||0,0)} out`],
+    ['fal (visuals)',
+     falUsed!=null ? `<b>${money(falUsed)}</b>` : '<span class="muted">—</span>',
+     `${num((live.fal||{}).calls||0,0)} calls · ${num((live.fal||{}).images||0,0)} imgs`],
+    ['google (gemini/vertex)',
+     `<b>${money(googUsed)}</b>`,
+     `${num((live.google||{}).in_tokens||0,0)} in · ${num((live.google||{}).out_tokens||0,0)} out · ${num((live.google||{}).images||0,0)} img`],
+  ].map(r=>`<tr><td class="mono">${esc(r[0])}</td><td>${r[1]}</td><td class="muted">${r[2]}</td></tr>`).join('');
+
+  // ── balances & limits ─────────────────────────────────────────────────
+  const balanceRows = [];
+  if(falPull.ok && falPull.balance_usd!=null) balanceRows.push(['fal balance', money(falPull.balance_usd)]);
+  if(rk.ok) balanceRows.push(['OpenRouter key .ea4 (monthly limit)',
+    (rk.limit!=null?`${money(rk.limit)} — ${money(rk.limit_remaining||0)} left`:'no limit')]);
+  if(orPull.ok) balanceRows.push(['OpenRouter account credits', money(orPull.total_credits||0)]);
+  if(googPull.ok) balanceRows.push(['Google Vertex billing', `${googPull.billing_enabled?'enabled':'disabled'} ${esc(googPull.project||'')}`]);
+
+  const last7 = [];
+  if(ana && ana.ok && (ana.total_requests||0)>0){
+    last7.push(['openrouter (buzzdropfeedv2)', `${num(ana.total_requests,0)} req`, money(ana.total_cost_usd||0)]);
+  }
+  if(falPull.ok && falPull.used_usd!=null){
+    last7.push(['fal (visuals)', '—', money(falPull.used_usd)]);
+  }
+  const last7Rows = last7.map(r=>`<tr><td class="mono">${esc(r[0])}</td><td class="r">${r[1]}</td><td class="r">${r[2]}</td></tr>`).join('');
 
   const outcomeBadge = (o)=>{
     const c = {published:'#34d399', till_upload:'#22d3ee', failed:'#f87171',
@@ -610,21 +655,27 @@ function usagePanel(){
 
   return `
   <div class="grid">
-    ${card('Live est. $', money(totEst), totCalls+' calls tracked', '#34d399')}
-    ${card('Input tokens', num(totIn,0), 'across all LLM providers', '#60a5fa')}
-    ${card('Output tokens', num(totOut,0), 'real token counts', '#a78bfa')}
-    ${card('Images gen', num(totImg,0), 'fal/google visuals', '#fbbf24')}
+    ${card('OpenRouter used', orUsed!=null?money(orUsed):'—', 'buzzdropfeedv2 key', '#60a5fa')}
+    ${card('fal used', falUsed!=null?money(falUsed):'—', 'lifetime (fal API)', '#fbbf24')}
+    ${card('Google used', money(googUsed), 'live capture only', '#22d3ee')}
+    ${card('Live est. (all)', money(totEst), totCalls+' calls tracked', '#34d399')}
   </div>
-  <div class="panel"><h3>Realtime provider usage</h3>
+  <div class="panel"><h3>Provider usage ${actions}</h3>
     <div class="table-wrapper">
-      <table><thead><tr><th>Provider</th><th class="r">Calls</th><th class="r">In-tokens</th><th class="r">Out-tokens</th><th class="r">Images</th><th class="r">Est. $</th><th>Provider pull</th></tr></thead>
-      <tbody>${rows||'<tr><td colspan="7" class="empty">—</td></tr>'}</tbody></table>
+      <table><thead><tr><th>Provider</th><th>Used so far</th><th>Live captured</th></tr></thead>
+      <tbody>${usedRows||'<tr><td colspan="3" class="empty">—</td></tr>'}</tbody></table>
+    </div>
+  </div>
+  <div class="panel"><h3>Balances &amp; limits</h3>
+    <div class="table-wrapper">
+      <table><thead><tr><th>Item</th><th>Value</th></tr></thead>
+      <tbody>${balanceRows.map(r=>`<tr><td class="mono">${esc(r[0])}</td><td>${r[1]}</td></tr>`).join('')||'<tr><td colspan="2" class="empty">—</td></tr>'}</tbody></table>
     </div>
   </div>
   <div class="panel"><h3>Last 7 days</h3>
     <div class="table-wrapper">
-      <table><thead><tr><th>Day</th><th class="r">In-tokens</th><th class="r">Out-tokens</th><th class="r">Images</th><th class="r">Est. $</th></tr></thead>
-      <tbody>${dayRows||'<tr><td colspan="5" class="empty">—</td></tr>'}</tbody></table>
+      <table><thead><tr><th>Provider</th><th class="r">Units</th><th class="r">Cost</th></tr></thead>
+      <tbody>${last7Rows||'<tr><td colspan="3" class="empty">—</td></tr>'}</tbody></table>
     </div>
   </div>
   <div class="panel"><h3>API cost per run</h3>
@@ -634,6 +685,17 @@ function usagePanel(){
         <th class="r">In-tok</th><th class="r">Out-tok</th><th class="r">Img</th><th class="r">OR ids</th>
       </tr></thead>
       <tbody>${runRows||'<tr><td colspan="8" class="empty">No attributed runs yet — runs appear as the pipeline begins/ends.</td></tr>'}</tbody></table>
+    </div>
+  </div>`;
+}
+
+function cleanupPanel(){
+  return `
+  <div class="panel"><h3>${ICONS.trash} Disk &amp; media maintenance</h3>
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+      <button id="cleanup-run" class="btn btn-danger" onclick="runAction('/api/cleanup/run?force=1','cleanup-run','Run aggressive disk cleanup (keeps 1 run, deletes old per-run media)?')">${ICONS.trash} Run cleanup now</button>
+      <span class="muted" style="font-size:12px">Prunes old per-run media/thumbnails on the OCI host, keeps the newest run(s). Safe: never touches checkpoints, ledgers, or the active run.</span>
+      <span id="cleanup-run-fb" class="muted" style="font-size:11px"></span>
     </div>
   </div>`;
 }
@@ -1196,6 +1258,7 @@ function renderOverview(){
     ${statCards()}
     ${budgetPanel()}
     ${usagePanel()}
+    ${cleanupPanel()}
   `;
 }
 
@@ -1213,6 +1276,7 @@ function renderAnalytics(){
     <div class="panel"><h3>Published Videos</h3>${publishedList()}</div>
     ${budgetPanel()}
     ${usagePanel()}
+    ${cleanupPanel()}
   `;
 }
 

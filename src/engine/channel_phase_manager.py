@@ -82,13 +82,81 @@ def _save_stats_to_disk(stats: Dict[str, Any]) -> None:
         pass
 
 
+def _load_youtube_oauth_credentials():
+    """Load + refresh the channel-owner OAuth credentials from token.json —
+    the same credentials the upload / caption-transcript paths use. Returns
+    None when unavailable (never raises)."""
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        token_path = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
+        if not os.path.exists(token_path):
+            return None
+        creds = Credentials.from_authorized_user_file(token_path)
+        if creds is None:
+            return None
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        if not creds.valid:
+            return None
+        return creds
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _fetch_from_youtube_analytics() -> Dict[str, Any]:
     """
-    Fetches subscriber count, total views, and video count from YouTube Data API.
-    Falls back to environment variables if API is unavailable.
-    Watch hours are NOT available from Data API v3 — uses CHANNEL_WATCH_HOURS env.
+    Fetches subscriber count, total views, and video count, plus lifetime watch
+    hours, for the channel that owns the stored OAuth token (token.json).
+
+    Data sources, in priority order:
+      1. OAuth (channel owner):  channels.list(mine=true) statistics for subs /
+         views / videos, and YouTube Analytics v2 `estimatedMinutesWatched`
+         (lifetime) for real watch hours — the ONLY accurate watch-hours source.
+      2. YouTube Data API v3 key + YOUTUBE_CHANNEL_ID: subs/views/videos (watch
+         hours are NOT available from Data API v3 — falls back to env).
+      3. Environment overrides (CHANNEL_SUBSCRIBERS / CHANNEL_WATCH_HOURS /
+         CHANNEL_VIEWS / CHANNEL_VIDEOS) as a last resort.
     """
-    # 1. Try YouTube Data API v3 (channel statistics)
+    # 1. OAuth — real numbers for the authenticated channel (incl. watch hours).
+    creds = _load_youtube_oauth_credentials()
+    if creds is not None:
+        try:
+            from googleapiclient.discovery import build
+            import datetime as _dt
+            yt = build("youtube", "v3", credentials=creds)
+            resp = yt.channels().list(part="statistics", mine=True).execute()
+            items = resp.get("items", [])
+            if items:
+                stats = items[0].get("statistics", {}) or {}
+                subs = int(stats.get("subscriberCount") or 0)
+                views = int(stats.get("viewCount") or 0)
+                videos = int(stats.get("videoCount") or 0)
+                watch_minutes = 0
+                try:
+                    ya = build("youtubeAnalytics", "v2", credentials=creds)
+                    q = ya.reports().query(
+                        ids="channel==MINE",
+                        startDate="2005-01-01",
+                        endDate=_dt.date.today().isoformat(),
+                        metrics="estimatedMinutesWatched",
+                    ).execute()
+                    rows = q.get("rows") or []
+                    if rows:
+                        watch_minutes = int(rows[0][0] or 0)
+                except Exception:  # noqa: BLE001
+                    watch_minutes = 0
+                watch_hours = round(watch_minutes / 60.0)
+                return {
+                    "subscribers": subs,
+                    "total_watch_hours": watch_hours,
+                    "total_views": views,
+                    "total_videos": videos,
+                }
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 2. YouTube Data API v3 (key + channel id) — no watch hours available here.
     try:
         import googleapiclient.discovery
         api_key = os.getenv("YOUTUBE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -116,7 +184,7 @@ def _fetch_from_youtube_analytics() -> Dict[str, Any]:
     except Exception:
         pass
 
-    # 2. Fall back to environment variable overrides (set manually from YouTube Studio)
+    # 3. Fall back to environment variable overrides (set manually from YouTube Studio)
     subs = int(os.getenv("CHANNEL_SUBSCRIBERS", "0"))
     watch_hours = int(os.getenv("CHANNEL_WATCH_HOURS", "0"))
     views = int(os.getenv("CHANNEL_VIEWS", "0"))
