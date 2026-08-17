@@ -420,7 +420,48 @@ Two API-verified subscriber-growth features (both non-fatal, env-gated, quota-aw
   `CSVG_ANALYTICS_REFRESH_MIN_AGE_SEC`, max `CSVG_ANALYTICS_MAX_VIDEOS`), fires in a background
   thread at publish, and can run from cron via `run_analytics_feedback.py [--force] [--max-videos N]`.
   Requires the `yt-analytics.readonly` OAuth scope (added to `get_youtube_token.py`; re-run the
-  token flow to grant). Served via dashboard `/api/analytics`.
+   token flow to grant). Served via dashboard `/api/analytics`.
+
+### 1.17 Internal Throughline-Coherence Audit (Layer-2 off-topic graft guard) — SHIPPED
+
+**Problem it solves.** An LLM editor can paste an *adjacent* RAG article into the
+script as a stray sentence (the real `csvg-exec-20260817-112032` run grafted a
+StateScoop "Washington state CIO = 'Amazon Prime of government'" line onto the
+US-allies-pick-a-side story). That graft is (a) **in the RAG corpus**, so the
+fact-grounding audit passes it, and (b) **topically adjacent**, so cosine/lexical
+similarity (and a naive "off-topic vs topic-summary" LLM prompt) either miss it or
+over-prune legit different-facet threads. Hard aborting on it is also wrong — it's
+one removable sentence, not a broken script.
+
+**Design (Layer-2, surgical, non-brittle).** `ObserverAgent.audit_internal_coherence`
+(`src/agents/observer.py`) runs *after* fact-grounding inside `evaluate_script`. It
+asks the LLM to judge each sentence against the **rest of the script's own body**
+("foreign to the rest of the script"), not against an external topic summary — this
+self-consistency framing is what stops the over-flagging of corporate/regulatory
+threads that share the same overarching story. Output is a list of
+`Shot #N coherence audit: REMOVE the following off-topic sentence…` violations,
+which the existing bounded revision loop routes to the offending shot for a
+**surgical, state_hash-enforced removal** (every other shot stays bit-identical).
+
+**Robustness.** Gated by `CSVG_COHERENCE_AUDIT` (default `1`); if the LLM is
+unavailable or the call throws, the audit degrades to `[]` so it can **never block
+or false-abort** a run. Model selection reuses the per-role route pin
+(`LLM_ROUTE_COHERENCE`, see §1.17.1) — unset ⇒ default `LLM_MODEL`. Verified by
+`case_internal_coherence_audit` in the hermetic suite (flags only the graft, removes
+only that sentence, re-audit clean, non-target shots untouched).
+
+#### 1.17.1 Per-role LLM route pins (`LLM_ROUTE_*`)
+
+`_route_model` (`src/engine/llm_client.py`) reads `LLM_ROUTE_<ROLE>` so a specific
+model can be pinned per call class. Whitelisted suffixes:
+`_GENERATE`, `_POLISH`, `_REPAIR`, `_CRITIC`, `_COHERENCE`, `_CLASSIFY`. If unset
+(or suffix unrecognized) the call falls back to the default `LLM_MODEL` chain. To run
+the coherence audit on a dedicated model:
+
+```bash
+LLM_ROUTE_COHERENCE=anthropic/claude-3.5-haiku   # optional; default model otherwise
+CSVG_COHERENCE_AUDIT=1                            # on by default
+```
 
 ---
 

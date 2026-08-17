@@ -95,6 +95,14 @@ class FakeLLMClient:
         p = (prompt or "")
         if route == "critic" or "facts verification critic" in p or "factual validation critic" in p:
             return {"violations": []}
+        if route == "coherence":
+            # Off-topic graft detection: if the StateScoop-style leak is present in
+            # the prompt, flag Shot #18; otherwise the script is internally coherent.
+            if _COHERENCE_LEAK_MARKER in p:
+                return {"offending": [{"shot_id": 18,
+                                       "sentence": _COHERENCE_LEAK_SENTENCE}],
+                        "reasoning": "state government IT modernization is unrelated to the script throughline."}
+            return {"offending": [], "reasoning": "coherent"}
         if route == "repair":
             self.repair_calls += 1
             # Repair ONLY Shot #4 with a compliant 95-word narration.
@@ -122,6 +130,26 @@ class FakeLLMClient:
                 for k in range(1, 4)
             ]}
         return SCRIPT_JSON
+
+
+class _CoherenceRepairFakeLLM(FakeLLMClient):
+    """FakeLLM for the coherence surgical-loop test: on 'repair' it strips the
+    StateScoop graft from Shot #18 (the only targeted shot); otherwise mirrors the
+    parent (critic approves, coherence flags on the leak marker)."""
+    def generate_json(self, prompt, system_prompt="", route=None, thinking=None):
+        self.calls.append({"route": route, "thinking": thinking,
+                           "prompt": (prompt or "")[:200]})
+        if route == "coherence":
+            if _COHERENCE_LEAK_MARKER in (prompt or ""):
+                return {"offending": [{"shot_id": 18,
+                                       "sentence": _COHERENCE_LEAK_SENTENCE}],
+                        "reasoning": "foreign"}
+            return {"offending": [], "reasoning": "clean"}
+        if route == "repair":
+            self.repair_calls += 1
+            return {"shots": [{"shot_id": 18, "narration_text": _narr(18)}],
+                    "title": TITLE}
+        return super().generate_json(prompt, system_prompt, route, thinking)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +221,18 @@ SCRIPT_JSON = {
         for i in range(1, 19)
     ],
 }
+
+
+# Off-topic graft used to exercise the internal-coherence audit: a StateScoop-style
+# "Amazon Prime of government" sentence an editor could paste in. Deliberately
+# date/number-free so it triggers ONLY the coherence check (not temporal/numeric
+# gates), isolating the Layer-2 guard under test.
+_COHERENCE_LEAK_SENTENCE = (
+    "The Capital Chief Information Officer wants the state to be the "
+    "'Amazon Prime of government,' taking a whole-of-state approach to "
+    "technology modernization."
+)
+_COHERENCE_LEAK_MARKER = "Amazon Prime of government"
 
 
 def repaired_shot4():
@@ -499,6 +539,74 @@ def case_surgical_revision():
         record("SURGICAL_stale_hash", False, "stale state_hash was NOT rejected")
     except RuntimeError:
         record("SURGICAL_stale_hash", True, "stale state_hash rejected")
+
+
+# ---------------------------------------------------------------------------
+# Case 2b — internal throughline-coherence audit (Layer-2) detects an off-topic
+# graft and the surgical revision loop removes ONLY that sentence, bit-identically
+# preserving every other shot (no regression / over-editing).
+# ---------------------------------------------------------------------------
+def case_internal_coherence_audit():
+    patch_externals()
+    from src.agents.observer import ObserverAgent
+    from src.agents.orchestrator import _bucket_violations
+    from src.agents.story_designer import StoryDesignerAgent
+    from src.schemas.a2a import (A2AMessage, AgentRole, AgentIntent,
+                                 compute_state_hash)
+
+    # Leaked script: clean SCRIPT_JSON with the StateScoop graft in Shot #18.
+    leaked_json = json.loads(json.dumps(SCRIPT_JSON))
+    for sh in leaked_json["shots"]:
+        if sh["shot_id"] == 18:
+            sh["narration_text"] = _narr(18) + " " + _COHERENCE_LEAK_SENTENCE
+    state = GlobalState(pipeline_id="coh-1", timestamp="0")
+    state.selected_topic = TOPIC
+    state.verified_facts = list(VERIFIED_FACTS)
+    state.crawled_content = _canonical_corpus()
+    state.script_data = _script_from_json(leaked_json)
+
+    # 1) The audit ALONE flags exactly Shot #18 (nothing else).
+    fake = FakeLLMClient()
+    obs = ObserverAgent()
+    coh = obs.audit_internal_coherence(state.script_data, fake)
+    ok1 = len(coh) == 1 and "Shot #18" in coh[0] and "coherence audit" in coh[0]
+
+    # 2) Full evaluate_script: the only rejection is the coherence violation
+    #    (fact-grounding/critic/gates do not misfire on this injected script).
+    approved, violations = obs.evaluate_script(
+        state.script_data, state.verified_facts, topic=state.selected_topic,
+        channel_phase="GROWTH", crawled_content=state.crawled_content)
+    coh_v = [v for v in violations if "coherence audit" in v]
+    ok2 = (not approved) and len(coh_v) == 1 and "Shot #18" in coh_v[0]
+
+    # 3) Surgical loop: bucket -> repair (strips the graft from #18) -> re-audit.
+    by_shot, gv = _bucket_violations(violations)
+    target = frozenset(by_shot)
+    fake2 = _CoherenceRepairFakeLLM()
+    sd = StoryDesignerAgent(llm_client=fake2)
+    untouched_before = {s.shot_id: s.narration_text
+                        for s in state.script_data.shots if s.shot_id not in target}
+    msg = A2AMessage(message_id="m-coh", sender=AgentRole.OBSERVER,
+                     target=AgentRole.STORY_DESIGNER, intent=AgentIntent.REVISE_SCRIPT,
+                     payload={"violations": violations},
+                     state_hash=compute_state_hash(state), timestamp="0")
+    repaired = sd.repair_shots(state.script_data, state, by_shot, gv, msg_obs=msg)
+    state.script_data = repaired
+    untouched_after = {s.shot_id: s.narration_text
+                       for s in state.script_data.shots if s.shot_id not in target}
+    ok3 = all(untouched_after[k] == v for k, v in untouched_before.items())
+    shot18 = next(s for s in repaired.shots if s.shot_id == 18)
+    ok4 = _COHERENCE_LEAK_MARKER not in shot18.narration_text
+    # Re-audit the repaired script: coherence violation must be gone.
+    fake3 = FakeLLMClient()
+    coh2 = obs.audit_internal_coherence(state.script_data, fake3)
+    ok5 = len(coh2) == 0
+    record("COHERENCE_audit", ok1,
+           f"direct_flag_shot18_only={ok1}")
+    record("COHERENCE_eval", ok2,
+           f"only_reject_is_coherence={ok2}, coh_v={coh_v}")
+    record("COHERENCE_surgical", ok3 and ok4 and ok5,
+           f"non_target_identical={ok3}, leak_removed={ok4}, reaudit_clean={ok5}")
 
 
 def _script_from_json(j):
@@ -2013,6 +2121,7 @@ def main():
     case_codebase_static_analysis()
     case_happy_path()
     case_surgical_revision()
+    case_internal_coherence_audit()
     case_outline_first()
     case_routing()
     case_a2a_alignment()

@@ -1,6 +1,7 @@
 import uuid
 import datetime
 import re
+import os
 from typing import List, Dict, Any, Tuple
 from src.schemas.state import GlobalState, ScriptData, VerifiedFact
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
@@ -503,6 +504,90 @@ class ObserverAgent:
 
         return violations
 
+    # ---------------------------------------------------------------------------
+    # Internal throughline-coherence audit (Layer-2 guard against off-topic grafts)
+    # ---------------------------------------------------------------------------
+    # The LLM judges each sentence against the REST of the script's own body, so it
+    # isolates foreign digressions (e.g. an RAG article the editor pasted in) that
+    # fact-grounding misses because the graft IS present in the corpus, and that
+    # cosine/lexical checks miss because the graft is topically adjacent. Framed as
+    # internal self-consistency (not an external topic summary) it does NOT prune
+    # legitimate different-facet threads. Degrades to [] on any failure so it never
+    # blocks a run.
+    _COHERENCE_SYSTEM = (
+        "You are a strict INTERNAL coherence editor for a YouTube documentary "
+        "script. The full SCRIPT defines its own subject and throughline — do NOT "
+        "impose an external summary. Your ONLY job is to find sentences that are "
+        "FOREIGN to the world, argument, and narrative established by the REST of "
+        "the script: they introduce a domain, entity, event, or claim that nothing "
+        "else in the script supports and that a viewer would find abruptly "
+        "out-of-place (a digression into an unrelated subject). You must NOT remove "
+        "a sentence merely because it covers a different facet (corporate, "
+        "political, technical, historical) of the SAME overarching story — such "
+        "threads are allowed as long as they recur or connect to the rest. Be "
+        "conservative and surgical: flag ONLY sentences clearly from a completely "
+        "different subject than the script's established body."
+    )
+
+    _COHERENCE_PROMPT = (
+        "FULL SCRIPT (this script defines its own throughline — judge each sentence "
+        "against the REST of this script, not against any external summary):\n"
+        "{script_text}\n\n"
+        "Return STRICTLY this JSON schema (no extra keys, no markdown fences):\n"
+        "{{\n"
+        '  "offending": [\n'
+        '    {{"shot_id": <int>, "sentence": "<verbatim offending sentence text>"}}\n'
+        "  ],\n"
+        '  "reasoning": "<one sentence per flag explaining why it is foreign to the rest of the script>"\n'
+        "}}\n"
+        "If no sentence is foreign to the script's own body, return "
+        '{{"offending": [], "reasoning": "..."}}.\n'
+        "Only include sentences clearly from a different subject than the rest of the script."
+    )
+
+    def _build_coherence_script_text(self, script) -> str:
+        return "\n\n".join(
+            f"[SHOT {s.shot_id}] {s.narration_text}" for s in script.shots
+        )
+
+    def audit_internal_coherence(self, script, llm_client, topic=None) -> List[str]:
+        """LLM throughline-coherence audit. Flags sentences FOREIGN to the rest of
+        the script (off-topic grafts an editor introduced) and returns violation
+        strings routed to the offending shot for surgical removal by the revision
+        loop. Returns [] on any failure (unavailable LLM, parse error, timeout)."""
+        if llm_client is None or not getattr(llm_client, "is_available", lambda: False)():
+            return []
+        try:
+            script_text = self._build_coherence_script_text(script)
+            out = llm_client.generate_json(
+                self._COHERENCE_PROMPT.format(script_text=script_text),
+                system_prompt=self._COHERENCE_SYSTEM,
+                route="coherence",
+                thinking="medium",
+            )
+            if not out:
+                return []
+            offending = out.get("offending") or []
+            shot_ids = {s.shot_id for s in script.shots}
+            violations = []
+            for item in offending:
+                try:
+                    sid = int(item.get("shot_id"))
+                except (TypeError, ValueError):
+                    continue
+                sentence = (item.get("sentence") or "").strip()
+                if sid not in shot_ids or not sentence:
+                    continue
+                violations.append(
+                    f"Shot #{sid} coherence audit: REMOVE the following off-topic "
+                    f"sentence that does not belong to this script's throughline (it "
+                    f"is foreign to the rest of the script): '{sentence}'"
+                )
+            return violations
+        except Exception as e:
+            print(f"Warning: internal coherence audit failed: {e}. Skipping.")
+            return []
+
     def evaluate_script(
         self, script: ScriptData, verified_facts: List[VerifiedFact] = None,
         topic=None, channel_phase: str = "REVENUE", crawled_content: str = "",
@@ -767,6 +852,20 @@ class ObserverAgent:
         if verified_facts:
             fact_violations = self.audit_fact_grounding(script, verified_facts, topic=topic, crawled_content=crawled_content)
             violations.extend(fact_violations)
+
+        # Internal throughline-coherence audit (Layer-2): catches off-topic grafts
+        # that fact-grounding misses (the graft IS in the corpus) and that cosine/
+        # lexical checks miss (topically adjacent). LLM judges each sentence against
+        # the rest of the script's own body, so legitimate different-facet threads
+        # are preserved. Disabled via CSVG_COHERENCE_AUDIT=0; degrades to no-op.
+        if os.getenv("CSVG_COHERENCE_AUDIT", "1").strip().lower() in ("1", "true", "yes"):
+            try:
+                from src.engine.llm_client import LLMClient
+                _coh_llm = LLMClient()
+                coh_violations = self.audit_internal_coherence(script, _coh_llm, topic=topic)
+                violations.extend(coh_violations)
+            except Exception as _e:
+                print(f"Warning: internal coherence audit skipped ({_e}).")
 
         is_approved = len(violations) == 0
         return is_approved, violations

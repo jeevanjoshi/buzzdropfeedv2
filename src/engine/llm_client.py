@@ -62,12 +62,15 @@ class LLMClient:
     # for mechanical rewrites ("repair") or a stronger one for verification
     # ("critic"). Routes fall back to LLM_MODEL when unset. Env keys:
     #   LLM_ROUTE_GENERATE / LLM_ROUTE_POLISH / LLM_ROUTE_REPAIR / LLM_ROUTE_CRITIC
+    #   / LLM_ROUTE_COHERENCE / LLM_ROUTE_CLASSIFY
     @staticmethod
     def _route_model(route: Optional[str]) -> Optional[str]:
         if not route:
             return None
         key = "LLM_ROUTE_" + (route or "").upper().strip()
-        if not key.endswith("_GENERATE") and not key.endswith("_POLISH") and not key.endswith("_REPAIR") and not key.endswith("_CRITIC"):
+        _ROUTE_SUFFIXES = ("_GENERATE", "_POLISH", "_REPAIR", "_CRITIC",
+                           "_COHERENCE", "_CLASSIFY")
+        if not key.endswith(_ROUTE_SUFFIXES):
             return None
         return os.getenv(key)
 
