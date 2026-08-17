@@ -349,32 +349,46 @@ Google's image model. Core module: `src/engine/nano_banana.py`. Gated by
 `CSVG_NANO_BANANA_THUMBNAILS=1` (default) + `GEMINI_API_KEY`; image calls prefer **Vertex AI**
 (billed `GOOGLE_CLOUD_PROJECT`) because the AI-Studio developer key's free-tier image quota is 0.
 
-**Design rules baked into every prompt** (simplicity = 2-3 elements; high-contrast palette that
-pops in light+dark mode; rule-of-thirds with 30-40% negative space; genuine-emotion face;
-native-rendered bold 3-5 word hook with outline/shadow in safe zones). Compliance pass
-enforces exact 1280x720 / 1080x1920, target-driven brightness lift (~mean_lum≥100 so thumbs
-pop in the feed), an unsharp-mask sharpen after the final resize, and JPEG ≤2 MB.
+**Design rules baked into every prompt** (simplicity = ONE focal subject, 2-3 elements;
+high-contrast complementary palette that pops in light+dark mode; rule-of-thirds with 30-40%
+negative space; genuine-emotion face; 2026 mobile-first art-direction block appended to every
+prompt so it reads instantly at ~120px phone-feed size). The bold 3-5 word hook is **burned as
+crisp, Studio-grade PIL typography** by `add_thumbnail_text` (legibility scrim + thick outline +
+accent bar) — the model is instructed to render **NO** text, because image models render text
+badly. Compliance pass enforces exact 1280x720 / 1080x1920, target-driven brightness lift
+(~mean_lum≥100 so thumbs pop in the feed), an unsharp-mask sharpen after the final resize, and
+JPEG ≤2 MB.
 
 **Design diversity (no repeated pattern):** `pick_thumbnail_variant(pipeline_id)` derives a
 DETERMINISTIC design per run from 7 layout templates × 5 color palettes × 2 text styles
 (hero-object / reaction-face / before-after / bold-color-block / question-symbol / minimalist /
 split-subject; red-white / orange-black / neon-blue-pink / yellow-purple / cyan-dark). The
-variant drives the art-prompt builders (`_fallback_prompt_from_meta`, `_llm_art_prompt`),
-the native-text instruction (`_text_render_block`), and the PIL overlay accent color
-(`add_thumbnail_text`), so no two videos repeat the same "yellow text one side, face the
-other" pattern. Force a layout for A/B testing via `CSVG_THUMBNAIL_VARIANT` (e.g.
-`reaction-face`). Output resolution: `CSVG_NANO_BANANA_IMAGE_SIZE` (default 2K; 1K/2K/4K).
+variant drives the art-prompt builders (`_fallback_prompt_from_meta`, `_llm_art_prompt`) and
+the PIL overlay accent color (`add_thumbnail_text`), so no two videos repeat the same "yellow
+text one side, face the other" pattern. Force a layout for A/B testing via
+`CSVG_THUMBNAIL_VARIANT` (e.g. `reaction-face`). Output resolution:
+`CSVG_NANO_BANANA_IMAGE_SIZE` (default 2K; 1K/2K/4K).
+
+**A/B variant set (Studio "Test & Compare"):** opt in with `CSVG_THUMBNAIL_VARIANTS=1`.
+`generate_thumbnail_variants` produces 3 distinct, compliant thumbnails each varying ONE
+strategic axis — emotion-led (`reaction-face`), hero-object (`hero-object`), text-led
+(`bold-color-block`) — burns the hook via `add_thumbnail_text`, and writes the primary to disk
+plus a `thumbnail_variants.json` manifest (hook, axis notes, Studio directions). The media
+producer uploads the primary via `thumbnails.set`; the operator finishes the experiment in
+YouTube Studio → Analytics → Test & Compare with the other two. Non-fatal; thumbnails are a
+nice-to-have.
 
 - **Thematic hook:** `craft_ctr_hook` derives a 3-5 word curiosity-driven hook from the video's
   transcript/narration + facts (never the title verbatim).
-- **Regular video (SHIPPED):** `generate_baked_video_thumbnail` renders the 16:9 design
-  (thematic hook + native text + compliance), used as `asset_paths.thumbnail` and uploaded
-  via `youtube.thumbnails.set` at publish time (`_resumable_upload`, jpeg mimetype). Works.
-- **Shorts (SHIPPED):** `generate_baked_shorts_cover` renders the 9:16 design and
-  `micro_content_producer.generate_shorts` **prepends a 1s cover clip** so the cover IS the
-  Short's first frame at upload. YouTube ignores `thumbnails.set` for Shorts (Google Issue
-  #381127084: 200-OK but never applied) — verified by experiment; baking the first frame is
-  the only way YouTube honors a Shorts cover.
+- **Regular video (SHIPPED):** `generate_baked_video_thumbnail` renders the 16:9 art (no native
+  text) then burns the hook via `add_thumbnail_text`, applies the compliance pass; used as
+  `asset_paths.thumbnail` and uploaded via `youtube.thumbnails.set` at publish time
+  (`_resumable_upload`, jpeg mimetype). Works.
+- **Shorts (SHIPPED):** `generate_baked_shorts_cover` renders the 9:16 art (no native text),
+  burns the hook via `add_thumbnail_text`, then `micro_content_producer.generate_shorts`
+  **prepends a 1s cover clip** so the cover IS the Short's first frame at upload. YouTube ignores
+  `thumbnails.set` for Shorts (Google Issue #381127084: 200-OK but never applied) — verified by
+  experiment; baking the first frame is the only way YouTube honors a Shorts cover.
 - **Link mode (SHIPPED):** `run_nano_banana_link.py <url> --aspect 16:9|9:16|both` analyzes a
   public video link (title/description via `videos.list`, auto-caption transcript via OAuth,
   its own frame as identity reference), generates the design, optionally applies to the video
