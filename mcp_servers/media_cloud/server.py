@@ -809,7 +809,7 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
             return {"status": "fallback_placeholder", "engine": "synthetic_mp4", "path": req.output_mp4_path}
 
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg", "-y", "-nostdin",
             "-loop", "1",
             "-i", req.image_path
         ]
@@ -904,7 +904,27 @@ async def apply_ken_burns_motion(req: KenBurnsRequest):
                 req.output_mp4_path
             ])
 
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        # Retry the (motion) Ken Burns render on timeout. A timeout here is almost
+        # always a stuck/hung ffmpeg (e.g. blocked on stdin when launched under a
+        # supervisor, or a leftover process from a killed run) rather than a real
+        # encode failure, so a fresh attempt is the right recovery. We NEVER fall
+        # back to a static (no-motion) clip: motion is the default and charts opt
+        # out explicitly via `disable_motion`. subprocess kills the child on
+        # TimeoutExpired, so each retry starts clean.
+        MAX_KB_RETRIES = 2
+        res = None
+        for _attempt in range(MAX_KB_RETRIES + 1):
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                break
+            except subprocess.TimeoutExpired:
+                if _attempt < MAX_KB_RETRIES:
+                    print(f"[KenBurns] ffmpeg timed out (attempt {_attempt + 1}/{MAX_KB_RETRIES + 1}); "
+                          f"retrying motion render for {req.output_mp4_path}")
+                    continue
+                print(f"[KenBurns] ffmpeg timed out after {MAX_KB_RETRIES + 1} attempts for "
+                      f"{req.output_mp4_path}; giving up (no static fallback)")
+                raise
         if res.returncode == 0:
             return {"status": "success", "engine": "ffmpeg_ken_burns", "path": req.output_mp4_path}
         else:
