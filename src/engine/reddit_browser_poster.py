@@ -108,6 +108,20 @@ class RedditRotationState:
         self._roll_day()
         return self._data.get("subreddits", {})
 
+    def ban_subreddit_for_links(self, subreddit: str):
+        """Permanent hard stop: a sub that deleted/AutoMod-removed our link
+        comment must never receive another link from us. Recorded independently
+        of ``retire_on_shadowban`` so the seeder actually adapts instead of
+        re-posting into a sub that keeps deleting us."""
+        self._roll_day()
+        subs = self._data.setdefault("subreddits", {})
+        subs.setdefault(subreddit.lower(), {})["link_banned"] = True
+        self._save()
+
+    def is_subreddit_link_banned(self, subreddit: str) -> bool:
+        self._roll_day()
+        return bool(self._data.get("subreddits", {}).get(subreddit.lower(), {}).get("link_banned", False))
+
     def record_posted_thread(self, thread_id: str):
         self._roll_day()
         posted = self._data.setdefault("posted_threads", [])
@@ -388,6 +402,11 @@ class RedditBrowserPoster:
 
     def post_reply(self, thread_id: str, subreddit: str, permalink: str, text: str, force: bool = False, contains_link: Optional[bool] = None) -> bool:
         has_link = contains_link if contains_link is not None else bool("http://" in text or "https://" in text or "youtu.be" in text or "youtube.com" in text)
+        # A sub that has AutoMod-removed our link before will do it again — never
+        # waste the account (or trip a faster shadowban) re-posting there.
+        if has_link and self.state.is_subreddit_link_banned(subreddit):
+            logger.warning(f"[RedditBrowserPoster] r/{subreddit} previously deleted our link (link_banned); skipping.")
+            return False
         account = self._pick_account(contains_link=has_link)
         if not account:
             return False
@@ -421,18 +440,24 @@ class RedditBrowserPoster:
             self.state.record_subreddit(subreddit, verified)
             if verified:
                 self.state.reset_unverified(uid)
-            elif self.settings.get("visibility_check_enabled", True) and self.settings.get("retire_on_shadowban", True):
-                if self.state.record_unverified(uid):
+            else:
+                # The comment was posted but is not visible (AutoMod removal /
+                # shadowban / spam filter). If it carried a link, that sub is now
+                # confirmed hostile to our links — ban it so we never re-post there.
+                if has_link:
+                    self.state.ban_subreddit_for_links(subreddit)
+                if self.settings.get("visibility_check_enabled", True) and self.settings.get("retire_on_shadowban", True):
+                    if self.state.record_unverified(uid):
+                        logger.warning(
+                            f"[RedditBrowserPoster] {self.settings.get('retire_after_unverified', os.getenv('REDDIT_RETIRE_AFTER_UNVERIFIED', '3'))} "
+                            f"consecutive comments unverified for u/{uid}; retiring account."
+                        )
+                        self.state.retire(uid)
+                        return False
                     logger.warning(
-                        f"[RedditBrowserPoster] {self.settings.get('retire_after_unverified', os.getenv('REDDIT_RETIRE_AFTER_UNVERIFIED', '3'))} "
-                        f"consecutive comments unverified for u/{uid}; retiring account."
+                        f"[RedditBrowserPoster] Comment unverified for u/{uid} "
+                        f"(might be AutoMod removal; retiring after sustained failures)."
                     )
-                    self.state.retire(uid)
-                    return False
-                logger.warning(
-                    f"[RedditBrowserPoster] Comment unverified for u/{uid} "
-                    f"(might be AutoMod removal; retiring after sustained failures)."
-                )
             logger.info(f"[RedditBrowserPoster] Comment posted by u/{uid} (visible={verified}).")
             return verified
         except Exception as e:

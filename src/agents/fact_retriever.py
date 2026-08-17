@@ -248,6 +248,67 @@ class FactRetrieverAgent:
             kept.append(cand)
         return kept
 
+    def _verify_winner_audience(self, winner: TopicCandidate) -> TopicCandidate:
+        """
+        Re-label the already-selected winner's audience_type / niche_category using
+        an LLM, correcting keyword-classifier misroutes (e.g. a geopolitics story
+        that the substring matcher tagged as ``finance_edu``).
+
+        This runs AFTER the winner is chosen — it only re-labels the single winner,
+        it never re-runs TOPSIS or picks a different candidate. On any failure
+        (LLM unavailable, empty/garbage output, low confidence, unknown label) it
+        leaves the keyword-derived label intact, so the pipeline never aborts or
+        retries on classification. ~1 LLM call per run.
+        """
+        from src.engine.audience_taxonomy import (
+            AUDIENCE_TAXONOMY, niche_for,
+        )
+        keyword_label = getattr(winner, "audience_type", "general") or "general"
+        try:
+            from src.engine.llm_client import LLMClient
+            llm = LLMClient()
+            taxonomy_desc = "\n".join(
+                f"- {k}: {v['description']}"
+                for k, v in sorted(AUDIENCE_TAXONOMY.items(), key=lambda kv: kv[1]["priority"])
+            )
+            system_prompt = (
+                "You are an audience-classification expert for a YouTube documentary "
+                "channel. Given a news headline and summary, assign the single best "
+                "audience category from the taxonomy below. Be precise: a story about "
+                "geopolitics, war, nuclear threats or international misinformation must be "
+                "'geopolitics', NOT 'finance_edu' or 'general'. Return ONLY valid JSON."
+            )
+            prompt = (
+                f"Taxonomy (audience_type -> description):\n{taxonomy_desc}\n\n"
+                f"Headline: {winner.headline}\n"
+                f"Summary: {winner.summary}\n\n"
+                "Return JSON: {\"audience_type\": str, \"confidence\": float in [0,1], "
+                "\"reason\": str}"
+            )
+            result = llm.generate_json(prompt, system_prompt=system_prompt, route="classify")
+            if not result:
+                return winner
+            label = str(result.get("audience_type", "")).strip().lower()
+            confidence = float(result.get("confidence", 0.0) or 0.0)
+            if label not in AUDIENCE_TAXONOMY:
+                return winner
+            if label in ("blocked", "general") and keyword_label not in ("blocked", "general"):
+                # LLM downgrading a specialised topic to blocked/general is riskier
+                # than the keyword label; keep the keyword label unless very confident.
+                if confidence < 0.9:
+                    return winner
+            if label == keyword_label:
+                return winner
+            if confidence < 0.6:
+                return winner
+            winner.audience_type = label
+            winner.niche_category = niche_for(label)
+            print(f"[FactRetriever] Audience re-labeled by LLM verify: "
+                  f"{keyword_label} -> {label} (conf={confidence:.2f})")
+        except Exception as e:
+            print(f"[FactRetriever] Audience LLM-verify skipped (kept keyword label): {e}")
+        return winner
+
     def _apply_precise_shortlist(self, ranked: List[TopicCandidate]) -> List[TopicCandidate]:
         """Re-order the TOPSIS top-3 by precise per-topic opportunity.
 
@@ -524,6 +585,10 @@ class FactRetrieverAgent:
         if not winner:
             winner = ranked_candidates[0]
 
+        # Re-label the winner's audience/niche via a single LLM verify call (corrects
+        # keyword misroutes; never re-selects or retries — falls back to keyword label).
+        winner = self._verify_winner_audience(winner)
+
         # Persist the decided region so media producer / story designer / revenue
         # forecast all target the SAME market.
         eff_region = region
@@ -545,8 +610,13 @@ class FactRetrieverAgent:
             state.region_market = l2_region if l2_region != "global" else eff_region
             state.region_reason = region_reason or ""
 
-        # Compute revenue forecast for the winning topic (exact market RPM)
-        rev = monetization_optimizer.calculate_revenue_yield(winner, estimated_runtime_mins=13.0, region=eff_region)
+        # Compute revenue forecast for the winning topic (exact market RPM).
+        # Pass channel_stats so the reported forecast is maturity-scaled + flagged
+        # (an unmonetized/new channel no longer shows a $1,800 "realized" forecast).
+        rev = monetization_optimizer.calculate_revenue_yield(
+            winner, estimated_runtime_mins=13.0, region=eff_region,
+            channel_stats=getattr(state, "channel_stats", None),
+        )
         state.revenue_forecast = RevenueForecast(
             predicted_views=rev["predicted_views"],
             estimated_rpm_usd=rev["estimated_rpm_usd"],
@@ -555,6 +625,10 @@ class FactRetrieverAgent:
             total_expected_revenue_usd=rev["total_expected_revenue_usd"],
             audience_type=getattr(winner, "audience_type", "general"),
             niche_category=getattr(winner, "niche_category", "Technology & Artificial Intelligence"),
+            monetization_eligible=rev["monetization_eligible"],
+            maturity_scaled=rev["maturity_scaled"],
+            maturity_factor=rev["maturity_factor"],
+            projected_views_at_scale=rev["projected_views_at_scale"],
         )
 
         # Update Global State

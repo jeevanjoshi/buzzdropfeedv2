@@ -36,8 +36,15 @@ class RevenueForecast(BaseModel):
     midroll_multiplier: float = 0.0
     base_ad_revenue_usd: float = 0.0
     total_expected_revenue_usd: float = 0.0
-    audience_type: str = ""    # "investor" | "finance_edu" | "tech" | "business" | "health" | "science" | "space" | "history" | "blocked"
+    audience_type: str = ""    # audience taxonomy key (see src/engine/audience_taxonomy.py)
     niche_category: str = ""
+    # Maturity-aware reporting: when channel_stats is supplied the forecast is
+    # scaled by channel maturity. ``monetization_eligible`` is False (and revenue
+    # forced to 0) for a channel that is not in the YouTube Partner Program yet.
+    monetization_eligible: bool = True
+    maturity_scaled: bool = False
+    maturity_factor: float = 1.0
+    projected_views_at_scale: float = 0.0  # unscaled, aspirational view estimate
 
 
 class VerifiedFact(BaseModel):

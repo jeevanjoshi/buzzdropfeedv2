@@ -182,21 +182,40 @@ class ActiveThreadSeederEngine:
         posted_subreddits = set()
         retained_count = 0
         target_retained = 15
-        
+        # Minimum topical overlap before we touch a thread. Link drops into
+        # off-topic threads are the #1 AutoMod / self-promo trigger, so we hold
+        # links to strongly-relevant threads and keep warmup (no-link) comments
+        # to at-least-tangentially-relevant ones.
+        _kw_tokens = {str(k).lower() for k in keywords if len(str(k)) >= 4}
+        min_link_rel = int(os.getenv("ACTIVE_SEEDER_MIN_LINK_RELEVANCE", "3"))
+        min_warmup_rel = int(os.getenv("ACTIVE_SEEDER_MIN_WARMUP_RELEVANCE", "1"))
+
         for target_thread in deduped_candidates:
             if retained_count >= target_retained:
                 break
-                
+
             subreddit = target_thread.get("subreddit")
             if not subreddit:
                 continue
-                
+
             if subreddit.lower() in posted_subreddits:
+                continue
+
+            # Topical fit: count distinct topic keywords present in the thread
+            # title + body. Skips blatant self-promo into unrelated discussions.
+            _blob = f"{target_thread.get('title', '')} {target_thread.get('selftext', '')}".lower()
+            _rel = sum(1 for k in _kw_tokens if k in _blob)
+            _floor = min_warmup_rel if self.warmup_mode else min_link_rel
+            if _rel < _floor:
+                logger.info(
+                    f"[ActiveThreadSeeder] Skipping r/{subreddit} (relevance={_rel} < {_floor}): "
+                    f"'{target_thread['title'][:50]}'"
+                )
                 continue
 
             logger.info(
                 f"[ActiveThreadSeeder] Selected target thread ({retained_count + 1}/{target_retained}): "
-                f"r/{subreddit} - '{target_thread['title']}' (ID: {target_thread['id']}, Comments: {target_thread['num_comments']})"
+                f"r/{subreddit} - '{target_thread['title']}' (ID: {target_thread['id']}, Comments: {target_thread['num_comments']}, Relevance: {_rel})"
             )
 
             # 3. Load full comment context
@@ -227,25 +246,14 @@ class ActiveThreadSeederEngine:
                 "}"
             )
 
-            # Link obfuscation to bypass AutoMod
+            # Use a plain, un-obfuscated YouTube short link. Obfuscated variants
+            # (``youtube[dot]com``, zero-width spaces, backticks) are exactly what
+            # AutoMod / Reddit's spam filter are trained to catch — they make a
+            # comment look MORE like spam, not less. A clean link from an
+            # established account in an on-topic thread is far less likely to be
+            # removed.
             video_id = youtube_url.split("v=")[-1].split("&")[0] if "v=" in youtube_url else youtube_url.split("/")[-1]
-            import random
-            link_styles = [
-                f"youtube.com/watch?v={video_id}",
-                f"youtu.be/{video_id}",
-                f"youtube[dot]com/watch?v={video_id}",
-                f"youtube [dot] com / watch?v={video_id}",
-                f"youtu [dot] be / {video_id}",
-                f"youtube(dot)com/watch?v={video_id}",
-                f"youtu(dot)be/{video_id}",
-                f"youtube . com / watch?v={video_id}",
-                f"youtu.be / {video_id}",
-                f"youtube.com/watch?v=\u200b{video_id}",
-                f"`youtube.com/watch?v={video_id}`",
-                f"`youtu.be/{video_id}`",
-                youtube_url
-            ]
-            obfuscated_url = random.choice(link_styles)
+            clean_url = f"https://youtu.be/{video_id}"
 
             prompt = (
                 f"Thread Title: {target_thread['title']}\n"
@@ -266,10 +274,10 @@ class ActiveThreadSeederEngine:
                 prompt += (
                     "CRITICAL: Naturally mention or cite our video breakdown as a source/reference. "
                     "For example: 'I saw a good visual breakdown of this on youtube (url) that explains...' or 'put together a quick visualization of this here: url'. "
-                    "Use the exact URL/reference: {obfuscated_url} but replace or weave the anchor text/reference absolutely naturally. "
+                    "Use the exact URL/reference: {clean_url} but replace or weave the anchor text/reference absolutely naturally. "
                     "You can place the URL reference anywhere in the comment (beginning, middle, or end). "
                     "Do not make the link drop feel forced or spammy. Keep it subtle."
-                ).format(obfuscated_url=obfuscated_url)
+                ).format(clean_url=clean_url)
 
             if not self.llm_client.is_available():
                 logger.warning("[ActiveThreadSeeder] LLM Client is not available. Skipping reply generation.")

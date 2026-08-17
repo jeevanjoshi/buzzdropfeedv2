@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
 from src.schemas.state import TopicCandidate
@@ -178,16 +179,48 @@ class MonetizationYieldOptimizer:
             return 0.97 if "uk" in r else (0.96 if "ca" in r else 0.94)
         return 1.00  # us/uk/ca/au / all / global
 
+    def maturity_view_factor(self, channel_stats: Any) -> float:
+        """
+        Channel-maturity multiplier applied to the *reported* revenue forecast so an
+        unmonetized / brand-new channel doesn't show an aspirational 25k-view,
+        $1,800 forecast as if it were realized.
+
+        - Not monetized (``ypp_unlocked is False``): returns a tiny organic floor
+          (0.05) — ads cannot run, so revenue is ~0 and views are realistically tiny.
+        - Monetized but small: log-scaled on subscriber count, rising from ~0 at a
+          handful of subs to 1.0 by ~100k subs.
+
+        Returns 1.0 when ``channel_stats`` is ``None`` (callers that intentionally
+        want the aspirational ranking value — e.g. the TOPSIS regional-revenue
+        criterion — must pass ``channel_stats=None``).
+        """
+        if channel_stats is None:
+            return 1.0
+        ypp = getattr(channel_stats, "ypp_unlocked", False)
+        if not ypp:
+            return 0.05
+        subs = max(0, int(getattr(channel_stats, "subscribers", 0) or 0))
+        # log curve: ~0 at 1 sub, ~1.0 at 100k subs
+        return min(1.0, math.log10(subs + 10) / math.log10(100_000 + 10))
+
     def calculate_revenue_yield(
-        self, candidate: TopicCandidate, estimated_runtime_mins: float = 13.0, region: str = "all"
+        self, candidate: TopicCandidate, estimated_runtime_mins: float = 13.0,
+        region: str = "all", channel_stats: Any = None
     ) -> Dict[str, float]:
         """
         Calculates total expected ad revenue yield in USD R(i) for a topic candidate.
         Applies niche net-RPM plus audience-locale and seasonal planning multipliers.
+
+        When ``channel_stats`` is provided, the returned forecast is maturity-scaled
+        (see ``maturity_view_factor``) and flagged via ``monetization_eligible`` /
+        ``maturity_scaled`` / ``projected_views_at_scale``. The unscaled aspirational
+        numbers are retained in ``projected_views_at_scale`` for display/contrast.
+        Pass ``channel_stats=None`` (the default) to get the pure aspirational value
+        used by the TOPSIS ranking path, which must NOT be maturity-clamped.
         """
         rpm = self._net_rpm_usd(candidate)  # realistic creator-net RPM for the niche
         ctr_est = 0.08 + (candidate.idi_score * 0.04)  # Estimated CTR between 8% and 12%
-        
+
         predicted_views = self.estimate_predicted_views(
             tvs_score=candidate.tvs_score,
             ctr_score=ctr_est,
@@ -202,14 +235,30 @@ class MonetizationYieldOptimizer:
             * self._locale_multiplier(region) * self._seasonal_multiplier()
         )
 
+        # Maturity-scaled reported forecast (only when an actual channel context is
+        # supplied). The aspirational, unclamped value is preserved for comparison.
+        maturity_factor = self.maturity_view_factor(channel_stats)
+        projected_views_at_scale = round(predicted_views, 0)
+        monetization_eligible = bool(getattr(channel_stats, "ypp_unlocked", False)) if channel_stats is not None else True
+
+        scaled_views = predicted_views * maturity_factor
+        scaled_revenue = total_revenue_yield * maturity_factor
+        if channel_stats is not None and not monetization_eligible:
+            # Ads cannot run pre-YPP: zero realized ad revenue regardless of reach.
+            scaled_revenue = 0.0
+
         return {
-            "predicted_views": round(predicted_views, 0),
+            "predicted_views": round(scaled_views, 0),
             "estimated_rpm_usd": round(rpm, 2),
             "midroll_multiplier": midroll_multiplier,
             "locale_multiplier": self._locale_multiplier(region),
             "seasonal_multiplier": self._seasonal_multiplier(),
-            "base_ad_revenue_usd": round(base_ad_revenue, 2),
-            "total_expected_revenue_usd": round(total_revenue_yield, 2)
+            "base_ad_revenue_usd": round(base_ad_revenue * maturity_factor, 2),
+            "total_expected_revenue_usd": round(scaled_revenue, 2),
+            "monetization_eligible": monetization_eligible,
+            "maturity_scaled": channel_stats is not None,
+            "maturity_factor": round(maturity_factor, 4),
+            "projected_views_at_scale": projected_views_at_scale,
         }
 
     def rank_candidates_by_revenue_pareto(

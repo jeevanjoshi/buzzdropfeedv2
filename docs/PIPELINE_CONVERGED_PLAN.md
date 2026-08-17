@@ -147,23 +147,37 @@ Post-publish distribution to seed early traffic, boost CTR and jumpstart YT reco
    resident MiniLM (`seed_distributor._seed_embedder`, cached under `.hf_cache`); only
    subreddits ≥ `SEED_RELEVANCE_THRESHOLD` (default 0.50) are seeded; TF-IDF char-n-gram
    fallback at floor 0.30 when MiniLM unavailable.
-5. **Active Thread Reply Bot** (`ActiveThreadSeeder`) — injects helpful comments into highly
-   active discussions from the last 24h; LLM writes context-aware replies containing verified
-   facts + a natural YouTube citation at the end. Backend chain: PRAW (`REDDIT_CLIENT_ID` set)
-   → Playwright browser poster → read-only `.json` client. Soft warm-up toggle
-   (`ACTIVE_SEEDER_WARMUP=1`).
-6. **Browser-driven Reddit engagement** (`RedditBrowserPoster`) — Playwright Chromium poster
-   for the Pi that works where `.json`/PRAW are IP-blocked; real Chrome-derived binary
-   (`REDDIT_CHROMIUM_PATH`), persisted login sessions (`logs/reddit_sessions/`), rotated
-   gitignored account pool (`reddit_accounts.json`), RAM/process resource guards so bursts
-   can't OOM the Pi's 4GB, old.reddit form posting, best-effort visibility verification,
-   learns per-subreddit permissiveness, retires shadowbanned accounts
-   (`REDDIT_RETIRE_AFTER_UNVERIFIED`, default 3). State in `logs/reddit_rotation_state.json`.
-   `RedditJsonClient` is a throttled, OAuth-free fallback for discovery/comment context only.
-7. **Pi edge warm-up on publish** (`_trigger_pi_warmup`) — fire-and-forget SSH to the Pi to run
-   `reddit_warmup.py`: low-volume, NO-LINK informative comments from per-domain banks to build
-   account trust. Env: `REDDIT_PI_WARMUP_ON_PUBLISH` (default 1), `REDDIT_WARMUP_COUNT` (default 3).
-   Non-fatal.
+ 5. **Active Thread Reply Bot** (`ActiveThreadSeeder`) — injects helpful comments into highly
+    active discussions from the last 24h; LLM writes context-aware replies containing verified
+    facts + a natural YouTube citation. **Runs on the Pi's residential IP only** — the OCI
+    master serialises `GlobalState` to JSON and SSH-pipes it to `reddit_active_seed.py`
+    (`_trigger_pi_active_seed`, `REDDIT_PI_ACTIVE_SEED` default 1; set `0` to fall back to an
+    in-process OCI run). Links are posted as a clean `https://youtu.be/<id>` — obfuscated
+    variants (`youtube[dot]com`, zero-width spaces) were removed because they are exactly what
+    Reddit's spam filter targets. A topical-relevance gate (`ACTIVE_SEEDER_MIN_LINK_RELEVANCE`,
+    default 3 keyword overlaps; `ACTIVE_SEEDER_MIN_WARMUP_RELEVANCE`, default 1) skips off-topic
+    threads so link drops never read as self-promo. Backend chain: PRAW (`REDDIT_CLIENT_ID` set)
+    → Playwright browser poster → read-only `.json` client. Soft warm-up toggle
+    (`ACTIVE_SEEDER_WARMUP=1`).
+ 6. **Browser-driven Reddit engagement** (`RedditBrowserPoster`) — Playwright Chromium poster
+    for the Pi that works where `.json`/PRAW are IP-blocked; real Chrome-derived binary
+    (`REDDIT_CHROMIUM_PATH`), persisted login sessions (`logs/reddit_sessions/`), rotated
+    gitignored account pool (`reddit_accounts.json`), RAM/process resource guards so bursts
+    can't OOM the Pi's 4GB, old.reddit form posting, best-effort visibility verification,
+    learns per-subreddit permissiveness, retires shadowbanned accounts
+    (`REDDIT_RETIRE_AFTER_UNVERIFIED`, default 3). **Crucially, it now learns from deletions:**
+    when the visibility check shows a posted *link* comment was removed (AutoMod / shadowban /
+    spam filter), it permanently bans that sub for links (`RedditRotationState.ban_subreddit_for_links`,
+    `link_banned` in `logs/reddit_rotation_state.json`) and refuses to ever post a link there again —
+    independent of `retire_on_shadowban` — so the seeder adapts instead of re-spamming subs that
+    keep deleting it. State in `logs/reddit_rotation_state.json`.
+    `RedditJsonClient` is a throttled, OAuth-free fallback for discovery/comment context only.
+ 7. **All Reddit posting is Pi-resident** — datacenter IPs (OCI) get spam-filtered / AutoMod-deleted,
+    so both the no-link warm-up (`_trigger_pi_warmup` → `reddit_warmup.py`) and the active-thread
+    reply bot (`_trigger_pi_active_seed` → `reddit_active_seed.py`) are fired from the publisher via
+    SSH to the Pi and run there. The standalone `reddit_link_seeder.py` / `post_reddit_links.py`
+    linkers are also run on the Pi directly. Env: `REDDIT_PI_WARMUP_ON_PUBLISH` (default 1),
+    `REDDIT_WARMUP_COUNT` (default 3), `REDDIT_PI_ACTIVE_SEED` (default 1). All non-fatal.
 8. **Generic link seeder** (`reddit_link_seeder.py`) — reads ALL published videos from
    `logs/state_*.json` (minus `exclude_video_ids` in `seed_campaigns.json`), discovers active
    threads per topic, matches each to the most relevant published video (keyword overlap +

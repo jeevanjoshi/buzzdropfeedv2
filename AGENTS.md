@@ -1,5 +1,21 @@
 # AGENTS.md
 
+## HY3 Model Operating Instructions (always active)
+
+You are an expert Python systems architect and elite debugger specialized in writing secure, production-grade code using complex, highly nested, or resource-heavy external libraries.
+
+### CRITICAL HY3 ARCHITECTURE & SAFEGUARD INSTRUCTIONS
+1. EXPLICIT LOGICAL STEP (HY3 THINKING MODE): Activate your deep reasoning engine. Before generating any executable python code, perform a comprehensive internal compilation check. Map out import structures, verify module dependency versioning, and dry-run state transformations line-by-line.
+2. STRICT GROUNDEDNESS CONTRACT: Adhere strictly to verified Python documentation and known library specifications. Do not invent arguments, fabricate methods, or assume deprecated syntax works.
+3. CONTEXT ABSOLUTE HALT SAFEGUARD: If you lack the full context of a custom local module, a specific database schema, or an environment configuration required by a library, STOP generating code immediately. Print precisely: "[INSUFFICIENT CONTEXT: NEED SPECIFIC DATA]" and cleanly enumerate the missing pieces you require to proceed safely.
+4. TOKEN EXHAUSTION MITIGATION: Focus generation exclusively on the logic gates, wrappers, or script components that need modification. Do not rewrite massive, unrelated helper functions or boilerplate classes unless structurally vital to the fix.
+
+### PYTHON CODE ARCHITECTURE & LIBRARY HANDLING STANDARD
+- DEFENSIVE PROGRAMMING: Encapsulate all complex library operations (I/O, database sessions, HTTP requests, file parsers, parallel processing pools) within explicit, targeted try/except blocks handling specific library exceptions—never catch-all 'except Exception:'.
+- DETERMINISTIC RESOURCE MANAGEMENT: Enforce strict resource cleanup. Use context managers (`with` statements) or explicit try/finally closures for all network connections, memory mappings, and open handles.
+- COMPREHENSIVE TYPE STRUCTURING: Provide complete, accurate type hints (using the typing or types modules) for all function arguments, return signatures, and complex library dataframes/objects to anchor clarity.
+- VERIFICATION SCRIPT: Always provide a tiny, isolated mock-up script using assertions or print statements so I can safely test your solution locally in a sandbox.
+
 Autonomous 8-stage YouTube storytelling video pipeline (CSVG): RSS -> topic TOPSIS selection -> RAG-grounded 6-act script -> LLM-edited/observed -> TTS + AI visuals + ffmpeg assembly -> YouTube publish. Plain Python scripts, no packaging, no build step. Run everything from the repo root (relative `logs/` paths and `from src...` imports depend on it).
 
 **Design, architecture decisions and feature status (shipped/planned/not-feasible) live in `docs/PIPELINE_CONVERGED_PLAN.md` — the single source of truth.** This file is the operational quick-reference only.
@@ -28,7 +44,7 @@ Need to change something? Start here, not with a global grep.
 | Grounded-search POC | `poc_grounded_search.py` |
 | MCP servers (external service endpoints) | `mcp_servers/audio_edge/server.py`, `media_cloud/server.py`, `youtube_cloud/server.py` |
 | Video/quality audit of an uploaded video | `run_video_verifier.py`, `src/engine/youtube_video_verifier.py` |
-| Post-publish distribution (seed, Reddit, Shorts) | `src/engine/seed_distributor.py`, `active_thread_seeder.py`, `reddit_browser_poster.py`, `reddit_json_client.py`, `reddit_link_seeder.py`, `reddit_warmup.py`, `post_reddit_links.py`, `src/schemas/seed_distribution.py` |
+| Post-publish distribution (seed, Reddit, Shorts) | `src/engine/seed_distributor.py`, `active_thread_seeder.py`, `reddit_active_seed.py` (Pi-side runner for active seeding), `reddit_browser_poster.py`, `reddit_json_client.py`, `reddit_link_seeder.py`, `reddit_warmup.py`, `post_reddit_links.py`, `src/schemas/seed_distribution.py` |
 | Post-publish growth (outcome playlists + analytics feedback loop) | `src/agents/publisher.py` (theme-matched playlist chaining), `src/engine/analytics_feedback.py`, `run_analytics_feedback.py`, `reconcile_playlists.py` (channel playlist audit/cleanup) |
 | Disk maintenance (host-aware media/log cleanup, space-pressure guard) | `cleanup.py` (cron on OCI + Pi; dashboard `/api/cleanup/run`) |
 | Budget / quota ledgers | `src/engine/run_budget.py` |
@@ -92,7 +108,7 @@ Need to change something? Start here, not with a global grep.
 - **Edge node & Dashboard (Raspberry Pi 5)**:
   1. **Audio/TTS Edge**: Kokoro-82M TTS + faster-whisper word alignment (`audio_edge` FastAPI server on port 8000 via `kokoro_tts.service`).
   2. **Dashboard Host**: Rust SPA dashboard server on port 8080 (`csvg_rust_dashboard.service`).
-  3. **Residential Reddit Automation**: `reddit_browser_poster.py` / `reddit_warmup.py` running from the Pi's residential IP to avoid datacenter IP bans.
+  3. **Residential Reddit Automation**: `reddit_browser_poster.py` / `reddit_warmup.py` / `reddit_active_seed.py` running from the Pi's residential IP to avoid datacenter IP bans. **ALL Reddit posting is Pi-resident** — the OCI publisher ships `GlobalState` to the Pi over SSH (`_trigger_pi_warmup` → `reddit_warmup.py`, `_trigger_pi_active_seed` → `reddit_active_seed.py`) and never posts directly; standalone linkers (`reddit_link_seeder.py`, `post_reddit_links.py`) are also run on the Pi. The `RedditBrowserPoster` now permanently bans any subreddit that AutoMod-deletes a link comment (`link_banned` in `logs/reddit_rotation_state.json`) so seeding adapts instead of re-spamming.
 - `sync_to_pi.sh` rsyncs the working tree to the Pi (excludes logs/media/venv/`rust_dashboard/target/`).
 - `run_production.sh` pushes logs/state/heartbeat to the Pi so the dashboard reflects live pipeline runs.
 

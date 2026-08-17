@@ -52,10 +52,13 @@ DEFAULTS = {
         "MIN_FREE_GB": 15.0,
     },
     "pi": {
-        "KEEP_MEDIA_RUNS": 1,
-        "KEEP_FINAL_VIDEOS": 1,
-        "KEEP_SHORTS": 2,
-        "KEEP_VISUAL_CACHE": 2,
+        # The Pi is a dashboard/edge mirror: it never needs regenerable media
+        # (the OCI master is the source of truth). Keep nothing media-heavy so
+        # the SD card doesn't fill from per-run audio/visual/final-video pushes.
+        "KEEP_MEDIA_RUNS": 0,
+        "KEEP_FINAL_VIDEOS": 0,
+        "KEEP_SHORTS": 0,
+        "KEEP_VISUAL_CACHE": 0,
         "KEEP_STATE_FILES": 10,
         "MIN_FREE_GB": 3.0,
     },

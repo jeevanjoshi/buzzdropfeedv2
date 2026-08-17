@@ -7,6 +7,12 @@ from typing import List, Dict, Any, Tuple, Optional
 from src.schemas.state import TopicCandidate, VerifiedFact
 from src.engine.youtube_topic_demand import youtube_topic_demand
 from src.engine.opportunity_score import compute_opportunity
+# Audience/niche taxonomy (single source of truth): classification signals, niche
+# RPM map, descriptions and playlist routing now live in audience_taxonomy.py.
+from src.engine.audience_taxonomy import (
+    AUDIENCE_NICHE_MAP,
+    classify_audience_by_signals,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HIGH-RPM GLOBAL ENGLISH FEEDS ONLY
@@ -101,30 +107,10 @@ ENTERTAINMENT_BLOCK_PATTERNS = [
 RPM_FLOOR = 0.35
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AUDIENCE-TYPE SIGNALS — used to classify topics and route to correct TOPSIS
+# AUDIENCE-TYPE SIGNALS — consolidated in src/engine/audience_taxonomy.py
+# (single source of truth). The hard-block lists below remain here because they
+# are content-safety filters, not audience routing.
 # ─────────────────────────────────────────────────────────────────────────────
-INVESTOR_SIGNALS = [
-    "interest rate", "federal reserve", "fed rate", "inflation", "gdp",
-    "stock", "equity", "bond", "yield", "ipo", "nasdaq", "s&p",
-    "hedge fund", "etf", "crypto", "bitcoin", "investment", "portfolio",
-    "earnings", "revenue", "profit", "market cap", "valuation",
-    "venture capital", "funding round", "series a", "series b",
-]
-TECH_SIGNALS = [
-    "artificial intelligence", " ai ", "machine learning", "llm", "gpt",
-    "gpu", "chip", "semiconductor", "robot", "automation", "saas",
-    "software", "startup", "tech", "quantum", "cloud", "cybersecurity",
-    "biotech", "deeptech",
-]
-BUSINESS_SIGNALS = [
-    "entrepreneur", "ceo", "founder", "acquisition", "merger", "layoff",
-    "strategy", "management", "supply chain", "franchise", "ecommerce",
-    "amazon", "google", "apple", "microsoft", "meta", "tesla",
-]
-HEALTH_SIGNALS = [
-    "wellness", "fitness", "longevity", "nutrition", "mental health",
-    "sleep", "meditation", "yoga", "lifestyle", "habit",
-]
 # YMYL (Your Money or Your Life) MEDICAL content — never auto-produce unattended.
 # Drug/pharma/vaccine/cancer/treatment claims can't be safely fact-checked by the
 # pipeline's audit and carry demonetization + misinformation liability. Hard-blocked
@@ -135,54 +121,6 @@ MEDICAL_LIABILITY_SIGNALS = [
     "diagnos", "therapy", "medication", "illness", "outbreak", "epidemic",
     "antibiotic", "chemotherapy", "cure",
 ]
-HISTORY_SIGNALS = [
-    "history", "historical", "ancient", "empire", "archaeology", "medieval",
-    "dynasty", "century", "civilization", "artifacts", "pharaoh", "roman",
-    "greek", "revolution", "industrial age", "world war", "cold war",
-    "viking", "renaissance", "colony", "independence", "battle of",
-    "heritage", "archaeologist", "excavation", "documentary",
-]
-FINANCE_EDU_SIGNALS = [
-    "compound interest", "how does", "how to invest", "index funds explained",
-    "401k", "ira", "retirement", "budgeting", "credit score", "debt",
-    "savings", "dollar cost averaging", "net worth", "inflation explained",
-    "explained", "for beginners", "financial literacy", "stocks explained",
-    "etf explained", "assets", "liabilities", "passive income",
-]
-SCIENCE_SIGNALS = [
-    " science ", "scientific", "research", "physics", "chemistry", "biology",
-    "genetics", "neuroscience", "laboratory", "experiment", "discovery",
-    "climate change", "nuclear fusion", "particle", "genome", "microscope",
-    "scientist", "peer review", "breakthrough study",
-]
-SPACE_SIGNALS = [
-    "space", "nasa", "isro", "spacex", "satellite", "rocket", "mars", "moon",
-    "jupiter", "orbit", "astronaut", "cosmos", "galaxy", "telescope",
-    "spacecraft", "space station", "exoplanet", "astronomy", "launch vehicle",
-    "stellar", "nebula", "plasma", "space weather",
-]
-REAL_ESTATE_SIGNALS = [
-    "real estate", "mortgage", "housing", "housing market", "home prices",
-    "property", "rent", "rental", "homeowners", "construction",
-    "realtor", "foreclosure", "interest rate mortgage",
-]
-
-# Niche RPM mid-points (USD) used to enrich TopicCandidate
-AUDIENCE_NICHE_MAP = {
-    "investor":     ("Personal Finance & Investing",        17.5),
-    # Finance *education* (concepts only — never picks/calls) pays the highest CPM
-    "finance_edu":  ("Personal Finance Education",         18.0),
-    "tech":         ("Technology & Artificial Intelligence", 16.0),
-    "business":     ("Business & Entrepreneurship",          14.0),
-    # "health" = LOW-RPM lifestyle tag (wellness/fitness). Medical YMYL is hard-blocked.
-    "health":       ("Health & Wellness",                    6.5),
-    "science":      ("Science & Innovation",                13.0),
-    "space":        ("Space & Scientific Innovation",       12.0),
-    "history":      ("History & Documentary",                9.0),
-    "real_estate":  ("Real Estate",                         14.0),
-    "general":      ("Global Trends & Infotainment",          5.5),
-    "blocked":      ("Entertainment",                         1.0),
-}
 
 
 def resolve_trusted_organization_name(url: str) -> str:
@@ -238,26 +176,10 @@ def classify_audience_type(headline: str, summary: str) -> str:
     if any(sig in text for sig in MEDICAL_LIABILITY_SIGNALS):
         return "blocked"
 
-    # Signal-based classification (order = RPM priority)
-    if any(sig in text for sig in INVESTOR_SIGNALS):
-        return "investor"
-    if any(sig in text for sig in FINANCE_EDU_SIGNALS):
-        return "finance_edu"
-    if any(sig in text for sig in REAL_ESTATE_SIGNALS):
-        return "real_estate"
-    if any(sig in text for sig in SPACE_SIGNALS):
-        return "space"
-    if any(sig in text for sig in TECH_SIGNALS):
-        return "tech"
-    if any(sig in text for sig in HISTORY_SIGNALS):
-        return "history"
-    if any(sig in text for sig in BUSINESS_SIGNALS):
-        return "business"
-    if any(sig in text for sig in SCIENCE_SIGNALS):
-        return "science"
-    if any(sig in text for sig in HEALTH_SIGNALS):
-        return "health"
-    return "general"
+    # Signal-based classification (priority order = RPM priority, consolidated in
+    # audience_taxonomy.classify_audience_by_signals so the geopol/keyword routing
+    # can't drift from the niche/RPM/playlist definitions).
+    return classify_audience_by_signals(text)
 
 
 def extract_keywords(text: str) -> List[str]:

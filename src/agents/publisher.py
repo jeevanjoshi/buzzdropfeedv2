@@ -38,33 +38,11 @@ def _is_real_video_id(video_id: Optional[str]) -> bool:
 # Themed outcome-based playlist mapping (vidIQ growth tactic: build bingeable
 # playlists grouped by the topic's audience/niche so the subscriber path
 # (discovery → related playlist → channel) is frictionless within a theme).
-# Keyed by ``TopicCandidate.audience_type``. These MUST match the playlists
-# that already exist on the channel, so the find-or-create in
-# ``upsert_playlist_add_video`` REUSES them instead of minting a fresh playlist
-# every run (which previously produced duplicate/orphan masters).
+# Themed-playlist routing now reads from the consolidated audience taxonomy
+# (src/engine/audience_taxonomy.py), so the (title, description) per audience_type
+# lives in one place and matches the playlists that already exist on the channel.
+# ``_outcome_playlist_for`` resolves via ``playlist_for``.
 # ─────────────────────────────────────────────────────────────────────────────
-_OUTCOME_PLAYLISTS = {
-    "investor":     ("Finance, Markets & Wealth Stories",
-                     "Documentary storytelling on markets, investing, money and the people behind them."),
-    "finance_edu":  ("Finance, Markets & Wealth Stories",
-                     "Documentary storytelling on markets, investing, money and the people behind them."),
-    "real_estate":  ("Finance, Markets & Wealth Stories",
-                     "Documentary storytelling on markets, investing, money and the people behind them."),
-    "tech":     ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "business": ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "science":  ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "health":   ("AI, Tech & Innovation Deep-Dives",
-                 "In-depth documentaries on AI, technology, business and scientific breakthrough stories."),
-    "space":    ("Space, Cosmology & Economic History",
-                 "Documentary deep-dives on space, the cosmos and economic history."),
-    "history":  ("Space, Cosmology & Economic History",
-                 "Documentary deep-dives on space, the cosmos and economic history."),
-    "general":  ("Global Trends & Infotainment",
-                 "Global trends, culture and infotainment documentaries."),
-}
 
 # Optional explicit override: when set, every video is chained into this single
 # playlist title instead of the theme-matched one.
@@ -82,11 +60,11 @@ def _outcome_playlist_for(audience_type: str) -> Optional[tuple]:
     audience_type, or None when the topic has no themed playlist."""
     if os.getenv("YOUTUBE_PLAYLIST_TITLE", "").strip():
         return (_MASTER_PLAYLIST_TITLE.strip(),
-                "Documentary storytelling series on global trends, finance and innovation.")
+                 "Documentary storytelling series on global trends, finance and innovation.")
     if not audience_type:
         return None
-    tpl = _OUTCOME_PLAYLISTS.get(str(audience_type).strip().lower())
-    return tpl if tpl else None
+    from src.engine.audience_taxonomy import playlist_for
+    return playlist_for(audience_type)
 
 
 class PublisherAgent:
@@ -134,6 +112,50 @@ class PublisherAgent:
             return True
         except Exception as e:
             print(f"[PiWarmup] trigger setup failed: {e}")
+            return False
+
+    def _trigger_pi_active_seed(self, state: GlobalState, youtube_url: str) -> bool:
+        """SSH to the Pi edge node and run the active-thread Reddit seeder there
+        (residential IP). The OCI master must NOT post to Reddit directly —
+        datacenter IPs get spam-filtered / AutoMod-deleted. We serialise
+        GlobalState to JSON, ship it over the SSH stdin into a file on the Pi,
+        then run reddit_active_seed.py which reconstructs the state and seeds.
+        Fire-and-forget so publish never blocks. Non-fatal."""
+        import subprocess
+        import threading
+        if os.getenv("REDDIT_PI_ACTIVE_SEED", "1").strip().lower() in ("0", "false", "no"):
+            return False
+        pi_host = os.getenv("PI5_IP", "100.108.116.100")
+        pi_user = os.getenv("PI5_USER", "jeevanjoshi")
+        pi_dir = os.getenv("PI5_TARGET_DIR", "/home/jeevanjoshi/buzzdropfeedv2")
+        try:
+            state_json = state.model_dump_json()
+        except Exception as e:
+            print(f"[PiActiveSeed] could not serialise state: {e}")
+            return False
+        pid = (state.pipeline_id or "run").replace("/", "_")
+        remote = f"{pi_dir}/logs/pi_seed_state_{pid}.json"
+        py = (
+            f"cd {pi_dir} && source venv/bin/activate && "
+            f"cat > {remote} && python reddit_active_seed.py --state {remote} --url {youtube_url}"
+        )
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20",
+               f"{pi_user}@{pi_host}", py]
+        try:
+            devnull = open(os.devnull, "w")
+            def _run():
+                try:
+                    subprocess.run(cmd, input=state_json.encode("utf-8"),
+                                   stdout=devnull, stderr=devnull, timeout=900)
+                except Exception as e:
+                    print(f"[PiActiveSeed] background trigger failed: {e}")
+                finally:
+                    devnull.close()
+            threading.Thread(target=_run, daemon=True).start()
+            print("[PiActiveSeed] launched on the Pi in background (fire-and-forget).")
+            return True
+        except Exception as e:
+            print(f"[PiActiveSeed] trigger setup failed: {e}")
             return False
 
     def _build_seed_comment(self, title: str, state: GlobalState, playlist_url: Optional[str] = None) -> str:
@@ -420,10 +442,17 @@ class PublisherAgent:
             print(f"[SeedDistributor] Notice: {e}")
 
         # 5b. Active Thread Comment/Reply Seeding (Discussion Injection)
+        # MUST run on the Pi's residential IP — datacenter IPs get spam-filtered /
+        # AutoMod-deleted by Reddit. The publisher ships GlobalState to the Pi and
+        # fires the seeder there; it only runs locally if Pi seeding is explicitly
+        # disabled via REDDIT_PI_ACTIVE_SEED=0.
         try:
-            from src.engine.active_thread_seeder import active_thread_seeder
             youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-            await active_thread_seeder.seed_active_discussions(state, youtube_url)
+            if os.getenv("REDDIT_PI_ACTIVE_SEED", "1").strip().lower() not in ("0", "false", "no"):
+                self._trigger_pi_active_seed(state, youtube_url)
+            else:
+                from src.engine.active_thread_seeder import active_thread_seeder
+                await active_thread_seeder.seed_active_discussions(state, youtube_url)
         except Exception as e:
             print(f"[ActiveThreadSeeder] Notice: {e}")
 

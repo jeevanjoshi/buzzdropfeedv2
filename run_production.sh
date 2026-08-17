@@ -337,6 +337,9 @@ if command -v rsync >/dev/null 2>&1; then
         while true; do
             printf '{"running":true,"ts":"%s"}\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "${HB_FILE}"
             rsync -az --exclude '*.onnx' --exclude '*.bin' --exclude '*.mp3' --exclude '*.wav' \
+                --exclude 'media/' --exclude 'final_videos/' --exclude 'shorts/' \
+                --exclude 'baked_shorts/' --exclude 'visual_cache/' \
+                --exclude 'link_thumbnails/' --exclude 'channel_thumbnails/' \
                 -e ssh \
                 logs/ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/logs/" 2>/dev/null
             for f in channel_stats.json published_topics.json; do
@@ -375,6 +378,9 @@ finalize() {
         if command -v rsync >/dev/null 2>&1; then
             mkdir -p logs
             rsync -az --exclude '*.onnx' --exclude '*.bin' --exclude '*.mp3' --exclude '*.wav' \
+                --exclude 'media/' --exclude 'final_videos/' --exclude 'shorts/' \
+                --exclude 'baked_shorts/' --exclude 'visual_cache/' \
+                --exclude 'link_thumbnails/' --exclude 'channel_thumbnails/' \
                 -e ssh \
                 logs/ "${PI5_USER}@${PI5_IP}:${PI5_TARGET_DIR}/logs/" 2>/dev/null \
                 || echo "[WARN] Failed to push logs to Pi" >> "${LOG_FILE}"

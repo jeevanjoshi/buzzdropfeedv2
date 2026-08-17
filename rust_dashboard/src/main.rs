@@ -775,6 +775,16 @@ fn api_runs(root: &str) -> Value {
         let revenue = json::get_path(&v, &["revenue_forecast", "total_expected_revenue_usd"])
             .and_then(string_value)
             .unwrap_or_default();
+        // Maturity-aware reporting: an unmonetized / brand-new channel is NOT
+        // eligible for the forecast revenue (ads can't run yet). Surface the flag
+        // and the unsclaled aspirational view count so the card shows context
+        // instead of presenting a $0 / tiny forecast as if it were realized.
+        let rev_eligible = json::get_path(&v, &["revenue_forecast", "monetization_eligible"])
+            .and_then(string_value)
+            .unwrap_or_else(|| "true".to_string());
+        let projected_views = json::get_path(&v, &["revenue_forecast", "projected_views_at_scale"])
+            .and_then(string_value)
+            .unwrap_or_default();
         let region = v.get_str("region").unwrap_or_default();
         let fact_count = json::get_path(&v, &["verified_facts"])
             .map(|val| match val {
@@ -802,6 +812,8 @@ fn api_runs(root: &str) -> Value {
             ("runtime", s(&runtime)),
             ("shots", s(&shots)),
             ("revenue", s(&revenue)),
+            ("rev_eligible", s(&rev_eligible)),
+            ("projected_views", s(&projected_views)),
             ("region", s(&region)),
             ("fact_count", s(&fact_count)),
             ("pinned_comment", s(&pinned_comment)),
