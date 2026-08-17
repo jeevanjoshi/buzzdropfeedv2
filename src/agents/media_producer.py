@@ -1537,6 +1537,21 @@ class MediaProducerAgent:
                 thumbnail_path = baked_thumb_path
                 print(f"[MediaProducer] Baked native-text thumbnail -> {thumbnail_path}")
                 thumb_baked = True
+                # Optional A/B variant set (Studio "Test & Compare" strategy):
+                # generate distinct variants varying one axis each so the operator
+                # can finish the experiment in YouTube Studio. Gated + non-fatal.
+                if os.getenv("CSVG_THUMBNAIL_VARIANTS", "0").strip().lower() in ("1", "true", "yes"):
+                    try:
+                        from src.engine.nano_banana import generate_thumbnail_variants
+                        _vpaths = generate_thumbnail_variants(
+                            state, hero_scene=thumb_scene, output_dir=self.storage_dir,
+                            aspect_ratio="16:9", reference_frame=_ref)
+                        if _vpaths:
+                            print(f"[MediaProducer] Generated {len(_vpaths)} A/B thumbnail "
+                                  f"variant(s) for Studio Test & Compare "
+                                  f"(see thumbnail_variants.json).")
+                    except Exception as ve:
+                        print(f"[MediaProducer] thumbnail variant generation skipped: {ve}")
             else:
                 raise RuntimeError("nano-banana baked thumbnail returned None")
         except Exception as thumb_err:

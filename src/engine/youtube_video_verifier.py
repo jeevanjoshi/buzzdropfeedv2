@@ -91,11 +91,11 @@ class YouTubeVideoVerifier:
         print(f"[Verifier] Audio downloaded successfully to: {output_path}")
         return output_path
 
-    def get_youtube_subtitles(self, video_id: str) -> List[Dict[str, Any]]:
+    def get_youtube_subtitles(self, video_id: str) -> Any:
         """Retrieves subtitles/captions using youtube-transcript-api."""
         print(f"[Verifier] Fetching subtitles/captions for {video_id}...")
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_list = YouTubeTranscriptApi().list(video_id)
             # Try to fetch English, fallback to auto-generated English, or first available
             try:
                 transcript = transcript_list.find_transcript(['en'])
@@ -460,8 +460,12 @@ Return the response as a valid JSON object matching this schema:
         if not subtitles:
             return {"status": "error", "message": "No subtitles/captions could be found or parsed."}
 
-        # Compile full transcript text for coherence/RAG analysis
-        full_transcript = " ".join([s["text"] for s in subtitles])
+        # Compile full transcript text for coherence/RAG analysis.
+        # API path yields FetchedTranscriptSnippet (attribute `.text`); the
+        # local vtt/ass parsers yield dicts (key `"text"`).
+        full_transcript = " ".join(
+            [str(s.get("text") if isinstance(s, dict) else getattr(s, "text", "")) for s in subtitles]
+        )
         
         # 2. Download and transcribe audio to find actual spoken word timings
         sync_issues = []

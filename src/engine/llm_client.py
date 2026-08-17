@@ -174,6 +174,17 @@ class LLMClient:
                 print(f"[LLMClient] JSON parsing failed. Primary error: {e1}. No curly braces found.")
         return None
 
+    def generate(self, prompt: str, system_prompt: str = "",
+                 route: Optional[str] = None, thinking: Optional[str] = None,
+                 temperature: float = 0.7) -> Optional[str]:
+        """
+        Plain-text completion. Returns the raw model output string (or None).
+        Mirrors the provider dispatch of `generate_json` but without forcing a
+        JSON response format — used for free-form text like comment replies.
+        """
+        return self._generate_raw(prompt, system_prompt=system_prompt, route=route,
+                                  thinking=thinking, json_mode=False, temperature=temperature)
+
     def generate_json(self, prompt: str, system_prompt: str = "",
                       route: Optional[str] = None, thinking: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
@@ -182,6 +193,21 @@ class LLMClient:
         route: per-role model pinning (Point 4) — see LLM_ROUTE_* env keys.
         thinking: "low"|"medium"|"high" — gated reasoning effort for models that
         support OpenRouter `reasoning` (e.g. "critic" route). No-op otherwise.
+        """
+        raw = self._generate_raw(prompt, system_prompt=system_prompt, route=route,
+                                 thinking=thinking, json_mode=True, temperature=0.7)
+        if raw is None:
+            return None
+        return self._clean_and_parse_json(raw)
+
+    def _generate_raw(self, prompt: str, system_prompt: str = "",
+                      route: Optional[str] = None, thinking: Optional[str] = None,
+                      json_mode: bool = True, temperature: float = 0.7) -> Optional[str]:
+        """
+        Core provider dispatch shared by `generate` and `generate_json`.
+        Returns the raw model output text, or None if every provider failed.
+        When `json_mode` is True the JSON response format is requested and the
+        model is instructed to emit JSON; otherwise free-form text is expected.
         """
         preferred_provider = os.getenv("PREFERRED_LLM_PROVIDER", "local").lower()
 
@@ -194,46 +220,40 @@ class LLMClient:
                 
                 # 1. Try OpenAI-compatible chat completions endpoint first
                 url = f"{self.llama_cpp_url}/v1/chat/completions"
-                payload = {
-                    "messages": [
-                        {"role": "system", "content": system_prompt + "\nReturn ONLY valid JSON matching requested schema."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.7
+                messages = [{"role": "system", "content": system_prompt}]
+                if json_mode:
+                    messages[0]["content"] = system_prompt + "\nReturn ONLY valid JSON matching requested schema."
+                payload: Dict[str, Any] = {
+                    "messages": messages + [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
                 }
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
                 res = requests.post(url, json=payload, timeout=timeout)
                 print(f"[LLMClient] Local v1/chat/completions response status: {res.status_code}")
                 if res.status_code == 200:
                     content = res.json()["choices"][0]["message"]["content"]
                     print(f"[LLMClient] Local v1/chat/completions content length: {len(content)}")
-                    parsed = self._clean_and_parse_json(content)
-                    if parsed is not None:
-                        print("[LLMClient] Successfully parsed JSON from chat completions.")
-                        return parsed
-                    else:
-                        print(f"[LLMClient] Failed to parse JSON from chat completions. Raw content starts with: {content[:150]}")
+                    return content
                 else:
                     print(f"[LLMClient] Local v1/chat/completions error body: {res.text}")
 
                 # 2. Fallback to llama-server native /completion endpoint
                 url_native = f"{self.llama_cpp_url}/completion"
+                native_prompt = f"{system_prompt}\n\nUser: {prompt}"
+                if json_mode:
+                    native_prompt += "\n\nOutput strictly valid JSON object:"
                 payload_native = {
-                    "prompt": f"{system_prompt}\n\nUser: {prompt}\n\nOutput strictly valid JSON object:",
+                    "prompt": native_prompt,
                     "stream": False,
-                    "temperature": 0.7
+                    "temperature": temperature
                 }
                 res_native = requests.post(url_native, json=payload_native, timeout=timeout)
                 print(f"[LLMClient] Local /completion response status: {res_native.status_code}")
                 if res_native.status_code == 200:
                     content = res_native.json().get("content", "")
                     print(f"[LLMClient] Local /completion content length: {len(content)}")
-                    parsed = self._clean_and_parse_json(content)
-                    if parsed is not None:
-                        print("[LLMClient] Successfully parsed JSON from native completion.")
-                        return parsed
-                    else:
-                        print(f"[LLMClient] Failed to parse JSON from native completion. Raw content starts with: {content[:150]}")
+                    return content
                 else:
                     print(f"[LLMClient] Local /completion error body: {res_native.text}")
             except Exception as e:
@@ -256,16 +276,20 @@ class LLMClient:
 
             transient_status = {408, 429, 500, 502, 503, 504}
             for model in models:
-                payload = {
+                cloud_messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+                if json_mode:
+                    cloud_messages[0]["content"] = system_prompt + "\nReturn ONLY valid JSON matching requested schema."
+                payload: Dict[str, Any] = {
                     "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt + "\nReturn ONLY valid JSON matching requested schema."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.7,
+                    "messages": cloud_messages,
+                    "temperature": temperature,
                     "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "8192"))
                 }
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
                 # Gated reasoning knob: only applies to models that honour OpenRouter
                 # `reasoning` (gemini-*-thinking, deepseek-reasoner…). Env-gated so
                 # no model behaviour changes unless explicitly requested.
@@ -324,20 +348,18 @@ class LLMClient:
                             time.sleep(backoff)
                             continue  # transient model error -> retry, then next model
 
-                        parsed = self._clean_and_parse_json(content)
-                        if parsed is not None:
-                            _record_llm_usage("openrouter", model, data.get("usage"),
-                                              gen_id=data.get("id"))
-                            logger.info(
-                                "LLM_CALL",
-                                f"{model} OK status {response.status_code}, len {len(content)}, finish_reason: {finish_reason}",
-                                component="LLM_CLIENT",
-                                extra_data={"api":"openrouter_chat_completions","model":model,
-                                            "url":self.base_url,"status":response.status_code,
-                                            "finish_reason":finish_reason,"latency_ms":latency_ms,
-                                            "prompt":_trunc(prompt),"system_prompt":_trunc(system_prompt,800),
-                                            "response":_trunc(content,4000),"retry":retry_idx+1})
-                            return parsed
+                        _record_llm_usage("openrouter", model, data.get("usage"),
+                                          gen_id=data.get("id"))
+                        logger.info(
+                            "LLM_CALL",
+                            f"{model} OK status {response.status_code}, len {len(content)}, finish_reason: {finish_reason}",
+                            component="LLM_CLIENT",
+                            extra_data={"api":"openrouter_chat_completions","model":model,
+                                        "url":self.base_url,"status":response.status_code,
+                                        "finish_reason":finish_reason,"latency_ms":latency_ms,
+                                        "prompt":_trunc(prompt),"system_prompt":_trunc(system_prompt,800),
+                                        "response":_trunc(content,4000),"retry":retry_idx+1})
+                        return content
                         logger.warning("LLM_CALL", f"JSON parse failed from '{model}' (finish_reason={finish_reason})",
                                        component="LLM_CLIENT",
                                        extra_data={"model":model,"finish_reason":finish_reason,
@@ -383,9 +405,10 @@ class LLMClient:
                         client = genai.Client(http_options=genai_types.HttpOptions(api_version="v1"))
                         
                         config = genai_types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.7,
+                            temperature=temperature,
                         )
+                        if json_mode:
+                            config.response_mime_type = "application/json"
                         if system_prompt:
                             config.system_instruction = system_prompt
                         
@@ -397,20 +420,18 @@ class LLMClient:
                         latency_ms = int((time.time() - t0) * 1000)
                         content = getattr(response, "text", "") or ""
 
-                        parsed = self._clean_and_parse_json(content)
-                        if parsed is not None:
-                            _record_llm_usage("google", native_model or model,
-                                              getattr(response, "usage_metadata", None))
-                            logger.info(
-                                "LLM_CALL",
-                                f"Vertex AI {native_model} OK, len {len(content)}",
-                                component="LLM_CLIENT",
-                                extra_data={"api": "vertex_ai", "model": native_model,
-                                            "latency_ms": latency_ms, "prompt": _trunc(prompt),
-                                            "system_prompt": _trunc(system_prompt, 800),
-                                            "response": _trunc(content, 4000), "retry": retry_idx + 1}
-                            )
-                            return parsed
+                        _record_llm_usage("google", native_model or model,
+                                          getattr(response, "usage_metadata", None))
+                        logger.info(
+                            "LLM_CALL",
+                            f"Vertex AI {native_model} OK, len {len(content)}",
+                            component="LLM_CLIENT",
+                            extra_data={"api": "vertex_ai", "model": native_model,
+                                        "latency_ms": latency_ms, "prompt": _trunc(prompt),
+                                        "system_prompt": _trunc(system_prompt, 800),
+                                        "response": _trunc(content, 4000), "retry": retry_idx + 1}
+                        )
+                        return content
 
                         logger.warning("LLM_CALL", f"JSON parse failed from Vertex '{native_model}'",
                                        component="LLM_CLIENT",
@@ -453,9 +474,10 @@ class LLMClient:
                         client = genai.Client(api_key=gemini_key, vertexai=False, enterprise=False)
                         
                         config = genai_types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.7,
+                            temperature=temperature,
                         )
+                        if json_mode:
+                            config.response_mime_type = "application/json"
                         if system_prompt:
                             config.system_instruction = system_prompt
                         
@@ -467,20 +489,18 @@ class LLMClient:
                         latency_ms = int((time.time() - t0) * 1000)
                         content = getattr(response, "text", "") or ""
 
-                        parsed = self._clean_and_parse_json(content)
-                        if parsed is not None:
-                            _record_llm_usage("google", native_model or model,
-                                              getattr(response, "usage_metadata", None))
-                            logger.info(
-                                "LLM_CALL",
-                                f"Native Gemini {native_model} OK, len {len(content)}",
-                                component="LLM_CLIENT",
-                                extra_data={"api": "gemini_native", "model": native_model,
-                                            "latency_ms": latency_ms, "prompt": _trunc(prompt),
-                                            "system_prompt": _trunc(system_prompt, 800),
-                                            "response": _trunc(content, 4000), "retry": retry_idx + 1}
-                            )
-                            return parsed
+                        _record_llm_usage("google", native_model or model,
+                                          getattr(response, "usage_metadata", None))
+                        logger.info(
+                            "LLM_CALL",
+                            f"Native Gemini {native_model} OK, len {len(content)}",
+                            component="LLM_CLIENT",
+                            extra_data={"api": "gemini_native", "model": native_model,
+                                        "latency_ms": latency_ms, "prompt": _trunc(prompt),
+                                        "system_prompt": _trunc(system_prompt, 800),
+                                        "response": _trunc(content, 4000), "retry": retry_idx + 1}
+                        )
+                        return content
 
                         logger.warning("LLM_CALL", f"JSON parse failed from native '{native_model}'",
                                        component="LLM_CLIENT",

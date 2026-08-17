@@ -403,6 +403,18 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
         palette = v.get("palette") or {}
         accent = palette.get("accent") or (255, 59, 48)
 
+        # Localized legibility scrim: a soft semi-transparent dark plate behind
+        # the text block so the hook stays readable over ANY art tone (the same
+        # trick Studio-grade thumbnails use), without darkening the whole frame.
+        pad = max(int(fsize * 0.18), 12)
+        plate = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        pd = ImageDraw.Draw(plate)
+        pd.rounded_rectangle([x0 - pad, y0 - pad, x0 + tw + pad, y0 + th + pad],
+                             radius=max(int(fsize * 0.22), 16),
+                             fill=(8, 10, 14, 150))
+        plate = plate.filter(ImageFilter.GaussianBlur(6))
+        base = Image.alpha_composite(base, plate)
+
         # Soft blurred drop shadow separates the glyphs on any art tone.
         sh = Image.new("RGBA", base.size, (0, 0, 0, 0))
         sd = ImageDraw.Draw(sh)
@@ -414,9 +426,9 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
 
         # Ultra-bold reach: thick dark outline + same-color second pass.
         d.text((x0, y0), hook, font=font, fill=(255, 255, 255, 255),
-               stroke_width=12, stroke_fill=(10, 12, 16, 255))
+                stroke_width=12, stroke_fill=(10, 12, 16, 255))
         d.text((x0, y0), hook, font=font, fill=(255, 255, 255, 255),
-               stroke_width=4, stroke_fill=(255, 255, 255, 255))
+                stroke_width=4, stroke_fill=(255, 255, 255, 255))
 
         # 10% accent bar (60-30-10 color rule) — palette-driven, not always yellow.
         bar_w = max(int(tw * 0.5), 110)
@@ -483,11 +495,13 @@ def comply_thumbnail(data: Optional[bytes], aspect_ratio: str = "16:9"):
         img = ImageEnhance.Color(img).enhance(1.12)
         img = ImageEnhance.Brightness(img).enhance(1.02)
 
-        # Mild unsharp mask after the final resize to offset upscale softness
-        # (model often returns 1K art upscaled to the thumbnail target).
+        # Unsharp mask after the final resize to offset upscale softness and
+        # keep edges crisp at feed size (model often returns 1K art upscaled to
+        # the thumbnail target). Tuned strong-but-safe: too high percent adds
+        # noise, too low leaves it soft.
         try:
             from PIL import ImageFilter
-            img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=90, threshold=3))
+            img = img.filter(ImageFilter.UnsharpMask(radius=3, percent=150, threshold=2))
         except Exception:
             pass
 
@@ -584,8 +598,52 @@ def _shorten(text: str, limit: int = 90) -> str:
     return text
 
 
+def _ref_note() -> str:
+    """Instruction appended when a real reference frame is supplied so the model
+    preserves subject identity (the 2026 'hybrid face' rule — keep the real
+    texture/asymmetry, only build the scene around it; never plasticize)."""
+    return (
+        "A REAL reference photo/frame of the subject is supplied — preserve its "
+        "identity, natural skin texture and asymmetry; only enhance lighting, "
+        "color grade and the surrounding scene. Do NOT plasticize, smooth, or "
+        "alter the subject's features."
+    )
+
+
+def _art_direction_block(aspect_ratio: str, variant: Optional[Dict[str, Any]] = None,
+                         reference: bool = False) -> str:
+    """Standardised 2026 high-CTR, mobile-first art direction appended to every
+    art prompt. Distilled from current A/B research (vidIQ/Thumby 2026): one
+    focal subject 30-50% of frame, complementary high-contrast palette (avoid
+    clipped pure red/white), sticker-effect lighting, natural non-plastic faces,
+    rule-of-thirds, safe zones, legible at 120px on a phone."""
+    is_short = aspect_ratio == "9:16"
+    safe = (
+        "top-center; keep the bottom 20% and right 15% empty for the "
+        "engagement/avatar UI"
+        if is_short else
+        "upper-left; keep the bottom-right corner (duration stamp) and the "
+        "bottom edge (title) clear"
+    )
+    ref = _ref_note() if reference else ""
+    return (
+        "ART DIRECTION (2026 high-CTR, mobile-first): ONE single dominant focal "
+        "subject filling 30-50% of the frame, placed on a rule-of-thirds "
+        f"intersection; everything else is clean negative space. Complementary "
+        "high-contrast palette (e.g. blue/orange, cyan/magenta, yellow/violet) — "
+        "avoid pure red #FF0000 and pure white #FFFFFF (they clip under YouTube "
+        "compression). Sticker-effect lighting: warm key light (~3500K) on the "
+        "subject, cool background (~6000K), a thin cyan or magenta rim light on "
+        "the silhouette, teal-orange split-tone grade across the frame. For "
+        "people, a genuine, closed-mouth, determined or curious expression (NOT a "
+        "wide-eyed shock face) with natural, non-plastic skin. Keep load-bearing "
+        f"elements in the LEFT two-thirds; reserve {safe} for future on-image "
+        "text. It MUST read instantly at 120px wide on a phone feed. " + ref
+    )
+
+
 def _fallback_prompt_from_meta(meta: Dict[str, Any], aspect_ratio: str = "16:9",
-                               variant: Optional[Dict[str, Any]] = None) -> str:
+                                variant: Optional[Dict[str, Any]] = None) -> str:
     """Deterministic high-CTR art prompt when the LLM analysis pass is
     unavailable. Mirrors the pipeline composition rules (rule-of-thirds,
     no-text guard, human-emotion face hook) parameterized by aspect ratio and a
@@ -600,7 +658,7 @@ def _fallback_prompt_from_meta(meta: Dict[str, Any], aspect_ratio: str = "16:9",
     v = variant or {}
     tmpl = v.get("template") or {}
     pal = v.get("palette") or {}
-    art_color = pal.get("art") or "bright, saturated, high-contrast colors"
+    art_color = pal.get("art") or "bright, saturated, high-contrast complementary colors"
     template_desc = tmpl.get("prompt") or (
         "place the main subject on a grid intersection and leave 30-40% of the frame "
         "as clean negative space reserved for the text hook"
@@ -613,25 +671,27 @@ def _fallback_prompt_from_meta(meta: Dict[str, Any], aspect_ratio: str = "16:9",
         framing = (
             f"Vertical 9:16 portrait YouTube Shorts cover, 1080x1920. Composition: {template_desc}; "
             f"leave 30-40% clean negative space in {safe_zone} reserved for the bold text hook. "
-            f"COLOR: {art_color}. GENUINE EMOTION — one expressive face with a clear reaction "
-            "(curiosity, shock, or a problem-to-solve), never a blank stare. Minimal background "
+            f"COLOR: {art_color}. ONE clear focal subject (a real object, scene, or a single genuine "
+            "human face with a clear reaction), never a blank stare. Minimal background "
             f"detail, no clutter — instantly readable at phone-feed size."
         )
     else:
         framing = (
             f"Widescreen 16:9 landscape YouTube thumbnail, 1280x720. Composition: {template_desc}; "
             f"leave 30-40% clean negative space in {safe_zone} reserved for the bold text overlay, "
-            f"never dead-centered. COLOR: {art_color}. GENUINE EMOTION — one expressive face with "
-            f"a clear reaction (curiosity, shock, or a problem-to-solve), never a blank stare. "
+            f"never dead-centered. COLOR: {art_color}. ONE clear focal subject (a real object, scene, "
+            "or a single genuine human face with a clear reaction), never a blank stare. "
             f"Minimal background detail, no clutter — instantly readable at postage-stamp size."
         )
     ctx = f" Theme reference: {desc}." if desc else ""
+    direction = _art_direction_block(aspect_ratio, variant=v)
     return (
         f"{framing} Subject: {subject}. Art direction: {scene}.{ctx} "
         "Monumental, high-production cinematic realism, dramatic rim "
         "lighting, ultra high contrast, vivid vibrant colors. "
         "Keep the on-screen subject visually consistent with the video's own "
         "frame. "
+        f"{direction} "
         "Absolutely no text, no words, no letters, no numbers, no typography, "
         "no watermark, no logo, no UI overlay."
     )
@@ -666,21 +726,23 @@ def _llm_art_prompt(meta: Dict[str, Any], aspect_ratio: str,
         "JSON of the form {\"art_prompt\": \"...\"}."
     )
     user_prompt = (
-        f"Video title: {title or '(unknown)'}\n"
-        f"Thumbnail text hook (displayed separately, do NOT render text): {hook}\n"
-        f"Hero scene art direction: {scene or '(none given)'}\n"
-        f"{ctx}\n"
-        f"Key facts / description:\n{desc or '(none)'}\n"
-        f"\nWrite ONE photorealistic, high-CTR image prompt for a {target}.\n"
-        f"Composition direction: {template_desc}.\n"
-        f"COLOR DIRECTION: {art_color} — bright, saturated, high-contrast palette that "
-        "pops in both light and dark YouTube mode.\n"
-        "Keep it SIMPLE — max 2-3 visual elements, minimal clutter, sharp focus, "
-        "instantly readable at small size. GENUINE EMOTION — one expressive human face "
-        "with a clear reaction (curiosity, shock, or a problem-to-solve), never a blank "
-        "stare, never a fake grin. Keep subject identity consistent with the video's "
-        "content. Absolutely no text/words/letters/numbers/logos/watermarks/UI in the art."
-    )
+            f"Video title: {title or '(unknown)'}\n"
+            f"Thumbnail text hook (displayed separately, do NOT render text): {hook}\n"
+            f"Hero scene art direction: {scene or '(none given)'}\n"
+            f"{ctx}\n"
+            f"Key facts / description:\n{desc or '(none)'}\n"
+            f"\nWrite ONE photorealistic, high-CTR image prompt for a {target}.\n"
+            f"Composition direction: {template_desc}.\n"
+            f"COLOR DIRECTION: {art_color} — bright, saturated, high-contrast palette that "
+            "pops in both light and dark YouTube mode.\n"
+            f"{_art_direction_block(aspect_ratio, variant=v)}\n"
+            "Keep it SIMPLE — ONE focal subject, max 2-3 visual elements, minimal clutter, "
+            "sharp focus, instantly readable at small size. GENUINE EMOTION — one expressive "
+            "human face with a clear, authentic reaction (curiosity, focus, or a problem-to-solve), "
+            "never a blank stare, never a fake grin, never a plastic/over-smoothed face. Keep "
+            "subject identity consistent with the video's content. Absolutely no "
+            "text/words/letters/numbers/logos/watermarks/UI in the art."
+        )
     parsed = llm.generate_json(user_prompt, system_prompt=system_prompt, route="generate")
     art = (parsed or {}).get("art_prompt")
     if art and isinstance(art, str) and len(art.strip()) >= 20:
@@ -1039,8 +1101,14 @@ def generate_baked_video_thumbnail(state, hero_scene: str = "", output_path: str
     meta["hook"] = craft_ctr_hook(meta, llm=llm)
     hook = _shorten_ctr_text(meta["hook"])
     prompt = craft_thumbnail_prompt_from_metadata(meta, aspect_ratio="16:9", llm=llm, variant=variant)
-    prompt = prompt + _text_render_block(hook, "16:9", variant=variant)
+    if reference_frame:
+        prompt = prompt + " " + _ref_note()
+    # Art only (NO native model text — models render text badly); the hook is
+    # burned as crisp, Studio-grade typography by add_thumbnail_text below.
     data = generate_image(prompt, aspect_ratio="16:9", reference=reference_frame)
+    if data is not None:
+        data = add_thumbnail_text(data, headline=hook, subtitle="",
+                                  aspect_ratio="16:9", variant=variant)
     return _finalize_thumbnail(data, "16:9", output_path, tag="baked-video-")
 
 
@@ -1048,9 +1116,9 @@ def generate_baked_shorts_cover(state, output_path: str = "",
                                 reference_frame: Optional[bytes] = None,
                                 llm=None) -> Optional[str]:
     """Option-B cover for a NEW Short: full high-CTR design baked in one image —
-    thematic hook derived from the video content + design-rules art + text
-    rendered NATIVELY by the model + compliance pass. The returned JPEG is
-    prepended as the Short's first frame (no external text burn needed).
+    thematic hook derived from the video content + design-rules art + crisp
+    Studio-grade text burned by add_thumbnail_text + compliance pass. The
+    returned JPEG is prepended as the Short's first frame.
 
     Falls back to None so callers keep the art+compose path.
     reference_frame: an existing Short frame (same video) used as an identity
@@ -1063,6 +1131,92 @@ def generate_baked_shorts_cover(state, output_path: str = "",
     meta["hook"] = craft_ctr_hook(meta, llm=llm)
     hook = _shorten_ctr_text(meta["hook"])
     prompt = craft_thumbnail_prompt_from_metadata(meta, aspect_ratio="9:16", llm=llm, variant=variant)
-    prompt = prompt + _text_render_block(hook, "9:16", variant=variant)
+    if reference_frame:
+        prompt = prompt + " " + _ref_note()
+    # Art only (NO native model text); hook burned as crisp typography after.
     data = generate_image(prompt, aspect_ratio="9:16", reference=reference_frame)
+    if data is not None:
+        data = add_thumbnail_text(data, headline=hook, subtitle="",
+                                  aspect_ratio="9:16", variant=variant)
     return _finalize_thumbnail(data, "9:16", output_path, tag="baked-cover-")
+
+
+def generate_thumbnail_variants(state, hero_scene: str = "", output_dir: str = "",
+                                llm=None, aspect_ratio: str = "16:9",
+                                reference_frame: Optional[bytes] = None) -> List[str]:
+    """Produce a set of distinct, YouTube-compliant thumbnail variants that each
+    vary ONE strategic axis — exactly the A/B strategy YouTube Studio's
+    'Test & Compare' recommends (emotion-led vs hero-object vs text-led). The
+    primary variant is uploaded live via `youtube.thumbnails.set`; the rest are
+    written to disk + a manifest (`thumbnail_variants.json`) so the operator can
+    finish the experiment in Studio (Analytics → Test & Compare).
+
+    Returns the list of saved variant paths (may be shorter than the requested
+    count if a generation fails). Never raises — thumbnails are a nice-to-have."""
+    if not is_nano_banana_available():
+        return []
+    if aspect_ratio not in ("16:9", "9:16"):
+        aspect_ratio = "16:9"
+    axes = [
+        {"id": "emotion-led", "template": "reaction-face",
+         "note": "emotion-led: a human reaction to the topic"},
+        {"id": "hero-object", "template": "hero-object",
+         "note": "hero-object: the product / result / 'what is that?' subject"},
+        {"id": "text-led", "template": "bold-color-block",
+         "note": "text-led: bold color-block carrying the headline claim"},
+    ]
+    meta = _meta_from_state(state)
+    if hero_scene:
+        meta["hero_scene"] = hero_scene
+    meta["hook"] = craft_ctr_hook(meta, llm=llm)
+    hook = _shorten_ctr_text(meta["hook"])
+    pid = getattr(state, "pipeline_id", "") or meta.get("video_id", "")
+    paths: List[str] = []
+    manifest: List[Dict[str, str]] = []
+    for i, ax in enumerate(axes):
+        try:
+            variant = pick_thumbnail_variant(pid)
+            tmpl = next((t for t in _THUMBNAIL_TEMPLATES if t["id"] == ax["template"]), None)
+            if tmpl is not None:
+                variant = {**variant, "template": tmpl}
+            prompt = craft_thumbnail_prompt_from_metadata(
+                meta, aspect_ratio=aspect_ratio, llm=llm, variant=variant)
+            if reference_frame:
+                prompt = prompt + " " + _ref_note()
+            data = generate_image(prompt, aspect_ratio=aspect_ratio,
+                                  reference=reference_frame)
+            if data is None:
+                print(f"[NanoBanana] variant {ax['id']} art failed; skipping.")
+                continue
+            data = add_thumbnail_text(data, headline=hook, subtitle="",
+                                     aspect_ratio=aspect_ratio, variant=variant)
+            out = os.path.join(output_dir or ".",
+                               f"thumbnail_variant_{i + 1}_{ax['id']}.jpg")
+            p = _finalize_thumbnail(data, aspect_ratio, out,
+                                    tag=f"variant-{ax['id']}-")
+            if p:
+                paths.append(p)
+                manifest.append({"axis": ax["id"], "note": ax["note"], "path": p})
+        except Exception as e:
+            print(f"[NanoBanana] variant {ax['id']} failed: {e}")
+    try:
+        import json
+        man_path = os.path.join(output_dir or ".", "thumbnail_variants.json")
+        with open(man_path, "w") as f:
+            json.dump({
+                "pipeline_id": pid,
+                "aspect_ratio": aspect_ratio,
+                "hook": hook,
+                "variant_count": len(manifest),
+                "variants": manifest,
+                "studio_ab": (
+                    "Upload variant_1 as the live thumbnail with youtube.thumbnails.set, "
+                    "then open the video in YouTube Studio → Analytics → Test & Compare and "
+                    "add variant_2 and variant_3 as alternate thumbnails so YouTube picks the "
+                    "CTR winner by watch-time share."
+                ),
+            }, f, indent=2)
+        print(f"[NanoBanana] wrote variant manifest -> {man_path}")
+    except Exception as e:
+        print(f"[NanoBanana] variant manifest write failed: {e}")
+    return paths

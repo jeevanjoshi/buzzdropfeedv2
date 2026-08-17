@@ -80,7 +80,7 @@ class YouTubeEngagementEngine:
                 )
 
                 try:
-                    reply_text = self.llm.generate(prompt, role="publisher", temperature=0.7).strip()
+                    reply_text = (self.llm.generate(prompt, route="publisher", temperature=0.7) or "").strip()
                     # Strip any surrounding quotes
                     if reply_text.startswith('"') and reply_text.endswith('"'):
                         reply_text = reply_text[1:-1].strip()
