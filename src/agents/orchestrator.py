@@ -337,7 +337,7 @@ class OrchestratorAgent:
                     # Early-exits when hard violations don't strictly decrease
                     # (that means the corpus/instructions are the problem, not the
                     # draft), bounding wasted LLM spend.
-                    MAX_REVISIONS = 3
+                    MAX_REVISIONS = 5
                     revision_ok = False
                     last_violations: List[str] = []
                     last_quality_errors: List[str] = []

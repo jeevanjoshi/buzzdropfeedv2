@@ -40,7 +40,7 @@ RENDERING
 RAG / RESEARCH  (A/B: Google Search grounding vs 5-scraper path)
   --rag grounded                 Google Search grounding only (cited facts)
   --rag hybrid                   grounded cited core + on-topic scraper depth
-  --rag scraper                  5-scraper RAG path (default)
+  --rag scraper                  5-scraper RAG path
 
 RESUME
   --resume <pipeline_id>         resume from logs/state_<pipeline_id>.json
@@ -49,7 +49,7 @@ EXAMPLES
   python3 main.py --global --till-upload                 # real run, no publish
   python3 main.py --global --rag grounded --till-upload  # grounded research arm, no publish
   python3 main.py --global --rag hybrid --till-upload    # grounded core + scraper depth
-  python3 main.py --global --rag scraper                 # scraper RAG arm (default), publish
+  python3 main.py --global --rag scraper                 # scraper RAG arm, publish
   python3 main.py --resume csvg-exec-20260805-185905     # resume a specific run
   python3 main.py --offline --dummy-frames --till-upload # offline-ish smoke test
 

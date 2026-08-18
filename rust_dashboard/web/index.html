@@ -247,7 +247,7 @@
 
   /* Forms & Touch Targets */
   .form-row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; width:100%; }
-  .form-group { display:flex; flex-direction:column; gap:6px; width: 100%; min-width:0; }
+  .form-group { display:flex; flex-direction:column; gap:6px; width:auto; min-width:200px; flex:1 1 200px; }
   .btn-group { display:flex; gap:8px; margin-top:14px; align-items:center; width: 100%; flex-wrap:wrap; }
 
   select, input[type="text"], input[type="time"], input[type="number"] {
@@ -257,6 +257,7 @@
     border-radius: 8px!important;
     font-family: inherit!important;
     outline: none;
+    width: 100%!important;
     max-width: 100%;
     transition: border-color 0.15s ease;
   }
@@ -269,7 +270,8 @@
   @media (max-width:768px){
     .grid { grid-template-columns:1fr 1fr; }
     .btn-group { flex-direction:column; align-items:stretch; }
-    
+    .form-group { width:100%; flex:1 1 100%; }
+
     /* Input padding & font optimization for iOS touch targets (prevents auto-zoom) */
     .form-group select, .form-group input { width:100%!important; max-width:100%!important; font-size:16px!important; padding:12px 14px!important; }
     .btn-group button { width:100%; font-size:15px!important; padding:13px 20px!important; }
@@ -282,6 +284,36 @@
     .pill { padding: 5px 8px; font-size: 11px; }
   }
   @media (prefers-reduced-motion:reduce){ * { animation:none!important; } }
+
+  /* ── Auto-refresh progress bar + live timestamp ── */
+  #rbar {
+    position:absolute; left:0; bottom:0; height:2px; width:0;
+    background:linear-gradient(90deg,#3b82f6,#22d3ee);
+    box-shadow:0 0 8px rgba(34,211,238,.6); z-index:2;
+  }
+  .upd { font-size:10px; color:var(--dim); white-space:nowrap; }
+  @media (max-width:480px){ .upd { display:none; } }
+
+  /* ── Progress ring + sparkline helpers ── */
+  .ring-card { display:flex; align-items:center; gap:14px; }
+  .ring-card .rc-body { min-width:0; }
+  .spark-wrap { margin:2px 0 12px; overflow:hidden; }
+  .step-cap { font-size:10px; color:var(--dim); margin-top:4px; letter-spacing:.5px; font-weight:600; }
+
+  /* ── Stage timeline labels (web only) ── */
+  .stage-labels { display:none; gap:2px; margin-top:10px; }
+  .stage-labels .sl { flex:1; text-align:center; font-size:9px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .stage-labels .sl.cur { color:var(--cyan); font-weight:700; }
+  @media (min-width:768px){ .stage-labels { display:flex; } }
+
+  /* ── Horizontal bar charts ── */
+  .hbar-row { display:flex; align-items:center; gap:8px; margin:7px 0; font-size:11px; }
+  .hbar-label { width:96px; flex-shrink:0; font-family:var(--mono); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hbar-track { flex:1; background:rgba(255,255,255,.05); border-radius:4px; height:14px; overflow:hidden; }
+  .hbar-fill { height:100%; border-radius:4px; transition:width .8s ease; }
+  .hbar-val { width:74px; text-align:right; flex-shrink:0; color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+  .mini-bar { display:inline-block; width:60px; height:6px; background:rgba(255,255,255,.08); border-radius:3px; vertical-align:middle; overflow:hidden; margin-left:6px; }
+  .mini-bar > i { display:block; height:100%; border-radius:3px; }
 </style>
 </head>
 <body>
@@ -295,12 +327,14 @@
       </div>
     </div>
     <div class="h-right">
+      <span id="upd" class="upd"></span>
       <button class="btn" id="refreshBtn" title="Refresh Live Data">
         <svg class="svg-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
         <span class="btn-text-desktop">Refresh</span>
       </button>
       <div class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusTxt">—</span></div>
     </div>
+    <div id="rbar"></div>
   </header>
 
   <nav class="tabs" id="tabs">
@@ -334,13 +368,19 @@
       </span>
       <span>Schedules</span>
     </button>
+    <button class="tab" data-tab="competitor">
+      <span class="icon-wrap">
+        <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </span>
+      <span>Competitors</span>
+    </button>
   </nav>
 
   <div id="view"></div>
 
   <div class="foot">
     <span class="live">live feed</span>
-    <span id="upd">last updated: —</span>
+    <span id="upd-foot">last updated: —</span>
   </div>
 </div>
 
@@ -374,7 +414,121 @@ const STAGES = ['INITIALIZATION','TOPIC_SELECTED','SCRIPT_GENERATED','SCRIPT_APP
 const STAGE_IDX = {};
 STAGES.forEach((s,i)=>STAGE_IDX[s]=i);
 
+const compact = (n) => {
+  n = Number(n||0); const a = Math.abs(n);
+  if (a >= 1e6) return (n/1e6).toFixed(a>=1e7?0:1) + 'M';
+  if (a >= 1e3) return (n/1e3).toFixed(a>=1e4?0:1) + 'K';
+  return num(n, a < 10 ? 2 : 0);
+};
+
+function ringSVG(pct, color, size=46, stroke=5){
+  pct = Math.max(0, Math.min(100, Number(pct||0)));
+  const r = (size-stroke)/2, c = 2*Math.PI*r;
+  const off = c*(1-pct/100);
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="flex-shrink:0;" aria-hidden="true">
+    <circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="${stroke}"/>
+    <circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-linecap="round"
+      stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 ${size/2} ${size/2})"
+      style="transition:stroke-dashoffset .8s ease;"/>
+  </svg>`;
+}
+
+function sparklineSVG(values, color, w=160, h=34){
+  if(!values || values.length < 2) return '';
+  const max = Math.max(...values), min = Math.min(...values);
+  const range = (max - min) || 1;
+  const step = w/(values.length-1);
+  const pts = values.map((v,i)=>`${(i*step).toFixed(1)},${(h-((v-min)/range)*h).toFixed(1)}`);
+  const d = 'M' + pts.join(' L');
+  const area = d + ` L${w},${h} L0,${h} Z`;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block; max-width:100%;" aria-hidden="true">
+    <path d="${area}" fill="${color}22"/>
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+  </svg>`;
+}
+
+function ringStatCard(t, v, pct, color, sub){
+  return `<div class="card ring-card">
+    ${ringSVG(pct, color)}
+    <div class="rc-body">
+      <div class="t">${t}</div>
+      <div class="v" style="color:${color}; font-size:18px;">${v}</div>
+      <div class="s">${sub}</div>
+    </div>
+  </div>`;
+}
+
+const SHORT_STAGE = {TOPIC_SELECTED:'Topic', SCRIPT_GENERATED:'Script', SCRIPT_APPROVED:'Approved', MEDIA_PRODUCED:'Media', QUALITY_GATES_PASSED:'Quality', PUBLISHED:'Publish', PUBLISHED_SUCCESS:'Live'};
+
+function miniBar(v, color){
+  v = Math.max(0, Math.min(100, Number(v||0)*100));
+  return `<span class="mini-bar"><i style="width:${v}%; background:${color};"></i></span>`;
+}
+
+function costBars(runs){
+  const top = (runs||[]).slice(0,8);
+  if(!top.length) return '<div class="empty" style="padding:14px;">No runs yet.</div>';
+  const max = Math.max(...top.map(r=>((r.totals&&r.totals.est_usd)||0)), 0.0001);
+  return top.map(r=>{
+    const v = (r.totals&&r.totals.est_usd)||0;
+    const pct = Math.max(2, v/max*100);
+    const id = (r.pipeline_id||'').slice(-10);
+    return `<div class="hbar-row">
+      <div class="hbar-label" title="${esc(r.pipeline_id||'')}">${esc(id)}</div>
+      <div class="hbar-track"><div class="hbar-fill" style="width:${pct}%; background:linear-gradient(90deg,#fbbf24,#f59e0b);"></div></div>
+      <div class="hbar-val">${money(v)}</div>
+    </div>`;
+  }).join('');
+}
+
+function providerBars(live){
+  const provs = [
+    ['openrouter', (live.openrouter||{}).est_usd||0, '#60a5fa'],
+    ['fal', (live.fal||{}).est_usd||0, '#fbbf24'],
+    ['google', (live.google||{}).est_usd||0, '#22d3ee']
+  ];
+  const max = Math.max(...provs.map(p=>p[1]), 0.0001);
+  return provs.map(([name, v, c])=>{
+    const pct = Math.max(2, v/max*100);
+    return `<div class="hbar-row">
+      <div class="hbar-label">${name}</div>
+      <div class="hbar-track"><div class="hbar-fill" style="width:${pct}%; background:${c};"></div></div>
+      <div class="hbar-val">${money(v)}</div>
+    </div>`;
+  }).join('');
+}
+
+function yppBar(label, val, target, pct, color, fmt){
+  return `<div style="margin:9px 0;">
+    <div style="display:flex; justify-content:space-between; font-size:11.5px; margin-bottom:4px;">
+      <span style="color:var(--muted);">${label}</span>
+      <span style="color:var(--text); font-weight:600;">${fmt(val)} / ${fmt(target)}</span>
+    </div>
+    <div style="height:8px; background:rgba(255,255,255,.06); border-radius:4px; overflow:hidden;">
+      <div style="height:100%; width:${Math.min(100,pct)}%; background:${color}; border-radius:4px;"></div>
+    </div>
+  </div>`;
+}
+
+function yppPanel(subs, subsPct, wch, hrsPct, ready, cs){
+  const color = ready >= 100 ? '#34d399' : '#fbbf24';
+  return `<div class="panel"><h3>Monetization (YPP) Readiness</h3>
+    <div style="display:flex; align-items:center; gap:18px; flex-wrap:wrap;">
+      <div style="text-align:center; flex-shrink:0;">
+        ${ringSVG(ready, color, 88, 9)}
+        <div style="font-size:11px; color:var(--muted); margin-top:4px;">${ready>=100?'Monetized ✓':Math.round(ready)+'% there'}</div>
+      </div>
+      <div style="flex:1; min-width:220px;">
+        ${yppBar('Subscribers', subs, YPP_SUBS_THRESHOLD, subsPct, '#60a5fa', compact)}
+        ${yppBar('Watch Hours', wch, YPP_WATCH_HOURS_THRESHOLD, hrsPct, '#34d399', (v)=>compact(v)+'h')}
+        <div style="font-size:11px; color:var(--muted); margin-top:8px;">Both thresholds must be met to enable YPP ads. ${cs.ypp_unlocked?'<b style="color:var(--green)">Active now.</b>':'Keep publishing to grow the channel.'}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
 let tab = 'overview';
+let lastUpdate = 0;
 const DATA = { status:null, logs:null, budget:null, usage:null, runs:[], published:[], objFailed:false };
 let EDITOR_STATE = { pipeline: [], seeder: [], initialized: false };
 
@@ -432,7 +586,24 @@ async function loadAll(){
     pill('error', 'Offline');
   }
   paint();
-  $('#upd').textContent = 'last updated: ' + new Date().toLocaleTimeString();
+  const rb = $('#rbar');
+  if(rb){
+    rb.style.transition = 'none';
+    rb.style.width = '0%';
+    void rb.offsetWidth;
+    rb.style.transition = 'width 8s linear';
+    rb.style.width = '100%';
+  }
+  lastUpdate = Date.now();
+  updateUpd();
+}
+
+function updateUpd(){
+  const el = $('#upd');
+  if(!el) return;
+  if(!lastUpdate){ el.textContent = ''; return; }
+  const s = Math.round((Date.now() - lastUpdate) / 1000);
+  el.textContent = 'updated ' + s + 's ago';
 }
 
 // status pill + stage
@@ -445,7 +616,13 @@ function paintStatus(){
 
 const hbText = (st) => {
   if(!st || st.heartbeat_age_sec == null) return 'heartbeat: —';
-  return st.is_running ? 'heartbeat: <b>live</b>' : 'heartbeat: <b>' + Math.round(st.heartbeat_age_sec) + 's ago</b>';
+  if(st.is_running) return 'heartbeat: <b>live</b>';
+  const sec = Math.round(st.heartbeat_age_sec);
+  let ago;
+  if(sec < 60) ago = sec + 's ago';
+  else if(sec < 3600) ago = Math.floor(sec/60) + 'm ' + (sec%60) + 's ago';
+  else { const h=Math.floor(sec/3600); const m=Math.floor((sec%3600)/60); ago = m? h + 'h ' + m + 'm ago' : h + 'h ago'; }
+  return 'heartbeat: <b>' + ago + '</b>';
 };
 
 function stageTracker(stage){
@@ -469,7 +646,7 @@ function stageTracker(stage){
     badgeText = `${esc(stage || 'INITIALIZATION')}`;
   }
 
-  let segs = STAGES.slice(1).map((s,i) => {
+   let segs = STAGES.slice(1).map((s,i) => {
     let cls = 'seg';
     if (i <= idx) cls += ' filled';
     if (i === idx) {
@@ -478,6 +655,9 @@ function stageTracker(stage){
     }
     return `<div class="${cls}"></div>`;
   }).join('');
+
+  const labels = STAGES.slice(1).map((s,i) =>
+    `<span class="sl ${i===idx?'cur':''}">${SHORT_STAGE[s]||s}</span>`).join('');
 
   const failBanner = isFailed ? `
     <div style="border: 1px solid rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.08); padding: 12px 16px; margin-top: 14px; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; width: 100%;">
@@ -496,10 +676,12 @@ function stageTracker(stage){
       <div>
         <span class="lbl" style="margin-right:8px;">Pipeline Stage</span>
         <span class="badge" style="color:${color};border-color:${color}55;background:${color}1c; font-weight:600;">${badgeText}</span>
+        <div class="step-cap">Step ${idx>=0?idx+1:1} of ${STAGES.slice(1).length}${isRunning?' · live':''}</div>
       </div>
       <span class="hb" id="hb" style="margin:0;">${hbText(DATA.status)}</span>
     </div>
     <div class="prog" style="margin-top:10px;">${segs}</div>
+    <div class="stage-labels">${labels}</div>
     ${failBanner}
   </div>`;
 }
@@ -513,13 +695,14 @@ function statCards(){
   const views = cs.total_views||0, vids = cs.total_videos||0;
   const subsPct = YPP_SUBS_THRESHOLD > 0 ? Math.min(100, subs / YPP_SUBS_THRESHOLD * 100) : 0;
   const hrsPct = YPP_WATCH_HOURS_THRESHOLD > 0 ? Math.min(100, wch / YPP_WATCH_HOURS_THRESHOLD * 100) : 0;
+  const yppReady = Math.min(subsPct, hrsPct);
   return `<div class="grid">
     ${card('Channel Phase', esc(cs.channel_phase||'GROWTH'), cs.ypp_unlocked?'Monetization Active':'Pre-YPP', '#8b5cf6')}
-    ${card('Subscribers', num(subs,0), subsPct >= 100 ? 'YPP threshold met!' : Math.max(0, YPP_SUBS_THRESHOLD - subs) + ' to go', '#60a5fa', subsPct)}
-    ${card('Watch Hours', num(wch,1)+'h', hrsPct >= 100 ? 'YPP threshold met!' : Math.max(0, YPP_WATCH_HOURS_THRESHOLD - wch) + 'h to go', '#34d399', hrsPct)}
-    ${card('Total Views', num(views,0), vids + ' videos published', '#22d3ee')}
+    ${card('YPP Readiness', Math.round(yppReady)+'%', yppReady>=100?'Monetized ✓':Math.max(subsPct,hrsPct)>=100?'one metric done':'Pre-YPP', yppReady>=100?'#34d399':'#fbbf24')}
+    ${card('Total Views', compact(views), vids + ' videos published', '#22d3ee')}
     ${card('Last Run Cost', money((lt.est_usd||0)), esc(latestRun?.pipeline_id?.slice(-15)||'—'), '#fbbf24', Math.min(100, (lt.est_usd||0)*10))}
-  </div>`;
+  </div>
+  ${yppPanel(subs, subsPct, wch, hrsPct, yppReady, cs)}`;
 }
 
 function card(t,v,s,color,pct){
@@ -546,6 +729,10 @@ function budgetPanel(){
   const monthlyRows = Object.entries(b.monthly||{}).slice().reverse()
     .map(([mo,x])=>`<tr><td class="mono">${esc(mo)}</td><td class="r">${money(x.est_usd)}</td><td class="r">${num(x.yt_units,0)}</td><td class="r">${x.runs}</td><td class="r">${Math.min(100,(x.yt_units/ONE_DAY_YT*100)).toFixed(1)}%</td></tr>`).join('');
 
+  const monthKeys = Object.keys(b.monthly||{}).sort();
+  const monthSpark = sparklineSVG(monthKeys.map(m=>(b.monthly[m].est_usd||0)), '#22d3ee');
+  const runSpark = sparklineSVG((b.runs||[]).slice(0,25).map(r=>((r.totals&&r.totals.est_usd)||0)), '#fbbf24');
+
   return `
   <div class="grid">
     ${card('All-time est. $', money(tot.est_usd), tot.runs+' run(s) tracked', '#22d3ee')}
@@ -556,12 +743,15 @@ function budgetPanel(){
 
   <div class="panel"><h3>Budget categories — latest run</h3>${catTable(latest)}</div>
   <div class="panel"><h3>Monthly totals</h3>
+    <div class="spark-wrap">${monthSpark||'<span class="muted" style="font-size:11px;">Not enough data for a trend yet.</span>'}</div>
     <div class="table-wrapper">
       <table><thead><tr><th>Month</th><th class="r">Est. $</th><th class="r">YT units</th><th class="r">Runs</th><th class="r">Units/day %</th></tr></thead>
       <tbody>${monthlyRows||'<tr><td colspan="5" class="empty">—</td></tr>'}</tbody></table>
     </div>
   </div>
   <div class="panel"><h3>Recent per-run budget</h3>
+    <div class="spark-wrap">${runSpark||''}</div>
+    <div style="margin:4px 0 12px;">${costBars(b.runs)}</div>
     <div class="table-wrapper">
       <table><thead><tr>
         <th>Run / status</th><th class="r">Est. $</th><th class="r">YT units</th><th>Stage</th><th>Categories</th>
@@ -661,6 +851,7 @@ const usedRows = [
     ${card('Live est. (all)', money(totEst), totCalls+' calls tracked', '#34d399')}
   </div>
   <div class="panel"><h3>Provider usage ${actions}</h3>
+    <div style="margin:4px 0 14px;">${providerBars(live)}</div>
     <div class="table-wrapper">
       <table><thead><tr><th>Provider</th><th>Used so far</th><th>Live captured</th></tr></thead>
       <tbody>${usedRows||'<tr><td colspan="3" class="empty">—</td></tr>'}</tbody></table>
@@ -804,7 +995,7 @@ function runsList(){
         <div><span class="muted">Region:</span> <b style="color:var(--cyan)">${esc(r.region || '—')}</b></div>
         <div><span class="muted">Niche:</span> <span style="color:var(--text)" title="${esc(r.niche || '')}">${esc(r.niche ? (r.niche.length > 22 ? r.niche.slice(0, 20) + '...' : r.niche) : '—')}</span></div>
         <div><span class="muted">Audience:</span> <b style="color:var(--purple)">${esc(r.audience || '—')}</b></div>
-        <div><span class="muted">TOPSIS Score:</span> <b style="color:var(--amber)">${topsisStr}</b></div>
+        <div><span class="muted">TOPSIS Score:</span> <b style="color:var(--amber)">${topsisStr}</b>${miniBar(r.topsis, 'var(--amber)')}</div>
         <div><span class="muted">Runtime:</span> <b style="color:var(--text)">${rtStr}</b></div>
         <div><span class="muted">Shots:</span> <b style="color:var(--text)">${esc(r.shots || '—')}</b></div>
         <div><span class="muted">Facts:</span> <b style="color:var(--text)">${esc(r.fact_count || '—')}</b></div>
@@ -1005,8 +1196,8 @@ function controlPanel(){
       <div class="form-group" style="flex:1; min-width:180px;">
         <label class="lbl">RAG Mode</label>
         <select id="ctrl-rag" ${disabled} style="padding:10px 12px; font-size:13px;">
-          <option value="scraper">Scraper (Default)</option>
-          <option value="hybrid">Hybrid (Search + Scraper)</option>
+          <option value="hybrid" selected>Hybrid (Search + Scraper) (Default)</option>
+          <option value="scraper">Scraper</option>
           <option value="grounded">Grounded (Search Grounding)</option>
         </select>
       </div>
@@ -1293,6 +1484,169 @@ function renderSeeding(){
   return seedingPanel();
 }
 
+const COMPETITOR_SEV = {
+  HIGH:   { c:'#f87171', t:'HIGH' },
+  MEDIUM: { c:'#fbbf24', t:'MEDIUM' },
+  LOW:    { c:'#60a5fa', t:'LOW' },
+  INFO:   { c:'#a78bfa', t:'INFO' },
+  PARITY: { c:'#34d399', t:'PARITY' }
+};
+
+function renderCompetitor(){
+  return `
+    <div class="panel">
+      <h3>${ICONS.activity} Competitor Gap Analysis</h3>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-bottom:10px;">
+        <label style="font-size:12px; color:var(--muted);">Channels (comma-sep handles)
+          <input id="comp-channels" class="txt" style="display:block; margin-top:4px; width:280px;" value="FinanceBureauOfficial">
+        </label>
+        <label style="font-size:12px; color:var(--muted);">Videos / channel
+          <input id="comp-limit" class="txt" type="number" min="1" max="10" value="3" style="display:block; margin-top:4px; width:90px;">
+        </label>
+        <button class="btn btn-primary" id="btn-run-competitor" style="height:38px;">${ICONS.play} Run Deep Analysis</button>
+        <span id="comp-fb" style="font-family:var(--mono); font-size:12px; min-height:16px;"></span>
+      </div>
+      <div style="font-size:11.5px; color:var(--muted);">Deep analysis downloads/transcribes/classifies competitor media (runs on the Pi, residential IP). The keyless lightweight benchmark runs weekly via cron. Results feed <code>docs/COMPETITOR_GAPS.md</code>.</div>
+    </div>
+
+    <div id="comp-light"></div>
+    <div id="comp-gaps"></div>
+    <div id="comp-deep"></div>
+  `;
+}
+
+async function loadCompetitor(){
+  const fb = $('#comp-fb');
+  try {
+    const [light, gaps, deep] = await Promise.all([
+      fetchJ('/api/competitor'), fetchJ('/api/competitor/gaps'), fetchJ('/api/competitor/deep')
+    ]);
+    renderCompetitorLight(light);
+    renderCompetitorGaps(gaps);
+    renderCompetitorDeep(deep);
+  } catch(e){
+    if(fb){ fb.style.color='var(--red)'; fb.textContent='load failed: '+e.message; }
+  }
+}
+
+function renderCompetitorLight(light){
+  const el = $('#comp-light'); if(!el) return;
+  const analyses = light.analyses || [];
+  if(!analyses.length){ el.innerHTML = `<div class="panel"><h3>${ICONS.terminal} Lightweight Benchmark</h3><div class="empty" style="padding:14px;">No benchmark data yet (logs/competitor_data.json). The weekly cron run populates this.</div></div>`; return; }
+  const rows = analyses.map(a => {
+    const gapPct = a.tension_gap_pct != null ? Math.round(a.tension_gap_pct) : null;
+    const cad = a.avg_videos_per_week != null ? a.avg_videos_per_week.toFixed(2) : '—';
+    const med = a.median_views != null ? compact(a.median_views) : '—';
+    return `<tr>
+      <td>${esc(a.channel||'')}</td>
+      <td>${a.video_count||0}</td>
+      <td>${gapPct!=null?gapPct+'%':'—'}</td>
+      <td>${cad}/wk</td>
+      <td>${med}</td>
+      <td>${a.thumbnail_brightness!=null?Math.round(a.thumbnail_brightness):'—'}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<div class="panel"><h3>${ICONS.terminal} Lightweight Benchmark (tension-title gap vs pipeline)</h3>
+    <table class="tbl">
+      <thead><tr><th>Channel</th><th>Videos</th><th>Tension Title Gap</th><th>Cadence</th><th>Median Views</th><th>Thumb Lum</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="font-size:11px; color:var(--muted); margin-top:6px;">Pipeline reference: ~100% tension-capable (we generate contrarian titles), 2 publishes/day, thumbnail target mean_lum ≥100.</div>
+  </div>`;
+}
+
+function renderCompetitorGaps(gaps){
+  const el = $('#comp-gaps'); if(!el) return;
+  const list = gaps.gaps || [];
+  const counts = gaps.severity_counts || {};
+  if(!list.length){ el.innerHTML = `<div class="panel"><h3>${ICONS.bolt} Gap Fix-List (docs/COMPETITOR_GAPS.md)</h3><div class="empty" style="padding:14px;">No gaps consolidated yet. Run the analysis to (re)build the fix-list.</div></div>`; return; }
+  const sevs = ['HIGH','MEDIUM','LOW','INFO','PARITY'];
+  const chips = sevs.filter(s=>counts[s]).map(s=>`<span class="pill" style="background:${COMPETITOR_SEV[s].c}22; color:${COMPETITOR_SEV[s].c}; border-color:${COMPETITOR_SEV[s].c}55;">${s}: ${counts[s]}</span>`).join(' ');
+  const items = list.map(g=>{
+    const sev = COMPETITOR_SEV[g.severity] || COMPETITOR_SEV.INFO;
+    return `<li style="border-left:3px solid ${sev.c}; padding:8px 12px; margin:8px 0; background:rgba(255,255,255,.03); border-radius:6px;">
+      <div style="display:flex; gap:8px; align-items:center;"><span class="pill" style="background:${sev.c}22; color:${sev.c}; border-color:${sev.c}55;">${sev.t}</span><b style="font-size:13px;">${esc(g.area||'')}</b><span style="font-size:11px; color:var(--muted);">${esc(g.id||'')} · ${esc(g.source||'')}</span></div>
+      <div style="font-size:12.5px; margin-top:4px;">${esc(g.finding||'')}</div>
+      ${g.code_ref?`<div style="font-size:11.5px; color:var(--cyan); font-family:var(--mono); margin-top:3px;">code: ${esc(g.code_ref)}</div>`:''}
+      ${g.suggestion?`<div style="font-size:12px; color:var(--muted); margin-top:3px;">Fix: ${esc(g.suggestion)}</div>`:''}
+    </li>`;
+  }).join('');
+  el.innerHTML = `<div class="panel"><h3>${ICONS.bolt} Gap Fix-List (docs/COMPETITOR_GAPS.md) — ${list.length} items</h3>
+    <div style="margin-bottom:8px;">${chips}</div>
+    <ul style="list-style:none; padding:0; margin:0;">${items}</ul>
+  </div>`;
+}
+
+function renderCompetitorDeep(deep){
+  const el = $('#comp-deep'); if(!el) return;
+  const videos = deep.videos || [];
+  if(!videos.length){ el.innerHTML = `<div class="panel"><h3>${ICONS.activity} Deep Media Analysis</h3><div class="empty" style="padding:14px;">No deep analysis yet (logs/competitor_deep.json). Click "Run Deep Analysis".</div></div>`; return; }
+  const rows = videos.map(v=>{
+    const style = (v.visual_style_mix && Object.entries(v.visual_style_mix).sort((a,b)=>b[1]-a[1])[0]) || ['—',0];
+    const wpm = v.wpm != null ? v.wpm.toFixed(0) : '—';
+    const shots = v.shot_count != null ? v.shot_count : '—';
+    const dur = v.duration_sec != null ? (v.duration_sec/60).toFixed(1)+'m' : '—';
+    const bgm = v.bgm_level != null ? v.bgm_level : '—';
+    return `<tr>
+      <td>${esc(v.channel||'')}</td>
+      <td><a class="ext" href="https://youtu.be/${esc(v.video_id||'')}" target="_blank">${esc((v.title||'').slice(0,42))}${ (v.title||'').length>42?'…':'' }</a></td>
+      <td>${dur}</td>
+      <td>${shots}</td>
+      <td>${wpm}</td>
+      <td>${bgm}</td>
+      <td>${esc(style[0])}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<div class="panel"><h3>${ICONS.activity} Deep Media Analysis (download / transcribe / classify)</h3>
+    <table class="tbl">
+      <thead><tr><th>Channel</th><th>Title</th><th>Dur</th><th>Shots</th><th>WPM</th><th>BGM</th><th>Top Visual Style</th></tr></thead>
+      <tbody>${(()=>{ // rebuild with tbody wrapper
+        return videos.map(v=>{
+          const style = (v.visual_style_mix && Object.entries(v.visual_style_mix).sort((a,b)=>b[1]-a[1])[0]) || ['—',0];
+          const wpm = v.wpm != null ? v.wpm.toFixed(0) : '—';
+          const shots = v.shot_count != null ? v.shot_count : '—';
+          const dur = v.duration_sec != null ? (v.duration_sec/60).toFixed(1)+'m' : '—';
+          const bgm = v.bgm_level != null ? v.bgm_level : '—';
+          return `<tr><td>${esc(v.channel||'')}</td><td><a class="ext" href="https://youtu.be/${esc(v.video_id||'')}" target="_blank">${esc((v.title||'').slice(0,42))}${(v.title||'').length>42?'…':''}</a></td><td>${dur}</td><td>${shots}</td><td>${wpm}</td><td>${bgm}</td><td>${esc(style[0])}</td></tr>`;
+        }).join('');
+      })()}</tbody>
+    </table>
+  </div>`;
+}
+
+let _compPoll = null;
+function bindCompetitorEvents(){
+  const btn = $('#btn-run-competitor');
+  if(!btn) return;
+  btn.addEventListener('click', async () => {
+    const channels = ($('#comp-channels').value || '').trim() || 'FinanceBureauOfficial';
+    const limit = parseInt($('#comp-limit').value || '3', 10) || 3;
+    const fb = $('#comp-fb');
+    btn.disabled = true;
+    if(fb){ fb.style.color='var(--amber)'; fb.textContent='starting…'; }
+    try {
+      const r = await fetch(`/api/competitor/run?channels=${encodeURIComponent(channels)}&limit=${limit}`, {cache:'no-store'});
+      const res = await r.json();
+      if(res.success){
+        if(fb){ fb.style.color='var(--green)'; fb.textContent='running — polling…'; }
+        if(_compPoll) clearInterval(_compPoll);
+        _compPoll = setInterval(async () => {
+          await loadCompetitor();
+          // stop polling once gap engine has produced output
+          const g = await fetchJ('/api/competitor/gaps').catch(()=>null);
+          if(g && (g.gaps||[]).length){ clearInterval(_compPoll); _compPoll=null; if(fb){ fb.style.color='var(--green)'; fb.textContent='done'; } setTimeout(()=>{ if(fb) fb.textContent=''; }, 4000); }
+        }, 15000);
+      } else {
+        if(fb){ fb.style.color='var(--red)'; fb.textContent='error: '+String(res.error||'').slice(0,160); }
+        btn.disabled = false;
+      }
+    } catch(e){
+      if(fb){ fb.style.color='var(--red)'; fb.textContent='network error'; }
+      btn.disabled = false;
+    }
+  });
+}
+
 function paint(){
   paintStatus();
   const v = $('#view');
@@ -1311,6 +1665,10 @@ function paint(){
   } else if (tab === 'scheduler') {
     v.innerHTML = schedulerPanel();
     bindSchedulerEvents();
+  } else if (tab === 'competitor') {
+    v.innerHTML = renderCompetitor();
+    bindCompetitorEvents();
+    loadCompetitor();
   }
 
   // Update schedule countdowns across views
@@ -1641,6 +1999,7 @@ $('#tabs').addEventListener('click', e=>{
 
 loadAll();
 setInterval(loadAll, 8000);
+setInterval(updateUpd, 1000);
 </script>
 </body>
 </html>

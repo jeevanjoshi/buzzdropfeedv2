@@ -57,7 +57,10 @@ pub fn get_path<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
 // ── parser ────────────────────────────────────────────────────────────────
 
 pub fn parse(s: &str) -> Option<Value> {
-    let mut c = Cursor { b: s.as_bytes(), i: 0 };
+    let mut c = Cursor {
+        b: s.as_bytes(),
+        i: 0,
+    };
     let v = parse_value(&mut c)?;
     c.skip_ws();
     if c.i < c.b.len() {

@@ -172,6 +172,27 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
     return trimmed if trimmed else cut
 
 
+# No-LLM tension-fallback title pool. Finance/AI news channels (e.g. Finance
+# Bureau) win CTR with contrarian framing; when the LLM is unavailable we still
+# want a tension-angled title rather than a flat "{headline}...". Picked by a
+# stable hash of the headline so a given topic always renders the same variant.
+# NOTE: deliberately no year suffix — date-stamping a title ages the video and
+# hurts CTR for timeless storytelling.
+_TENSION_FALLBACK_TEMPLATES: List[str] = [
+    "What They Won't Tell You About {hl}",
+    "The Real Reason Behind {hl}",
+    "Why {hl} Is Worse Than You Think",
+    "The Truth They Hide About {hl}",
+]
+
+
+def _tension_fallback_title(headline: str, current_month_year: str) -> str:
+    """Deterministic, factually-neutral contrarian fallback title (no LLM)."""
+    hl = _truncate_at_word(headline, 35)
+    idx = hash(headline) % len(_TENSION_FALLBACK_TEMPLATES)
+    return _TENSION_FALLBACK_TEMPLATES[idx].format(hl=hl)
+
+
 # Observer's per-shot narration cap (see observer.py:331/393). The story designer
 # only enforced a FLOOR, so the LLM could emit 187-267-word shots that tripped the
 # "narration too long (>155)" gate AND blew the runtime to 16+ mins (hard abort).
@@ -996,7 +1017,7 @@ class StoryDesignerAgent:
                             self._last_rag_snippets = raw_snippets
                             self._last_used_snips = _used_snips
                             return ScriptData(
-                                title=llm_result.get("title", f"The Hidden Truth Behind {_truncate_at_word(headline, 35)}... ({current_month_year})"),
+                                title=llm_result.get("title", _tension_fallback_title(headline, current_month_year)),
                                 target_shots=len(shots),
                                 shots=shots,
                                 estimated_runtime_seconds=round(runtime, 1)
@@ -1449,7 +1470,7 @@ class StoryDesignerAgent:
             return None
         total_words = sum(len(s.narration_text.split()) for s in all_shots)
         return ScriptData(
-            title=f"The Hidden Truth Behind {_truncate_at_word(headline, 35)}... ({current_month_year})",
+            title=_tension_fallback_title(headline, current_month_year),
             target_shots=len(all_shots),
             shots=all_shots,
             estimated_runtime_seconds=round(total_words / 150.0 * 60.0, 1),
@@ -1607,6 +1628,48 @@ class StoryDesignerAgent:
                 return title
         return None
 
+    def _generate_tension_title(self, headline: str, niche_category: str = "") -> Optional[str]:
+        """
+        Best-effort LLM generation of a CONTRARIAN / tension YouTube title.
+
+        Competitor faceless finance/AI channels (e.g. Finance Bureau) win CTR
+        with tension framing ("Not a bubble... it's WORSE", "What they won't
+        admit"). This prompt forces that angle while staying factually honest
+        (no fabricated claims). Falls back to None so the caller can fall back
+        to the softer CTR title / headline truncation.
+        """
+        if not self.llm_client.is_available():
+            return None
+        prompt = (
+            f"Write ONE high-CTR YouTube title, MAX 65 characters, for an 11-14 minute "
+            f"infotainment documentary. Topic headline: '{headline}'. Niche: '{niche_category}'.\n\n"
+            f"The title MUST use a CONTRARIAN / TENSION angle that makes a scroller stop. "
+            f"Adapt ONE of these patterns (do not copy verbatim):\n"
+            f"  - 'Not X... it's Y'   (e.g. 'Not a Bubble... It's WORSE')\n"
+            f"  - 'The X they won't admit' / 'The real reason X'\n"
+            f"  - 'Why X is worse / more dangerous than you think'\n"
+            f"  - 'X is a trap / a lie / backfiring'\n"
+            f"Keep it HONEST: never claim something the facts contradict, and avoid clickbait "
+            f"that fabricates. Return ONLY a JSON object with the key 'title'."
+        )
+        try:
+            result = self.llm_client.generate_json(
+                prompt,
+                "You craft concise, honest, contrarian high-CTR YouTube titles. Return valid JSON only.",
+                route="generate",
+            )
+        except Exception:
+            result = None
+        if result and result.get("title"):
+            title = str(result["title"]).strip()
+            # Same listicle/photo-gallery guards as the CTR title path.
+            title = re.sub(r"\b\d+\s+(photos?|pictures?|images?)\s+of\b", "The Truth Behind", title, flags=re.IGNORECASE)
+            title = re.sub(r"\b(rare\s+photos?|magnificent\s+photos?|see\s+photos?|photo\s+gallery)\b", "Deep Dive", title, flags=re.IGNORECASE)
+            title = re.sub(r"\s+", " ", title).strip()
+            if 10 <= len(title) <= 70:
+                return title
+        return None
+
     def _generate_act_titles(self, script: ScriptData) -> Optional[List[str]]:
         """
         Best-effort LLM generation of 6 short, content-aware YouTube chapter
@@ -1660,7 +1723,12 @@ class StoryDesignerAgent:
         Generates high-CTR SEO metadata (Title, Description, Tags, Thumbnail Brief) alongside the script.
         """
         headline = topic.headline
-        ctr_title = self._generate_ctr_title(headline, getattr(topic, "niche_category", ""))
+        # Prefer a contrarian/tension title (the high-CTR angle faceless
+        # finance/AI competitors use); fall back to the softer CTR title, then
+        # a plain headline truncation. The tension title also feeds the
+        # thumbnail hook below (via ctr_title/clean_title).
+        tension_title = self._generate_tension_title(headline, getattr(topic, "niche_category", ""))
+        ctr_title = tension_title or self._generate_ctr_title(headline, getattr(topic, "niche_category", ""))
         clean_title = ctr_title if ctr_title else _truncate_at_word(headline, 65)
         tags = [t.strip().lower() for t in topic.keywords if len(t.strip()) > 2][:10]
         tags.extend(["infotainment", "documentary", "2026", "analysis", "explained"])

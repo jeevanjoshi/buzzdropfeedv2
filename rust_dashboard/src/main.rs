@@ -77,7 +77,12 @@ fn handle(mut stream: TcpStream, root: &str) {
     let mut parts = first.split_whitespace();
     let (method, raw_path) = (parts.next().unwrap_or("GET"), parts.next().unwrap_or("/"));
     if method != "GET" && method != "POST" {
-        respond(stream, 405, "text/plain; charset=utf-8", b"method not allowed".as_slice());
+        respond(
+            stream,
+            405,
+            "text/plain; charset=utf-8",
+            b"method not allowed".as_slice(),
+        );
         return;
     }
     let path = raw_path.split('?').next().unwrap_or("/");
@@ -135,7 +140,13 @@ fn route(root: &str, path: &str, raw_path: &str) -> (u16, &'static str, Vec<u8>)
         "/api/healthcheck/run" => json_response(&api_healthcheck_run(root)),
         "/api/cleanup/run" => json_response(&api_cleanup_run(root, raw_path)),
         "/api/usage/refresh" => json_response(&api_usage_refresh(root)),
-        "/api/pipeline/start" | "/api/pipeline/resume" => json_response(&api_pipeline_control(root, path, raw_path)),
+        "/api/competitor" => json_response(&api_competitor_light(root)),
+        "/api/competitor/deep" => json_response(&api_competitor_deep(root)),
+        "/api/competitor/gaps" => json_response(&api_competitor_gaps(root)),
+        "/api/competitor/run" => json_response(&api_competitor_run(root, raw_path)),
+        "/api/pipeline/start" | "/api/pipeline/resume" => {
+            json_response(&api_pipeline_control(root, path, raw_path))
+        }
         "/api/pipeline/stop" => json_response(&api_pipeline_stop(root)),
         "/api/seeding/stop" => json_response(&api_seeding_stop(root)),
         _ => (404, "text/plain; charset=utf-8", b"not found".to_vec()),
@@ -304,7 +315,9 @@ fn api_status(root: &str) -> Value {
 // newest state checkpoint -> (execution_stage, pipeline_id)
 fn latest_state(root: &str) -> (String, String) {
     let dir = Path::new(root).join("logs");
-    let Ok(rd) = fs::read_dir(&dir) else { return ("NOT_STARTED".into(), String::new()) };
+    let Ok(rd) = fs::read_dir(&dir) else {
+        return ("NOT_STARTED".into(), String::new());
+    };
     let mut states: Vec<PathBuf> = rd
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
@@ -318,7 +331,9 @@ fn latest_state(root: &str) -> (String, String) {
     states.sort_by(mtime_desc);
     let name = states[0].file_name().unwrap().to_str().unwrap().to_string();
     let v = read_json(root, &format!("logs/{name}"));
-    let stage = v.get_str("execution_stage").unwrap_or_else(|| "UNKNOWN".into());
+    let stage = v
+        .get_str("execution_stage")
+        .unwrap_or_else(|| "UNKNOWN".into());
     let pid = v.get_str("pipeline_id").unwrap_or_default();
     (stage, pid)
 }
@@ -340,7 +355,9 @@ fn last_failed_state(root: &str) -> Option<(String, String)> {
     for path in states {
         let name = path.file_name()?.to_str()?.to_string();
         let v = read_json(root, &format!("logs/{name}"));
-        let stage = v.get_str("execution_stage").unwrap_or_else(|| "UNKNOWN".into());
+        let stage = v
+            .get_str("execution_stage")
+            .unwrap_or_else(|| "UNKNOWN".into());
         let pid = v.get_str("pipeline_id").unwrap_or_default();
         if stage != "PUBLISHED_SUCCESS" && stage != "DONE" && !pid.is_empty() {
             return Some((stage, pid));
@@ -380,10 +397,7 @@ fn api_logs(root: &str) -> Value {
         })
         .unwrap_or_default();
 
-    obj(&[
-        ("raw_logs", s(&raw)),
-        ("structured_logs", arr(structured)),
-    ])
+    obj(&[("raw_logs", s(&raw)), ("structured_logs", arr(structured))])
 }
 
 // ── /api/published ─────────────────────────────────────────────────────────
@@ -427,12 +441,12 @@ fn api_seeding_logs(root: &str) -> Value {
     ])
 }
 
-
 fn api_cron(_root: &str) -> Value {
     let mut oci_lines = Vec::new();
     if let Ok(out) = std::process::Command::new("ssh")
         .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", "crontab -l"])
-        .output() {
+        .output()
+    {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
             for line in text.lines() {
@@ -448,9 +462,7 @@ fn api_cron(_root: &str) -> Value {
     }
 
     let mut seeder_lines = Vec::new();
-    if let Ok(out) = std::process::Command::new("crontab")
-        .arg("-l")
-        .output() {
+    if let Ok(out) = std::process::Command::new("crontab").arg("-l").output() {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
             for line in text.lines() {
@@ -466,8 +478,14 @@ fn api_cron(_root: &str) -> Value {
     }
 
     obj(&[
-        ("pipeline_cron", json::Value::Arr(oci_lines.into_iter().map(|l| s(&l)).collect())),
-        ("seeder_cron", json::Value::Arr(seeder_lines.into_iter().map(|l| s(&l)).collect())),
+        (
+            "pipeline_cron",
+            json::Value::Arr(oci_lines.into_iter().map(|l| s(&l)).collect()),
+        ),
+        (
+            "seeder_cron",
+            json::Value::Arr(seeder_lines.into_iter().map(|l| s(&l)).collect()),
+        ),
     ])
 }
 
@@ -485,7 +503,8 @@ fn api_cron_update(_root: &str, raw_path: &str) -> Value {
         let mut current_crontab = String::new();
         if let Ok(out) = std::process::Command::new("ssh")
             .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", "crontab -l"])
-            .output() {
+            .output()
+        {
             if out.status.success() {
                 current_crontab = String::from_utf8_lossy(&out.stdout).into_owned();
             }
@@ -512,7 +531,10 @@ fn api_cron_update(_root: &str, raw_path: &str) -> Value {
         for cron_expr in pipeline_param.split('|') {
             let expr = cron_expr.trim();
             if !expr.is_empty() {
-                new_lines.push(format!("{} /home/ubuntu/buzzdropfeedv2/cron_publish.sh", expr));
+                new_lines.push(format!(
+                    "{} /home/ubuntu/buzzdropfeedv2/cron_publish.sh",
+                    expr
+                ));
             }
         }
         new_lines.push("".to_string());
@@ -549,9 +571,7 @@ fn api_cron_update(_root: &str, raw_path: &str) -> Value {
     // 2. Update local crontab (Pi 5)
     if !seeder_param.is_empty() {
         let mut current_crontab = String::new();
-        if let Ok(out) = std::process::Command::new("crontab")
-            .arg("-l")
-            .output() {
+        if let Ok(out) = std::process::Command::new("crontab").arg("-l").output() {
             if out.status.success() {
                 current_crontab = String::from_utf8_lossy(&out.stdout).into_owned();
             }
@@ -608,10 +628,7 @@ fn api_cron_update(_root: &str, raw_path: &str) -> Value {
     }
     let err = err_parts.join("; ");
 
-    obj(&[
-        ("success", Value::Bool(success)),
-        ("error", s(&err)),
-    ])
+    obj(&[("success", Value::Bool(success)), ("error", s(&err))])
 }
 
 // ── /api/analytics ──────────────────────────────────────────────────────────
@@ -684,7 +701,10 @@ fn api_budget(root: &str) -> Value {
                 .unwrap_or(0.0);
 
             runs.push(rec.clone());
-            if let Some(mo) = rec.get_str("started_at").map(|t| t[..t.len().min(7)].to_string()) {
+            if let Some(mo) = rec
+                .get_str("started_at")
+                .map(|t| t[..t.len().min(7)].to_string())
+            {
                 let e = monthly.entry(mo).or_default();
                 *e.entry("est_usd").or_insert(0.0) += est_usd;
                 *e.entry("yt_units").or_insert(0.0) += yt_units;
@@ -699,7 +719,10 @@ fn api_budget(root: &str) -> Value {
             mo.clone(),
             obj(&[
                 ("est_usd", num(sums.get("est_usd").copied().unwrap_or(0.0))),
-                ("yt_units", num(sums.get("yt_units").copied().unwrap_or(0.0))),
+                (
+                    "yt_units",
+                    num(sums.get("yt_units").copied().unwrap_or(0.0)),
+                ),
                 ("runs", num(sums.get("runs").copied().unwrap_or(0.0))),
             ]),
         );
@@ -731,7 +754,9 @@ fn api_budget(root: &str) -> Value {
 
 fn api_runs(root: &str) -> Value {
     let dir = Path::new(root).join("logs");
-    let Ok(rd) = fs::read_dir(&dir) else { return arr(Vec::new()) };
+    let Ok(rd) = fs::read_dir(&dir) else {
+        return arr(Vec::new());
+    };
     let mut states: Vec<PathBuf> = rd
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
@@ -800,9 +825,15 @@ fn api_runs(root: &str) -> Value {
             .unwrap_or_default();
 
         out.push(obj(&[
-            ("pipeline_id", s(&v.get_str("pipeline_id").unwrap_or_default())),
+            (
+                "pipeline_id",
+                s(&v.get_str("pipeline_id").unwrap_or_default()),
+            ),
             ("timestamp", s(&v.get_str("timestamp").unwrap_or_default())),
-            ("execution_stage", s(&v.get_str("execution_stage").unwrap_or_default())),
+            (
+                "execution_stage",
+                s(&v.get_str("execution_stage").unwrap_or_default()),
+            ),
             ("headline", s(&topic)),
             ("script_title", s(&script)),
             ("video_id", s(&video_id)),
@@ -829,8 +860,12 @@ fn url_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let mut hex = String::new();
-            if let Some(h1) = chars.next() { hex.push(h1); }
-            if let Some(h2) = chars.next() { hex.push(h2); }
+            if let Some(h1) = chars.next() {
+                hex.push(h1);
+            }
+            if let Some(h2) = chars.next() {
+                hex.push(h2);
+            }
             if let Ok(byte) = u8::from_str_radix(&hex, 16) {
                 res.push(byte as char);
             }
@@ -859,13 +894,20 @@ fn get_query_param(raw_path: &str, key: &str) -> Option<String> {
 
 fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
     let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
-    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
+    let root_dir = if is_pi {
+        "/home/jeevanjoshi/buzzdropfeedv2"
+    } else {
+        root
+    };
 
     if is_pipeline_running(root_dir) {
         return obj(&[
             ("success", Value::Bool(false)),
             ("command", s("")),
-            ("error", s("A pipeline run is already in progress. Duplicate runs are not allowed.")),
+            (
+                "error",
+                s("A pipeline run is already in progress. Duplicate runs are not allowed."),
+            ),
         ]);
     }
 
@@ -883,10 +925,10 @@ fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
     }
 
     let mut args = Vec::new();
-    
+
     // Auto-skip pre-flight interactive prompt when running headless from dashboard
     args.push("--skip-health-check".to_string());
-    
+
     if let Some(reg) = get_query_param(raw_path, "region") {
         if reg == "global" {
             args.push("--global".to_string());
@@ -902,7 +944,7 @@ fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
         args.push("--renderer".to_string());
         args.push(renderer);
     }
-    
+
     let is_resume = path.ends_with("/resume");
     if is_resume {
         args.push("--resume".to_string());
@@ -925,22 +967,18 @@ fn api_pipeline_control(root: &str, path: &str, raw_path: &str) -> Value {
     }
 
     let flag_str = args.join(" ");
-    let cmd_str = format!("cd {} && ./run_production.sh {}", root_dir, flag_str);
-    
+    // When the dashboard runs on the Pi it drives the OCI master over SSH, so the
+    // `cd` must target the OCI repo path, not the Pi's (root_dir).
+    let remote_dir = if is_pi { OCI_ROOT_DIR } else { root_dir };
+    let cmd_str = format!("cd {} && ./run_production.sh {}", remote_dir, flag_str);
+
     let spawned = if is_pi {
         std::process::Command::new("ssh")
-            .args(&[
-                "-o", "StrictHostKeyChecking=no",
-                "oci-prod",
-                &cmd_str
-            ])
+            .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", &cmd_str])
             .spawn()
     } else {
         std::process::Command::new("bash")
-            .args(&[
-                "-c",
-                &cmd_str
-            ])
+            .args(&["-c", &cmd_str])
             .spawn()
     };
 
@@ -961,12 +999,19 @@ fn api_seeding_trigger(root: &str, raw_path: &str) -> Value {
         return obj(&[
             ("success", Value::Bool(false)),
             ("command", s("")),
-            ("error", s("A seeding campaign is already in progress. Duplicate runs are not allowed.")),
+            (
+                "error",
+                s("A seeding campaign is already in progress. Duplicate runs are not allowed."),
+            ),
         ]);
     }
 
     let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
-    let root_dir = if is_pi { "/home/jeevanjoshi/buzzdropfeedv2" } else { root };
+    let root_dir = if is_pi {
+        "/home/jeevanjoshi/buzzdropfeedv2"
+    } else {
+        root
+    };
 
     if is_budget_exceeded(root_dir) {
         let current_cost = get_current_month_cost(root_dir);
@@ -1035,16 +1080,23 @@ fn api_seeding_trigger(root: &str, raw_path: &str) -> Value {
 
 fn api_pipeline_stop(root: &str) -> Value {
     let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
-    
+
     // Command to kill main.py / run_production.sh / cron / ffmpeg child processes
     let kill_cmd = "pkill -9 -f run_production.sh 2>/dev/null; pkill -9 -f main.py 2>/dev/null; pkill -9 -f cron_publish.sh 2>/dev/null; pkill -9 -f healthcheck.py 2>/dev/null; pkill -9 -f ffmpeg 2>/dev/null; true";
-    let hb_cmd = "echo '{\"running\":false,\"ts\":\"\"}' > logs/pipeline_heartbeat.json 2>/dev/null; true";
+    let hb_cmd =
+        "echo '{\"running\":false,\"ts\":\"\"}' > logs/pipeline_heartbeat.json 2>/dev/null; true";
 
     if is_pi {
         // Kill on OCI cloud host via SSH host oci-prod AND update its heartbeat
         let _ = std::process::Command::new("ssh")
-            .args(&["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "oci-prod",
-                &format!("{}; {}", kill_cmd, hb_cmd)])
+            .args(&[
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "ConnectTimeout=5",
+                "oci-prod",
+                &format!("{}; {}", kill_cmd, hb_cmd),
+            ])
             .output();
     } else {
         // Kill locally and update heartbeat
@@ -1059,10 +1111,7 @@ fn api_pipeline_stop(root: &str) -> Value {
         let _ = fs::write(&hb_path, b"{\"running\":false,\"ts\":\"\"}\n");
     }
 
-    obj(&[
-        ("success", Value::Bool(true)),
-        ("error", s("")),
-    ])
+    obj(&[("success", Value::Bool(true)), ("error", s(""))])
 }
 
 fn api_seeding_stop(_root: &str) -> Value {
@@ -1077,10 +1126,7 @@ fn api_seeding_stop(_root: &str) -> Value {
         Err(e) => (false, e.to_string()),
     };
 
-    obj(&[
-        ("success", Value::Bool(success)),
-        ("error", s(&err_msg)),
-    ])
+    obj(&[("success", Value::Bool(success)), ("error", s(&err_msg))])
 }
 
 fn is_pipeline_running(root: &str) -> bool {
@@ -1131,10 +1177,10 @@ fn current_month_str() -> String {
     let z = days + 719468;
     let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
     let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let mut y = (yoe as i64) + era * 400;
-    let doy = doe - (365*yoe + yoe/4 - yoe/100);
-    let mp = (5*doy + 2)/153;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     if m <= 2 {
         y += 1;
@@ -1185,11 +1231,7 @@ fn api_healthcheck_run(root: &str) -> Value {
     let cmd_str = format!("cd {} && ./venv/bin/python healthcheck.py", remote_root);
     let output = if is_pi {
         std::process::Command::new("ssh")
-            .args(&[
-                "-o", "StrictHostKeyChecking=no",
-                "oci-prod",
-                &cmd_str
-            ])
+            .args(&["-o", "StrictHostKeyChecking=no", "oci-prod", &cmd_str])
             .output()
     } else {
         std::process::Command::new(python_bin)
@@ -1208,10 +1250,7 @@ fn api_healthcheck_run(root: &str) -> Value {
         Err(e) => (false, e.to_string()),
     };
 
-    obj(&[
-        ("success", Value::Bool(success)),
-        ("output", s(&log_out)),
-    ])
+    obj(&[("success", Value::Bool(success)), ("output", s(&log_out))])
 }
 
 // ── /api/cleanup/run ─────────────────────────────────────────────────────────
@@ -1254,10 +1293,7 @@ fn api_cleanup_run(root: &str, raw_path: &str) -> Value {
         cmd.push_str(" --force");
     }
     let (success, log_out) = run_remote_or_local(root, &cmd);
-    obj(&[
-        ("success", Value::Bool(success)),
-        ("output", s(&log_out)),
-    ])
+    obj(&[("success", Value::Bool(success)), ("output", s(&log_out))])
 }
 
 // ── /api/usage/refresh ───────────────────────────────────────────────────────
@@ -1279,8 +1315,141 @@ fn api_usage_refresh(root: &str) -> Value {
             ])
             .output();
     }
+    obj(&[("success", Value::Bool(success)), ("output", s(&log_out))])
+}
+
+// ── /api/competitor* ────────────────────────────────────────────────────────
+// Competitor gap analysis (runs on the Pi, residential IP — OCI cloud IP is
+// blocked by YouTube for captions/durations). The lightweight benchmark
+// (competitor_scraper.py) is scraped keylessly; the deep analyzer
+// (competitor_deep_analyze.py) downloads/transcribes/classifies media. The gap
+// engine (src/engine/competitor_gap_engine.py) consolidates both into a fix-list.
+
+fn api_competitor_light(root: &str) -> Value {
+    let v = read_json(root, "logs/competitor_data.json");
+    match v {
+        Value::Null => obj(&[
+            ("schema", s("competitor_light/v1")),
+            ("generated_at", s("—")),
+            (
+                "note",
+                s("Run /api/competitor/run to refresh (keyless benchmark)."),
+            ),
+            ("analyses", Value::Arr(Vec::new())),
+        ]),
+        other => other,
+    }
+}
+
+fn api_competitor_deep(root: &str) -> Value {
+    let v = read_json(root, "logs/competitor_deep.json");
+    match v {
+        Value::Null => obj(&[
+            ("schema", s("competitor_deep/v1")),
+            ("generated_at", s("—")),
+            (
+                "note",
+                s("Run /api/competitor/run with ?channels=...&limit=N to refresh."),
+            ),
+            ("videos", Value::Arr(Vec::new())),
+        ]),
+        other => other,
+    }
+}
+
+fn api_competitor_gaps(root: &str) -> Value {
+    let v = read_json(root, "logs/competitor_gaps.json");
+    match v {
+        Value::Null => obj(&[
+            ("schema", s("competitor_gaps/v1")),
+            ("gaps", Value::Arr(Vec::new())),
+            ("severity_counts", obj(&[])),
+            (
+                "note",
+                s("Run /api/competitor/run to (re)build docs/COMPETITOR_GAPS.md."),
+            ),
+        ]),
+        other => other,
+    }
+}
+
+fn is_competitor_running() -> bool {
+    if let Ok(out) = std::process::Command::new("pgrep")
+        .args(&["-f", "python.*competitor_deep_analyze\\.py"])
+        .output()
+    {
+        if out.status.success() && !out.stdout.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+fn api_competitor_run(root: &str, raw_path: &str) -> Value {
+    if is_competitor_running() {
+        return obj(&[
+            ("success", Value::Bool(false)),
+            ("command", s("")),
+            ("error", s("A competitor deep-analysis is already running. Duplicate runs are not allowed.")),
+        ]);
+    }
+
+    let is_pi = std::path::Path::new("/home/jeevanjoshi").exists();
+    let root_dir = if is_pi {
+        "/home/jeevanjoshi/buzzdropfeedv2"
+    } else {
+        root
+    };
+
+    let channels = get_query_param(raw_path, "channels")
+        .filter(|c| !c.is_empty())
+        .or_else(|| {
+            env::var("CSVG_COMPETITOR_CHANNELS")
+                .ok()
+                .filter(|c| !c.is_empty())
+        })
+        .unwrap_or_else(|| "FinanceBureauOfficial".to_string());
+    let limit = get_query_param(raw_path, "limit")
+        .and_then(|l| l.parse::<i32>().ok())
+        .unwrap_or(3)
+        .clamp(1, 10);
+
+    let python_bin = format!("{}/venv/bin/python", root_dir);
+    let chain = format!(
+        "cd {} && {} competitor_deep_analyze.py --channels {:?} --limit {} --out logs/competitor_deep.json && {} -m src.engine.competitor_gap_engine --light logs/competitor_data.json --deep logs/competitor_deep.json --out docs/COMPETITOR_GAPS.md --json-out logs/competitor_gaps.json",
+        root_dir, python_bin, channels, limit, python_bin
+    );
+    let log_path = format!("{}/logs/competitor_deep.log", root_dir);
+
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    let mut cmd = std::process::Command::new("bash");
+    cmd.args(["-c", &chain]).current_dir(root_dir);
+    if let Ok(file) = log_file {
+        if let Ok(dup_file) = file.try_clone() {
+            cmd.stdout(std::process::Stdio::from(file));
+            cmd.stderr(std::process::Stdio::from(dup_file));
+        }
+    }
+    let spawned = cmd.spawn();
+
+    let cmd_str = format!(
+        "{}/venv/bin/python competitor_deep_analyze.py --channels {} --limit {} --out logs/competitor_deep.json  (then gap engine -> docs/COMPETITOR_GAPS.md)",
+        root_dir, channels, limit
+    );
+
+    let (success, err_msg) = match spawned {
+        Ok(_) => (true, String::new()),
+        Err(e) => (false, e.to_string()),
+    };
+
     obj(&[
         ("success", Value::Bool(success)),
-        ("output", s(&log_out)),
+        ("command", s(&cmd_str)),
+        ("log", s(&log_path)),
+        ("error", s(&err_msg)),
     ])
 }

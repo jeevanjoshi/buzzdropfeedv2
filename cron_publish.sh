@@ -53,6 +53,43 @@ done
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$LOG"; }
 
+# ----------------------------  Periodic competitor benchmark  -------------------------
+# Keyless competitor scraper (competitor_scraper.py): benchmarks competitor
+# titles / cadence / engagement against THIS pipeline and writes
+# logs/competitor_data.json + a gap report. Runs on its own cooldown (default
+# weekly) with a lock so we never hammer YouTube or run two scrapes at once.
+# It is non-fatal: a failure is logged but never blocks a publish.
+BENCH_COOLDOWN_DAYS="${CSVG_COMPETITOR_BENCHMARK_COOLDOWN_DAYS:-7}"
+BENCH_CHANNELS="${CSVG_COMPETITOR_CHANNELS:-FinanceBureauOfficial,AIUncovered,economicsexplained}"
+BENCH_LOCK="logs/.competitor_benchmark.lock"
+BENCH_LAST="logs/competitor_last_benchmark"
+
+run_competitor_benchmark() {
+    local age=9999
+    if [ -f "$BENCH_LAST" ]; then
+        age=$(( ($(date +%s) - $(stat -c %Y "$BENCH_LAST")) / 86400 ))
+    fi
+    if [ "$age" -lt "$BENCH_COOLDOWN_DAYS" ]; then
+        log "BENCHMARK skip (last ${age}d < ${BENCH_COOLDOWN_DAYS}d cooldown)"
+        return 0
+    fi
+    if [ -e "$BENCH_LOCK" ]; then
+        log "BENCHMARK skip (lock present, concurrent run)"
+        return 0
+    fi
+    touch "$BENCH_LOCK"
+    log "BENCHMARK start channels=${BENCH_CHANNELS}"
+    if ./venv/bin/python competitor_scraper.py --channels "$BENCH_CHANNELS" --limit 15 --no-script \
+            >> "logs/competitor_benchmark.log" 2>&1; then
+        log "BENCHMARK ok -> logs/competitor_data.json"
+    else
+        log "BENCHMARK failed (see logs/competitor_benchmark.log)"
+    fi
+    rm -f "$BENCH_LOCK"
+    touch "$BENCH_LAST"
+}
+run_competitor_benchmark
+
 # ----------------------------  Guard 1: already running  ------------------------------
 if pgrep -f "[m]ain.py" >/dev/null 2>&1; then
     log "SKIP pipeline already running (main.py present)"

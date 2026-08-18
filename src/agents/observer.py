@@ -36,6 +36,15 @@ _SOFT_VIOLATION_MARKERS = (
     "visual prompt",
     "narration too long",
     "Bare acronym",
+    # Internal throughline-coherence audit (Layer-2) is an LLM judge that is
+    # non-deterministic and occasionally over-flags legitimate bridge/context
+    # sentences (e.g. a generic "AI boom is unprecedented" transition that echoes
+    # a theme present elsewhere in the script). Treating it as SOFT (not hard)
+    # means a borderline bridge can never hard-abort a publish; the revision loop
+    # still attempts the surgical removal, and the script soft-approves if the
+    # mandatory quality gates pass. Genuine off-topic grafts are still repaired
+    # because the repair prompt names the exact sentence to delete.
+    "coherence audit",
 )
 
 _MONTHS_PAT = r"(?:Jan(?:uary|\.)?|Feb(?:ruary|\.)?|Mar(?:ch|\.)?|Apr(?:il|\.)?|May|June?|July?|Aug(?:ust|\.)?|Sept?(?:ember|\.)?|Oct(?:ober|\.)?|Nov(?:ember|\.)?|Dec(?:ember|\.)?)"

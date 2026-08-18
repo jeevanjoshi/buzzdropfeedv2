@@ -23,7 +23,7 @@ Pi edge node, and email the result when it finishes.
 
 Options:
   --no-detach            Run in the foreground; keep all flags; skip Pi sync
-  --rag <MODE>           Research mode: grounded|hybrid|scraper (Default: 'scraper')
+  --rag <MODE>           Research mode: grounded|hybrid|scraper (Default: 'hybrid')
   --renderer <ENGINE>    Renderer: ffmpeg|moviepy (Default: 'ffmpeg')
   --crossfade <SEC>      Crossfade duration in seconds (float)
   --tail <SEC>           Video-only hold after each shot's narration (float, default 1.2)

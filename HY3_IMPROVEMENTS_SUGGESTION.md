@@ -86,9 +86,10 @@ for Exa/Firecrawl/Tavily).
 
 ## 4. LOW — Doc / code mismatches (AGENTS.md & docs/PIPELINE_CONVERGED_PLAN.md)
 
-- `--rag` default: AGENTS.md says `scraper`; main.py:76 actually defaults to
-  `hybrid`. (orchestrator.run_pipeline default is `scraper` but main.py
-  overrides.) FIX doc or main.py to be consistent.
+- `--rag` default: RESOLVED — AGENTS.md, main.py, run_production.sh,
+  healthcheck.py, and the dashboard dropdown now all agree the default is
+  `hybrid` (main.py:76). orchestrator.run_pipeline still defaults its own
+  `rag_mode` param to `scraper`, but main.py overrides it with `hybrid`.
 - `--help`: AGENTS.md says "silently ignored"; main.py:65-66 explicitly
   handles `--help`/`-h` (prints usage + exits). FIX doc.
 - `--probe-llm`/`--probe-yt`: AGENTS.md attributes them to run_production.sh;

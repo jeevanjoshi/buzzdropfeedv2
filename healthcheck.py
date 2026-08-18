@@ -458,7 +458,7 @@ def check_hermetic_suite() -> bool:
 # Entrypoint
 # ---------------------------------------------------------------------------
 def _parse_rag_mode(argv):
-    """Pull the ``--rag <mode>`` value from argv (default 'scraper')."""
+    """Pull the ``--rag <mode>`` value from argv (default 'hybrid')."""
     try:
         i = argv.index("--rag")
         if i + 1 < len(argv):
