@@ -533,8 +533,10 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
 def _native_text_mode() -> bool:
     """When enabled, thumbnails ship with the hook rendered NATIVELY by the
     image model (no PIL burn) and with ZERO color-grading post-processing — the
-    raw model output (only exact-dimension + JPEG-size compliance applied)."""
-    return os.getenv("CSVG_NANO_TEXT_IN_IMAGE", "0").strip().lower() in ("1", "true", "yes", "on")
+    raw model output (only exact-dimension + JPEG-size compliance applied).
+    ON by default; set CSVG_NANO_TEXT_IN_IMAGE=0 to fall back to the PIL-burned
+    Anton typography + color-grade path."""
+    return os.getenv("CSVG_NANO_TEXT_IN_IMAGE", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def comply_thumbnail(data: Optional[bytes], aspect_ratio: str = "16:9",
