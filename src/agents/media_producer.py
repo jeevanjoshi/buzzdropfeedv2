@@ -1409,7 +1409,7 @@ class MediaProducerAgent:
                     print(f"[MediaProducer] Merging audio {wav_path} with specialized video {temp_specialized_path} -> {mp4_path} (dur={shot_timeline_dur:.2f}s)")
                     merge_cmd = [
                         "ffmpeg", "-y",
-                        "-i", temp_specialized_path,
+                        "-stream_loop", "-1", "-i", temp_specialized_path,
                         "-i", wav_path,
                         "-filter_complex",
                         "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"

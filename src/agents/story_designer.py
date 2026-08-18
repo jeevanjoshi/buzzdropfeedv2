@@ -909,11 +909,11 @@ class StoryDesignerAgent:
                     - "act_index": integer 1 to 6
                     - "narration_text": string matching the word length targets specified in Requirement 1.
                     - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
-                    - "visual_type": string classification of the visual format. Choose EXACTLY one of:
-                      * "standard_image" (default photorealistic cinematic scenes)
-                      * "gif_meme" (humorous reaction images, memes, or high-retention popular GIPHY clips)
-                      * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
-                      * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
+                     - "visual_type": string classification of the visual format. Choose EXACTLY one of:
+                       * "standard_image" (default photorealistic cinematic scenes)
+                       * "matplotlib_chart" (data-led growth line/bar graphs showing numbers, percentages, or milestones)
+                       * "svg_ticker" (glowing real-time stock price indices or valuation counting tickers)
+                     NOTE: reaction GIFs / memes (gif_meme, gif_sticker) are NOT permitted on this documentary-style channel. Always use cinematic stills, charts, or tickers.
                  4. No Spoken/Visual Citations: Do NOT explicitly name or verbally attribute the sources, publishers, or web links in the spoken narration or screen visual prompts (e.g. do not say 'According to Wired', 'Reuters reports', 'as shown by TechCrunch'). Present the facts directly and naturally in the storytelling without these spoken citations. The sources will be captured in the description instead.
                  5. Strict Temporal Grounding: Frame current developments within {current_month_year}; treat any pre-2026/historical-tagged fact as PAST background only, never as a current event.
                  5b. NO ACRONYMS: Never use acronyms or initialisms in narration. Spell EVERY abbreviation out to its most appropriate full term for the sentence's context the first time it appears (e.g. 'AI' → 'artificial intelligence', 'US' → 'United States', 'GDP' → 'gross domestic product', 'IPO' → 'initial public offering', 'ROI' → 'return on investment', 'CEO' → 'chief executive officer'). Proper-noun company/person names that are themselves initialisms (NASA, IBM, CNN, NYSE) may remain. NEVER emit a bare all-caps shorthand.
@@ -974,7 +974,9 @@ class StoryDesignerAgent:
                             vis = s.get("visual_prompt") or s.get("visual") or s.get("prompt") or f"Cinematic 16:9 widescreen visual for {headline}, 8k photorealistic."
                         
                             v_type_raw = s.get("visual_type") or "standard_image"
-                            if v_type_raw not in ["standard_image", "gif_meme", "gif_sticker", "matplotlib_chart", "svg_ticker"]:
+                            if v_type_raw in ("gif_meme", "gif_sticker"):
+                                v_type_raw = "standard_image"
+                            if v_type_raw not in ["standard_image", "matplotlib_chart", "svg_ticker"]:
                                 v_type_raw = "standard_image"
 
                             # Grounded chart spec for stat shots: prefer the LLM's
@@ -1355,8 +1357,8 @@ class StoryDesignerAgent:
             "- beat_summary: what this shot must accomplish (one clause).\n"
             "- facts_to_use: 1-3 REAL facts above this shot must convey. Never invent.\n"
             "- publisher: the single publication from the facts to attribute (for reference only; do not include in narration/prose). NEVER a search tool.\n"
-            "- visual_type: standard_image | gif_meme | matplotlib_chart | svg_ticker. "
-            "Use matplotlib_chart ONLY for a shot whose facts carry numbers.\n"
+            "- visual_type: standard_image | matplotlib_chart | svg_ticker. "
+            "Reaction GIFs/memes are NOT permitted (documentary style). Use matplotlib_chart ONLY for a shot whose facts carry numbers.\n"
             "- NO ACRONYMS in beat_summary (spell them out).\n"
             "Return ONLY JSON: {\"shots\": [{\"shot_id\": 1..18, \"act_index\": 1..6, "
             "\"beat_summary\": \"...\", \"facts_to_use\": [\"...\"], \"publisher\": \"...\", "
@@ -1368,13 +1370,20 @@ class StoryDesignerAgent:
         beats = []
         for item in res["shots"]:
             try:
+                _vt_raw = str(item.get("visual_type") or "standard_image")
+                if _vt_raw in ("gif_meme", "gif_sticker"):
+                    _vt_raw = "standard_image"
+                try:
+                    _vt = VisualType(_vt_raw)
+                except ValueError:
+                    _vt = VisualType.STANDARD_IMAGE
                 beats.append(ShotBeat(
                     shot_id=int(item.get("shot_id")),
                     act_index=int(item.get("act_index")),
                     beat_summary=str(item.get("beat_summary") or "").strip(),
                     facts_to_use=[str(x) for x in (item.get("facts_to_use") or [])],
                     publisher=str(item.get("publisher") or "").strip(),
-                    visual_type=VisualType(str(item.get("visual_type") or "standard_image")),
+                    visual_type=_vt,
                 ))
             except Exception:
                 continue

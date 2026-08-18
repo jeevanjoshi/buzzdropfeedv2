@@ -980,12 +980,12 @@ def _bgm_duck_filter(narration_stream: str, bgm_stream: str, total_duration: flo
 
     Music rides down under narration (sidechain keyed on the voice) and swells
     back in the pauses. Env-tunable without code edits:
-      - BGM_VOLUME               resting music level (default 0.45)
+      - BGM_VOLUME               resting music level (default 0.22)
       - BGM_SIDECHAIN_THRESHOLD  duck trigger level (default 0.02)
       - BGM_SIDECHAIN_RATIO      sidechain compression ratio (default 12)
     Emits a stream named ``[a]`` ready for ffmpeg's ``-map [a]``.
     """
-    bgm_vol = os.getenv("BGM_VOLUME", "0.15")
+    bgm_vol = os.getenv("BGM_VOLUME", "0.22")
     sc_thresh = os.getenv("BGM_SIDECHAIN_THRESHOLD", "0.02")
     sc_ratio = os.getenv("BGM_SIDECHAIN_RATIO", "12")
     bgm_tempo = os.getenv("BGM_TEMPO", "1.1")
@@ -1016,6 +1016,42 @@ def _bgm_duck_filter(narration_stream: str, bgm_stream: str, total_duration: flo
 
 
 
+def _verify_output_playable(path: str, ok_fraction: float = 0.9) -> bool:
+    """Reject truncated outputs whose moov claims a long duration but whose media
+    data ends early. ffprobe reports the *header* duration (the lie), so Gate 7's
+    duration check passes on a truncated file. We input-seek to ~90% of the
+    claimed duration and require a decodable frame; a truncated file has no data
+    there and the extract fails. Returns True only if the tail is playable.
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30)
+        d = float(r.stdout.strip())
+    except Exception:
+        return False
+    if d < 5.0:
+        return True  # too short to bother; other gates will catch real issues
+    t = d * ok_fraction
+    out = path + ".playchk.jpg"
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.2f}", "-i", path,
+             "-frames:v", "1", "-f", "image2", out],
+            capture_output=True, text=True, timeout=90)
+        ok = res.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 200
+    except Exception:
+        ok = False
+    finally:
+        if os.path.exists(out):
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+    return ok
+
+
 def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
                          subtitle_path, output_video_path, bgm_path=None):
     """
@@ -1037,6 +1073,8 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
     for d in durs:
         s += d
         prefix.append(s)
+
+    total_dur = prefix[-1] - (n - 1) * cf
 
     has_sub = subtitle_path and os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 50
     has_bgm = bgm_path and os.path.exists(bgm_path) and os.path.getsize(bgm_path) > 1000
@@ -1068,14 +1106,17 @@ def _build_crossfade_cmd(clip_paths, durs, crossfade, transition,
         cura = f"[ax{i}]"
 
     # Burn subtitles on the final composited video stream.
+    # Natural open/close: brief video fade-in at start and fade-out at end so the
+    # master never hard-cuts on the first/last frame.
+    _fo = max(0.0, total_dur - 0.8)
+    _fade_io = f"fade=t=in:st=0:d=0.6,fade=t=out:st={_fo:.2f}:d=0.8"
     if has_sub:
         esc = subtitle_path.replace(":", "\\:").replace("'", "'\\''")
-        parts.append(f"{cur}ass='{esc}',format=yuv420p[v]")
+        parts.append(f"{cur}{_fade_io},ass='{esc}',format=yuv420p[v]")
     else:
-        parts.append(f"{cur}format=yuv420p[v]")
+        parts.append(f"{cur}{_fade_io},format=yuv420p[v]")
 
     # Voice + sidechain-ducked BGM, or narration only.
-    total_dur = prefix[-1] - (n - 1) * cf
     if has_bgm:
         parts.append(_bgm_duck_filter(cura, f"[{n}:a]", total_duration=total_dur))
     else:
@@ -1123,6 +1164,11 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
             if cmd:
                 res = subprocess.run(cmd, capture_output=True, text=True)
                 if res.returncode == 0:
+                    if not _verify_output_playable(req.output_video_path):
+                        raise Exception(
+                            "FFmpeg xfade produced a TRUNCATED output (media data ends before "
+                            "the claimed duration). Aborting rather than shipping a broken video."
+                        )
                     return {"status": "success", "engine": f"ffmpeg_xfade_{req.transition}",
                             "path": req.output_video_path, "crossfade": req.crossfade}
                 print(f"FFmpeg XFade Error: {res.stderr}")
@@ -1141,23 +1187,54 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
         if req.bgm_path and os.path.exists(req.bgm_path) and os.path.getsize(req.bgm_path) > 1000:
             has_bgm = True
 
+        # Use the concat FILTER (not the concat demuxer). The demuxer requires every
+        # input to share byte-identical stream parameters; when a shot's clip differs
+        # (e.g. a 15fps GIF loop after 25fps image shots) it silently truncates the
+        # output at that boundary. The filter re-encodes and tolerates differing fps /
+        # resolution / SAR, so all 18 shots assemble correctly.
+        n_clips = len(clip_paths)
+        if n_clips == 0:
+            raise Exception("FFmpeg concat error: no valid clip paths found in concat list")
+
+        scale_pad = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
+        # Natural open/close: brief video fade-in at the very start and fade-out at
+        # the very end so the master never hard-cuts on the first/last frame (the
+        # BGM already fades; this matches the picture to it).
+        _fo = max(0.0, (total_dur or 0.0) - 0.8)
+        _fade_io = f"fade=t=in:st=0:d=0.6,fade=t=out:st={_fo:.2f}:d=0.8" if total_dur else "fade=t=in:st=0:d=0.6"
+        if has_subtitles:
+            sub_path_escaped = req.subtitle_path.replace(":", "\\:").replace("'", "'\\''")
+            video_filter = f"[cv]fps=25,{scale_pad},{_fade_io},ass='{sub_path_escaped}'[v]"
+        else:
+            video_filter = f"[cv]fps=25,{scale_pad},{_fade_io}[v]"
+
+        concat_map = "".join(f"[{i}:v][{i}:a]" for i in range(n_clips))
+        inputs = []
+        for p in clip_paths:
+            inputs += ["-i", p]
+
         if has_bgm:
+            inputs += ["-stream_loop", "-1", "-i", req.bgm_path]
+            bgm_idx = n_clips
+            # [cv]/[ca] come from the concat filter; narration=[ca], bgm=[{bgm_idx}:a]
+            audio_filter = _bgm_duck_filter("[ca]", f"[{bgm_idx}:a]", total_duration=total_dur)
+            filter_complex = f"{concat_map}concat=n={n_clips}:v=1:a=1[cv][ca];{video_filter};{audio_filter}"
             cmd = [
                 "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
-                "-stream_loop", "-1", "-i", req.bgm_path,
-                "-filter_complex", f"[0:v]{vf_filter}[v];" + _bgm_duck_filter("[0:a]", "[1:a]", total_duration=total_dur),
+                *inputs,
+                "-filter_complex", filter_complex,
                 "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",
                 req.output_video_path
             ]
         else:
+            filter_complex = f"{concat_map}concat=n={n_clips}:v=1:a=1[cv][ca];{video_filter}"
             cmd = [
                 "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0", "-i", req.concat_list_path,
-                "-filter_complex", f"[0:v]{vf_filter}[v];[0:a]acopy[a]",
-                "-map", "[v]", "-map", "[a]",
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[v]", "-map", "[ca]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-maxrate", "6M", "-bufsize", "12M",
                 "-c:a", "aac", "-b:a", "192k",
                 req.output_video_path
@@ -1165,6 +1242,11 @@ async def assemble_ffmpeg_timeline(req: TimelineAssemblyRequest):
 
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0:
+            if not _verify_output_playable(req.output_video_path):
+                raise Exception(
+                    "FFmpeg concat produced a TRUNCATED output (media data ends before "
+                    "the claimed duration). Aborting rather than shipping a broken video."
+                )
             return {"status": "success", "path": req.output_video_path}
         else:
             print(f"FFmpeg Concat Error: {res.stderr}")

@@ -6,6 +6,20 @@ from src.schemas.state import GlobalState
 
 logger = logging.getLogger("CSVG_PIPELINE")
 
+
+def _probe_duration(path: str) -> float:
+    """Return the real decodable duration (seconds) of a media file, or 0.0."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30)
+        v = float(r.stdout.strip())
+        return v if v > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
 _COVER_ENABLED = os.getenv("CSVG_SHORTS_COVERS", "1").strip().lower() not in ("0", "false", "no")
 
 
@@ -205,13 +219,18 @@ class MicroContentProducer:
         cover_paths = []
         for clip_idx, (shot_idx, start_s, clip_dur) in enumerate(start_offsets, 1):
             out_clip = os.path.join(self.output_dir, f"short_{pipeline_id}_clip{clip_idx}.mp4")
-            # FFmpeg command to crop 16:9 to 9:16 center crop and trim clip
+            # FFmpeg command to crop 16:9 to 9:16 center crop and trim clip.
+            # A short fade-out (video + audio) over the final ~0.8s makes the Short
+            # end naturally instead of cutting abruptly mid-breath.
+            fade_d = min(0.8, clip_dur * 0.25)
+            fade_st = max(0.0, clip_dur - fade_d)
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{start_s:.2f}",
                 "-i", final_video,
                 "-t", f"{clip_dur:.2f}",
-                "-vf", "crop=ih*9/16:ih,scale=1080:1920",
+                "-vf", f"crop=ih*9/16:ih,scale=1080:1920,fade=t=out:st={fade_st:.2f}:d={fade_d:.2f}",
+                "-af", f"afade=t=out:st={fade_st:.2f}:d={fade_d:.2f}",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
                 out_clip
@@ -220,8 +239,19 @@ class MicroContentProducer:
             try:
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
                 ok_trim = os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000
+                # Guard: if the master was truncated/short at this start time the
+                # extracted clip will be far shorter than requested — never ship it.
                 if ok_trim:
-                    logger.info(f"[MICRO_CONTENT] Rendered 9:16 Short clip #{clip_idx}: {out_clip}")
+                    _got = _probe_duration(out_clip)
+                    if _got < clip_dur * 0.9:
+                        logger.warning(
+                            f"[MICRO_CONTENT] Short clip #{clip_idx} truncated "
+                            f"(got {_got:.1f}s of {clip_dur:.1f}s) — master likely "
+                            f"missing data at start {start_s:.1f}s; skipping."
+                        )
+                        ok_trim = False
+                    else:
+                        logger.info(f"[MICRO_CONTENT] Rendered 9:16 Short clip #{clip_idx}: {out_clip}")
                 else:
                     logger.warning(f"[MICRO_CONTENT] Trimmed clip #{clip_idx} empty: {out_clip}")
             except Exception as e:
