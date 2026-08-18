@@ -123,11 +123,21 @@ def _thumbnail_emotion(seed: str) -> str:
 
 
 def _bold_font_path() -> Optional[str]:
-    """Locate an ultra-bold sans-serif TrueType font (DejaVu Sans Bold) for
-    thumbnail typography — the article-recommended bold, legible-at-mobile-size
-    look that cv2's thin Hershey vector fonts cannot deliver."""
+    """Locate an ultra-bold, high-impact sans-serif TrueType font for thumbnail
+    typography — heavy weights survive the mobile shrink-test far better than
+    cv2's thin Hershey vector fonts. Prefers condensed/impact faces (Anton,
+    Archivo Black, Oswald, Bebas Neue, Montserrat ExtraBold) when present, then
+    a `CSVG_THUMBNAIL_FONT` override, then DejaVu Sans Bold as the safe default."""
     import matplotlib
+    env_font = os.getenv("CSVG_THUMBNAIL_FONT")
+    if env_font and os.path.exists(env_font):
+        return env_font
     candidates = [
+        "/usr/share/fonts/truetype/anton/Anton-Regular.ttf",
+        "/usr/share/fonts/truetype/archivo/ArchivoBlack-Regular.ttf",
+        "/usr/share/fonts/truetype/oswald/Oswald-Bold.ttf",
+        "/usr/share/fonts/truetype/bebas/BebasNeue-Regular.ttf",
+        "/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf",
         os.path.join(matplotlib.get_data_path(), "fonts", "ttf", "DejaVuSans-Bold.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
@@ -146,13 +156,15 @@ def _load_bold_font(size: int):
 
 
 def _fit_thumbnail_font(headline: str, max_width: int) -> int:
-    """Largest font size whose single headline line still fits max_width (px)."""
-    for size in range(116, 53, -1):
+    """Largest font size whose single headline line still fits max_width (px).
+    Caps at ~190px so the hook stays in the research-backed 150-200px CTR
+    sweet spot (extra-bold, legible at mobile feed size)."""
+    for size in range(190, 60, -1):
         font = _load_bold_font(size)
         _l, _t, _r, _b = font.getbbox(headline)
         if (_r - _l) <= max_width:
             return size
-    return 54
+    return 60
 
 
 def _shorten_thumbnail_text(text: str) -> str:
@@ -432,11 +444,12 @@ async def generate_thumbnail(req: ThumbnailRequest):
                 "Composition: rule-of-thirds, single clear focal subject placed in the "
                 "RIGHT third of frame at one of the grid intersections, generous clean "
                 "negative space in the LEFT third (reserved for a bold text overlay), "
-                "never dead-centered. Minimal background detail, no extra objects, no "
-                "clutter — it must stay instantly readable at a tiny thumbnail size. "
-                "60-30-10 color grading: muted/deep background, high-contrast saturated "
-                "subject, one vivid accent color. Sharp focus on the subject, soft "
-                "blurred background."
+                "never dead-centered. ONE bold graphic device (arrow, circle, magnifier, "
+                "split, or number) to make the frame instantly catchy. 60-30-10 color "
+                "grading: a VIVID, saturated, high-energy background (use red, yellow, "
+                "orange, cyan or magenta — these earn the most feed attention), a "
+                "high-contrast subject that pops against it, one vivid accent color. "
+                "Sharp focus on the subject, soft blurred background."
             )
             _emotion_clause = ""
             if "face" not in scene.lower() and "gaze" not in scene.lower():
@@ -548,10 +561,11 @@ async def generate_thumbnail(req: ThumbnailRequest):
                     nparr = np.frombuffer(bg_data, np.uint8)
                     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     img = cv2.resize(img, (1280, 720))
-                    # Mild overall dim ONLY for text contrast — keep the scene bright
-                    # (previously 0.4 of a near-black overlay crushed brightness).
-                    img = cv2.convertScaleAbs(img, alpha=1.02, beta=6)
-                    cv2.addWeighted(img, 0.84, np.full_like(img, 10), 0.16, 0, img)
+                    # Keep the scene BRIGHT and punchy for feed pop — a light lift
+                    # only (no near-black overlay). High CONTRAST (bright subject
+                    # vs darker bg) is the dominant CTR lever, so we never crush
+                    # overall brightness here.
+                    img = cv2.convertScaleAbs(img, alpha=1.06, beta=10)
                 except Exception as img_err:
                     print(f"[Thumbnail] Failed to decode generated background: {img_err}. Using bright fallback.")
                     img = np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -572,7 +586,7 @@ async def generate_thumbnail(req: ThumbnailRequest):
             _vy = np.linspace(0.0, 1.0, h, dtype=np.float32)
             _gx, _gy = np.meshgrid(_vx, _vy)
             _dist = np.sqrt((_gx - 0.5) ** 2 + (_gy - 0.5) ** 2) * 2.0
-            _vig = np.clip(1.0 - 0.16 * np.clip(_dist - 0.75, 0.0, 1.0), 0.84, 1.0)
+            _vig = np.clip(1.0 - 0.10 * np.clip(_dist - 0.80, 0.0, 1.0), 0.90, 1.0)
             img = (img.astype(np.float32) * _vig[..., None]).astype(np.uint8)
 
             # ── Clean single-line, ultra-bold typography (decluttered) ────────

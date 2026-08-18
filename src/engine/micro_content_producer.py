@@ -49,8 +49,9 @@ def _compose_shorts_cover(frame_png: str, out_png: str, hook: str) -> None:
     W, H = img.size
     if W != 1080 or H != 1920:
         img = img.resize((1080, 1920), Image.LANCZOS)
-    # Darken the scene so the single focal element pops (subject separation).
-    img = img.point(lambda p: int(p * 0.62))
+    # Lightly dim the scene so the single focal element (hook) pops — keep it
+    # bright enough to stay catchy on mobile (research: high-contrast, not dark).
+    img = img.point(lambda p: int(p * 0.82))
     base = img.convert("RGBA")
 
     # Bottom 20% (titles / engagement row) + right 15% (Like/Comment/Share)
@@ -73,7 +74,7 @@ def _compose_shorts_cover(frame_png: str, out_png: str, hook: str) -> None:
     if not font_path:
         base.convert("RGB").save(out_png, "PNG")
         return
-    font = _fit_cover_font(hook, font_path, max_width=int(W * 0.87), hi=int(H * 0.14), lo=int(H * 0.065))
+    font = _fit_cover_font(hook, font_path, max_width=int(W * 0.87), hi=int(H * 0.16), lo=int(H * 0.065))
     l, t, r, b = font.getbbox(hook)
     txt_w, txt_h = r - l, b - t
     x0 = (W - txt_w) // 2

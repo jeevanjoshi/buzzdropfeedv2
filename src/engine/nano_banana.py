@@ -187,7 +187,7 @@ def generate_image(prompt: str, aspect_ratio: str = "16:9",
         types = _genai_mod.types
 
         contents: Any = prompt
-        image_size = (os.getenv("CSVG_NANO_BANANA_IMAGE_SIZE") or "2K").strip()
+        image_size = (os.getenv("CSVG_NANO_BANANA_IMAGE_SIZE") or "4K").strip()
         if image_size not in ("1K", "2K", "4K"):
             image_size = "2K"
         config = types.GenerateContentConfig(
@@ -287,8 +287,8 @@ def _shorten_ctr_text(text: str) -> str:
     try:
         clean = _re.sub(r"\s+", " ", str(text or "")).strip().upper()
         words = clean.split()
-        if len(words) > 5:
-            words = words[:5]
+        if len(words) > 3:
+            words = words[:3]
         return " ".join(words) if words else "WATCH THIS"
     except Exception:
         return "WATCH THIS"
@@ -322,16 +322,18 @@ def _text_render_block(hook: str, aspect_ratio: str = "16:9",
         f"\nCRITICAL TEXT REQUIREMENT (obey EXACTLY): render ONLY these words — \"{hook}\" — "
         f"and no other words, no extra letters, no second line.\n"
         f"Placement: {placement}.\n"
-        f"Typography rules (YouTube thumbnail guidelines): 3-5 words max; ONE single line; "
+        f"Typography rules (YouTube thumbnail guidelines): 2-3 words max; ONE single line; "
         f"thick, ultra-bold heavy sans-serif in the style of Bebas Neue or Montserrat Extra "
         f"Bold (cap-height at least 60px equivalent on a 1280px-wide canvas / 14% of image "
         f"height); the whole word string occupies between 40% and 60% of frame width so it "
-        f"is instantly readable on mobile. The text MUST be separated from the background "
-        f"with {style_desc}, using an accent color of #{accent} for the accent elements "
-        f"(e.g. the color block or a colored pop). HIGH-CONTRAST, bright saturated lettering "
-        f"that pops in both light and dark YouTube mode. Do not split words across lines, do "
-        f"not shrink the text, do not add punctuation or hashtags. Keep the rest of the image "
-        f"clean and simple."
+        f"is instantly readable on mobile. Render the words ON a solid, bold color block "
+        f"(the accent #{accent}) with white letters and a thick dark outline, so the hook "
+        f"pops as one punchy CTR element. HIGH-CONTRAST, bright saturated lettering that "
+        f"pops in both light and dark YouTube mode. CRITICAL legibility: spell the exact "
+        f"words above PERFECTLY, render every glyph razor-sharp and correctly formed — no "
+        f"melted, fused, missing, or hallucinated letters. Do not split words across lines, "
+        f"do not shrink the text, do not add punctuation or hashtags. Keep the rest of the "
+        f"image clean and simple."
     )
 
 
@@ -340,12 +342,6 @@ def _bold_font_path() -> Optional[str]:
         from mcp_servers.media_cloud.server import _bold_font_path as _mcp_bold
         return _mcp_bold()
     except Exception:
-        candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        ]
-        for cand in candidates:
-            if os.path.exists(cand):
-                return cand
         return None
 
 
@@ -362,6 +358,88 @@ def _fit_bold_font(text: str, font_path: Optional[str], max_width: int,
             return f, size
     f = ImageFont.truetype(path, lo) if path else ImageFont.load_default()
     return f, lo
+
+
+def _detect_face_bbox(img: Any) -> Optional[tuple]:
+    """Best-effort face detection on the generated art so the text block can be
+    kept off the reaction face. Uses OpenCV's bundled frontal-face Haar cascade
+    (no network, no extra deps). Returns (x, y, w, h) of the largest face, or
+    None when detection is unavailable / finds nothing. Never raises."""
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image as _PILImage
+        gray = np.array(img.convert("L"))
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        if cascade.empty():
+            return None
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4,
+                                          minSize=(int(gray.shape[1] * 0.08),
+                                                   int(gray.shape[0] * 0.08)))
+        if len(faces) == 0:
+            return None
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        return (int(x), int(y), int(w), int(h))
+    except Exception:
+        return None
+
+
+def _choose_text_anchor(aspect_ratio: str, W: int, H: int, block_w: int,
+                        block_h: int, face: Optional[tuple]) -> tuple:
+    """Pick the (x0, y0) top-left for the solid text block. Prefers the
+    composition-default anchor, but if a face is detected shifts to the candidate
+    anchor with the least face-overlap while keeping YouTube safe zones clear
+    (16:9: bottom-right timestamp + bottom title; 9:16: bottom 20% + right 15%).
+    Returns coordinates that keep the whole block inside the frame."""
+    is_short = aspect_ratio == "9:16"
+    # Candidate anchors as fractions of (W, H) for the block's top-left.
+    if is_short:
+        fracs = [(0.06, 0.08), (0.50, 0.08), (0.50, 0.16), (0.06, 0.42),
+                 (0.50, 0.42), (0.06, 0.16)]
+    else:
+        fracs = [(0.05, 0.14), (0.55, 0.14), (0.05, 0.62), (0.55, 0.60),
+                 (0.05, 0.40)]
+    best = None
+    best_score = None
+    for fx, fy in fracs:
+        ax = int(W * fx)
+        ay = int(H * fy)
+        # Keep the whole block on-canvas.
+        if ax < 0 or ay < 0 or ax + block_w > W or ay + block_h > H:
+            continue
+        # Safe-zone penalty: never sit in the timestamp/title/engagement UI.
+        safe_pen = 0.0
+        if is_short:
+            if ay + block_h > H * 0.80:
+                safe_pen += 2.0
+            if ax + block_w > W * 0.85 and ay + block_h > H * 0.55:
+                safe_pen += 1.5
+        else:
+            if ax + block_w > W * 0.86 and ay + block_h > H * 0.86:
+                safe_pen += 2.0
+            if ay + block_h > H * 0.93:
+                safe_pen += 1.0
+        # Face-overlap penalty (normalized intersection area).
+        face_pen = 0.0
+        if face:
+            fx0, fy0, fw, fh = face
+            ix = max(0, min(ax + block_w, fx0 + fw) - max(ax, fx0))
+            iy = max(0, min(ay + block_h, fy0 + fh) - max(ay, fy0))
+            inter = max(0, ix) * max(0, iy)
+            face_pen = inter / float(fw * fh) if fw * fh else 0.0
+        score = face_pen * 3.0 + safe_pen
+        if best_score is None or score < best_score:
+            best_score = score
+            best = (ax, ay)
+    if best is None:
+        # Fallback: default composition anchor (clamped on-canvas).
+        bx = int(W * (0.06 if is_short else 0.05))
+        by = int(H * (0.16 if is_short else 0.14))
+        bx = max(0, min(bx, W - block_w))
+        by = max(0, min(by, H - block_h))
+        return (bx, by)
+    return best
 
 
 def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
@@ -387,53 +465,54 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
         font_path = _bold_font_path()
         if aspect_ratio == "16:9":
             font, fsize = _fit_bold_font(hook, font_path,
-                                         max_width=int(W * 0.80), hi=148, lo=60)
-            x0 = int(W * 0.065)
-            y0 = int(H * 0.21)
+                                         max_width=int(W * 0.80), hi=210, lo=60)
         else:
             font, fsize = _fit_bold_font(hook, font_path,
-                                         max_width=int(W * 0.88), hi=236, lo=110)
-            l, t, r, b = font.getbbox(hook)
-            x0 = (W - (r - l)) // 2
-            y0 = int(H * 0.16)
+                                         max_width=int(W * 0.88), hi=320, lo=110)
         l, t, r, b = font.getbbox(hook)
         tw, th = r - l, b - t
+
+        # ── Face-aware placement ───────────────────────────────────────────
+        # The hook is burned at a FIXED anchor, but the AI art may place the
+        # subject's reaction face anywhere. Detect it and shift the solid text
+        # block to the anchor that least overlaps the face (while keeping
+        # YouTube safe zones clear) so the block never covers the face — the
+        # single highest-CTR element.
+        pad_x = max(int(fsize * 0.22), 16)
+        pad_y = max(int(fsize * 0.16), 12)
+        block_w, block_h = tw + 2 * pad_x, th + 2 * pad_y
+        face = _detect_face_bbox(img)
+        x0, y0 = _choose_text_anchor(aspect_ratio, W, H, block_w, block_h, face)
 
         v = variant or {}
         palette = v.get("palette") or {}
         accent = palette.get("accent") or (255, 59, 48)
 
-        # Localized legibility scrim: a soft semi-transparent dark plate behind
-        # the text block so the hook stays readable over ANY art tone (the same
-        # trick Studio-grade thumbnails use), without darkening the whole frame.
-        pad = max(int(fsize * 0.18), 12)
-        plate = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        pd = ImageDraw.Draw(plate)
-        pd.rounded_rectangle([x0 - pad, y0 - pad, x0 + tw + pad, y0 + th + pad],
-                             radius=max(int(fsize * 0.22), 16),
-                             fill=(8, 10, 14, 150))
-        plate = plate.filter(ImageFilter.GaussianBlur(6))
-        base = Image.alpha_composite(base, plate)
+        # Solid high-contrast color block behind the hook — the classic pro
+        # CTR device — so the text pops on ANY art tone and stays readable at
+        # mobile size. 60-30-10 rule: the block is the vivid 10% accent; white
+        # text + thick dark outline + drop shadow keep it legible over it.
+        block = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        bd = ImageDraw.Draw(block)
+        bd.rounded_rectangle([x0 - pad_x, y0 - pad_y, x0 + tw + pad_x, y0 + th + pad_y],
+                              radius=max(int(fsize * 0.18), 14),
+                              fill=accent + (255,))
+        base = Image.alpha_composite(base, block)
 
-        # Soft blurred drop shadow separates the glyphs on any art tone.
+        # Soft blurred drop shadow separates the glyphs from the block.
         sh = Image.new("RGBA", base.size, (0, 0, 0, 0))
         sd = ImageDraw.Draw(sh)
-        sd.text((x0, y0 + 10), hook, font=font, fill=(0, 0, 0, 220),
-                stroke_width=8, stroke_fill=(0, 0, 0, 220))
+        sd.text((x0, y0 + 8), hook, font=font, fill=(0, 0, 0, 230),
+                stroke_width=10, stroke_fill=(0, 0, 0, 230))
         sh = sh.filter(ImageFilter.GaussianBlur(8))
         base = Image.alpha_composite(base, sh)
         d = ImageDraw.Draw(base)
 
-        # Ultra-bold reach: thick dark outline + same-color second pass.
+        # Ultra-bold white hook with a thick dark outline for maximum contrast.
         d.text((x0, y0), hook, font=font, fill=(255, 255, 255, 255),
-                stroke_width=12, stroke_fill=(10, 12, 16, 255))
+                stroke_width=14, stroke_fill=(8, 10, 14, 255))
         d.text((x0, y0), hook, font=font, fill=(255, 255, 255, 255),
-                stroke_width=4, stroke_fill=(255, 255, 255, 255))
-
-        # 10% accent bar (60-30-10 color rule) — palette-driven, not always yellow.
-        bar_w = max(int(tw * 0.5), 110)
-        d.rounded_rectangle([x0, y0 + th + 18, x0 + bar_w, y0 + th + 18 + 16],
-                            radius=8, fill=accent + (255,))
+                stroke_width=5, stroke_fill=(255, 255, 255, 255))
 
         if aspect_ratio == "16:9" and subtitle:
             sub = _re.sub(r"\s+", " ", str(subtitle).strip().upper())[:40]
@@ -451,7 +530,15 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
 
 
 # ── YouTube custom-thumbnail compliance (programmatic guideline check) ──────
-def comply_thumbnail(data: Optional[bytes], aspect_ratio: str = "16:9"):
+def _native_text_mode() -> bool:
+    """When enabled, thumbnails ship with the hook rendered NATIVELY by the
+    image model (no PIL burn) and with ZERO color-grading post-processing — the
+    raw model output (only exact-dimension + JPEG-size compliance applied)."""
+    return os.getenv("CSVG_NANO_TEXT_IN_IMAGE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def comply_thumbnail(data: Optional[bytes], aspect_ratio: str = "16:9",
+                     no_post: bool = False):
     """Enforce YouTube's published custom-thumbnail rules and return
     (final_bytes, report):
 
@@ -459,6 +546,11 @@ def comply_thumbnail(data: Optional[bytes], aspect_ratio: str = "16:9"):
     * brightness lift when the art is too dark for the feed (YouTube "pop")
     * modest contrast + color boost
     * JPEG export with a hard <=2MB budget (rules: JPG/PNG/GIF/BMP/WEBP ≤2MB)
+
+    When `no_post=True` the artistic grade (brightness lift, contrast, color,
+    unsharp) is SKIPPED — the raw model image is shipped, only the exact
+    dimension resize + JPEG size budget remain. `no_post` is used with native
+    in-image text mode so nothing touches the model's own composition.
 
     report holds the measured checks so callers can log a PASS/FAIL checklist.
     On any failure returns (data, {"error": ...}) — never aborts."""
@@ -483,27 +575,31 @@ def comply_thumbnail(data: Optional[bytes], aspect_ratio: str = "16:9"):
             mean_lum = 128.0
         report["mean_lum"] = round(mean_lum, 1)
 
-        # Feed "pop": lift dark art toward a target mean luminance so it reads
-        # as bright and catchy in the feed, then boost contrast + color evenly.
-        # Target ~0.42*255 (~107) with a generous cap so genuinely dark art still
-        # gets lifted meaningfully without clipping to a washed-out white.
-        target_lum = 0.42 * 255
-        if mean_lum < 0.33 * 255:
-            lift = min(3.0, target_lum / max(mean_lum, 1.0))
-            img = ImageEnhance.Brightness(img).enhance(lift)
-        img = ImageEnhance.Contrast(img).enhance(1.10)
-        img = ImageEnhance.Color(img).enhance(1.12)
-        img = ImageEnhance.Brightness(img).enhance(1.02)
+        # Feed "pop" WITHOUT a washed-out look. Do NOT blanket-brighten (that
+        # flattens contrast into a milky image). Only rescue genuinely DARK art
+        # (mean < 30% — near-black frames), then push CONTRAST + SATURATION hard
+        # on everything so colors stay rich and punchy. Mid/well-lit art is left
+        # at its natural brightness and only gets contrast/saturation (research:
+        # high contrast beats raw brightness).
+        if no_post:
+            report["no_post"] = True
+        else:
+            target_lum = 0.50 * 255
+            if mean_lum < 0.30 * 255:
+                lift = min(3.0, target_lum / max(mean_lum, 1.0))
+                img = ImageEnhance.Brightness(img).enhance(lift)
+            img = ImageEnhance.Contrast(img).enhance(1.28)
+            img = ImageEnhance.Color(img).enhance(1.32)
+            img = ImageEnhance.Brightness(img).enhance(1.01)
 
-        # Unsharp mask after the final resize to offset upscale softness and
-        # keep edges crisp at feed size (model often returns 1K art upscaled to
-        # the thumbnail target). Tuned strong-but-safe: too high percent adds
-        # noise, too low leaves it soft.
-        try:
-            from PIL import ImageFilter
-            img = img.filter(ImageFilter.UnsharpMask(radius=3, percent=150, threshold=2))
-        except Exception:
-            pass
+            # Unsharp mask after the final resize to offset upscale softness and
+            # keep edges crisp at feed size (model often returns 1K art upscaled
+            # to the thumbnail target). Tuned strong-but-safe.
+            try:
+                from PIL import ImageFilter
+                img = img.filter(ImageFilter.UnsharpMask(radius=3, percent=170, threshold=2))
+            except Exception:
+                pass
 
         # JPEG with a byte budget — never ship anything a YouTube re-encode
         # could push over the 2MB custom-thumbnail cap.
@@ -610,8 +706,120 @@ def _ref_note() -> str:
     )
 
 
+# ── core-emotion analysis (drives expression + scene elements) ────────────────
+_EMOTION_PRESETS: Dict[str, Dict[str, str]] = {
+    "outrage": {
+        "expression": "a furious, indignant glare — narrowed eyes, tense jaw, flushed cheeks, mouth parted in disbelief at the injustice",
+        "elements": "angry red/orange grade, a shattered seal or 'EXPOSED' stamp, an accusing pointing graphic",
+    },
+    "shock": {
+        "expression": "a wide-eyed, jaw-dropped expression of stunned disbelief",
+        "elements": "cold blue grade, a revealing light-burst or '?!', a magnifier over the reveal",
+    },
+    "curiosity": {
+        "expression": "a curious, intrigued half-smile with raised eyebrows and eyes searching the frame",
+        "elements": "teal/cyan grade, a '?' device or doorway/zoom-in graphic, an unresolved clue",
+    },
+    "fear": {
+        "expression": "a worried, anxious expression — furrowed brow, tense eyes, concerned frown",
+        "elements": "desaturated cold grade, a warning triangle or red alert glow, a looming shadow",
+    },
+    "awe": {
+        "expression": "a look of genuine wonder and amazement, eyes bright and mouth softly open",
+        "elements": "golden/warm grade, a glowing discovery or upward light beam, expansive scale",
+    },
+    "relief": {
+        "expression": "a calm, reassured, hopeful expression — soft smile, relaxed shoulders",
+        "elements": "green/teal calm grade, a checkmark or sunrise, a 'FIXED' / 'SOLVED' cue",
+    },
+    "determination": {
+        "expression": "a resolute, steeled expression — set jaw, focused eyes, confident closed-mouth",
+        "elements": "strong contrast grade, an upward arrow / target / road graphic, forward motion",
+    },
+    "sadness": {
+        "expression": "a somber, empathetic expression — downcast eyes, gentle concern",
+        "elements": "muted blue grade, a dimming vignette, a lone / quiet subject",
+    },
+    "tension": {
+        "expression": "a tense, competitive expression — sharp frontal eye-contact, tight jaw, ready",
+        "elements": "split two-tone contrast grade, a VS / showdown divider, clashing arrows",
+    },
+    "mystery": {
+        "expression": "a secretive, knowing half-smile with shadowed eyes — 'I know something you don't'",
+        "elements": "low-key noir grade, a silhouette / red-string board, a concealed document",
+    },
+}
+
+
+def _keyword_emotion(meta: Dict[str, Any]) -> Optional[str]:
+    text = " ".join([
+        (meta.get("title") or ""), (meta.get("hook") or ""),
+        (meta.get("description") or ""),
+    ]).lower()
+    rules = [
+        ("outrage", ["scam", "fraud", "corrupt", "outrage", "lied", "betray", "exploit",
+                     "abuse", "scandal", "cover-up", "coverup", "exposed", "expose"]),
+        ("shock", ["shocking", "shock", "reveal", "revealed", "secret", "bombshell",
+                   "unbelievable", "stunned"]),
+        ("fear", ["danger", "warning", "risk", "threat", "crisis", "meltdown", "collapse",
+                  "panic", "afraid", "scary", "warning"]),
+        ("awe", ["breakthrough", "discovery", "incredible", "amazing", "record",
+                 "first-ever", "stunning", "wonder", "mind-blowing"]),
+        ("relief", ["fixed", "solved", "win", "saved", "recovery", "good news", "finally",
+                    "relief", "turnaround"]),
+        ("determination", ["fight", "battle", "won", "strategy", "plan", "build",
+                           "turnaround", "how to"]),
+        ("sadness", ["tragedy", "died", "death", "loss", "suffering", "grief"]),
+        ("tension", ["versus", " vs ", "war", "clash", "showdown", "debate", "rivalry",
+                     "fight"]),
+        ("mystery", ["mystery", "unknown", "hidden", "conspiracy", "leak", "what they"]),
+        ("curiosity", ["how", "why", "what", "explained", "deep dive", "the truth"]),
+    ]
+    for label, kws in rules:
+        if any(k in text for k in kws):
+            return label
+    return None
+
+
+def classify_core_emotion(meta: Dict[str, Any], llm=None) -> Dict[str, str]:
+    """Derive the SINGLE dominant core emotion of the story and how it should
+    surface in (a) the subject's facial expression and (b) the scene/graphic
+    elements. Uses the LLM when available, falls back to a keyword preset, and
+    always returns a usable dict (never raises)."""
+    preset_label = _keyword_emotion(meta)
+    if llm is not None:
+        try:
+            system = (
+                "You are an emotion analyst for YouTube thumbnails. Given a video's "
+                "story, pick the SINGLE dominant core emotion and describe how it must "
+                "show in (a) the subject's facial expression and (b) the scene / graphic "
+                "elements. Be specific and visual. Return ONLY valid JSON of the form "
+                "{\"emotion\": str, \"expression\": str, \"elements\": str}."
+            )
+            user = (
+                f"Title: {meta.get('title','') or ''}\n"
+                f"Hook: {meta.get('hook','') or ''}\n"
+                f"Description:\n{(meta.get('description') or '')[:1500]}"
+            )
+            parsed = llm.generate_json(user, system_prompt=system, route="classify")
+            emo = (parsed or {}).get("emotion")
+            if emo and isinstance(emo, str) and emo.strip():
+                p = _EMOTION_PRESETS.get(emo.strip().lower(), {})
+                return {
+                    "emotion": emo.strip(),
+                    "expression": (parsed.get("expression") or p.get("expression") or ""),
+                    "elements": (parsed.get("elements") or p.get("elements") or ""),
+                }
+        except Exception:
+            pass
+    label = preset_label or "curiosity"
+    p = _EMOTION_PRESETS.get(label, _EMOTION_PRESETS["curiosity"])
+    return {"emotion": label, "expression": p.get("expression", ""), "elements": p.get("elements", "")}
+
+
 def _art_direction_block(aspect_ratio: str, variant: Optional[Dict[str, Any]] = None,
-                         reference: bool = False) -> str:
+                          reference: bool = False,
+                          emotion: Optional[Dict[str, str]] = None) -> str:
     """Standardised 2026 high-CTR, mobile-first art direction appended to every
     art prompt. Distilled from current A/B research (vidIQ/Thumby 2026): one
     focal subject 30-50% of frame, complementary high-contrast palette (avoid
@@ -626,24 +834,49 @@ def _art_direction_block(aspect_ratio: str, variant: Optional[Dict[str, Any]] = 
         "bottom edge (title) clear"
     )
     ref = _ref_note() if reference else ""
+    if emotion and emotion.get("expression"):
+        emo_expr = emotion["expression"]
+        emo_elems = emotion.get("elements", "") or ""
+    else:
+        emo_expr = ("a CLEAR, expressive, engaged facial expression (closed-mouth — "
+                    "determined / curious / knowing; NOT a blank stare and NOT a "
+                    "wide-eyed shock face)")
+        emo_elems = ""
     return (
-        "ART DIRECTION (2026 high-CTR, mobile-first): ONE single dominant focal "
-        "subject filling 30-50% of the frame, placed on a rule-of-thirds "
-        f"intersection; everything else is clean negative space. Complementary "
-        "high-contrast palette (e.g. blue/orange, cyan/magenta, yellow/violet) — "
-        "avoid pure red #FF0000 and pure white #FFFFFF (they clip under YouTube "
-        "compression). Sticker-effect lighting: warm key light (~3500K) on the "
-        "subject, cool background (~6000K), a thin cyan or magenta rim light on "
-        "the silhouette, teal-orange split-tone grade across the frame. For "
-        "people, a genuine, closed-mouth, determined or curious expression (NOT a "
-        "wide-eyed shock face) with natural, non-plastic skin. Keep load-bearing "
-        f"elements in the LEFT two-thirds; reserve {safe} for future on-image "
-        "text. It MUST read instantly at 120px wide on a phone feed. " + ref
+        "ART DIRECTION (2026 high-CTR, mobile-first, CINEMATIC): ONE single dominant "
+        "focal subject filling 25-33% of the frame, placed on a rule-of-thirds "
+        f"intersection; the rest is clean negative space over a RICH, DEEP, heavily "
+        "saturated background (jewel tones / cinematic color, NOT pale or "
+        "washed-out) that strongly contrasts the subject. High CONTRAST is the #1 "
+        "CTR lever: deep crushed shadows + bright punchy highlights, NO haze, NO "
+        "fog, NO milky flat look — strong dimensional depth, NEVER flat or 2D. "
+        "Complementary high-energy palette — red, yellow, orange, magenta, cyan "
+        "(pair a bright subject against a DARK or complementary bg; avoid only a "
+        "tiny white-text-on-white background that clips). COLOR VIBRANCY: lean "
+        "VIVID and saturated — energetic and punchy but believable, a SOLID notch "
+        "MORE vivid and saturated than real life; NEVER washed-out and NEVER "
+        "garish neon. Lighting: dramatic three-point, warm key (~3200K) on the "
+        "subject, cool background (~6500K), a thin cyan or magenta rim light, crisp "
+        "specular highlights, volumetric but NOT foggy. Rendering: ultra-detailed, "
+        "8k, photorealistic, razor-sharp focus, fine texture, no plastic "
+        "smoothness. "
+        + (
+            f"For people, {emo_expr} with natural, non-plastic skin; place the face on "
+            "ONE side, OPPOSITE the on-image text, and have the subject FACE THE "
+            "VIEWER directly (frontal, making eye-contact with the camera) so the "
+            "expression reads instantly."
+            + (f" THEME ELEMENTS: {emo_elems} — let the whole scene and any graphic "
+               "device carry this same emotion, not just the face." if emo_elems else "")
+        )
+        + f" Keep load-bearing elements in the LEFT two-thirds; reserve {safe} for "
+        "future on-image text. It MUST read instantly at 120px wide on a phone feed. " + ref
     )
 
 
 def _fallback_prompt_from_meta(meta: Dict[str, Any], aspect_ratio: str = "16:9",
-                                variant: Optional[Dict[str, Any]] = None) -> str:
+                                variant: Optional[Dict[str, Any]] = None,
+                                forbid_text: bool = True,
+                                emotion: Optional[Dict[str, str]] = None) -> str:
     """Deterministic high-CTR art prompt when the LLM analysis pass is
     unavailable. Mirrors the pipeline composition rules (rule-of-thirds,
     no-text guard, human-emotion face hook) parameterized by aspect ratio and a
@@ -680,11 +913,21 @@ def _fallback_prompt_from_meta(meta: Dict[str, Any], aspect_ratio: str = "16:9",
             f"Widescreen 16:9 landscape YouTube thumbnail, 1280x720. Composition: {template_desc}; "
             f"leave 30-40% clean negative space in {safe_zone} reserved for the bold text overlay, "
             f"never dead-centered. COLOR: {art_color}. ONE clear focal subject (a real object, scene, "
-            "or a single genuine human face with a clear reaction), never a blank stare. "
-            f"Minimal background detail, no clutter — instantly readable at postage-stamp size."
+            "or a single genuine human face with a clear reaction), never a blank stare, set against "
+            f"a VIVID saturated background that contrasts it. Add ONE bold graphic device (arrow, "
+            "circle, magnifier, split, or number) to make the frame instantly catchy — instantly "
+            "readable at postage-stamp size."
         )
     ctx = f" Theme reference: {desc}." if desc else ""
-    direction = _art_direction_block(aspect_ratio, variant=v)
+    direction = _art_direction_block(aspect_ratio, variant=v, emotion=emotion)
+    no_text = (
+        "Absolutely no text, no words, no letters, no numbers, no typography, "
+        "no watermark, no logo, no UI overlay."
+        if forbid_text else
+        "Render the bold hook text YOURSELF as part of the image (the exact "
+        "words are given in the separate TEXT REQUIREMENT instruction); do NOT "
+        "leave the text area blank."
+    )
     return (
         f"{framing} Subject: {subject}. Art direction: {scene}.{ctx} "
         "Monumental, high-production cinematic realism, dramatic rim "
@@ -692,13 +935,14 @@ def _fallback_prompt_from_meta(meta: Dict[str, Any], aspect_ratio: str = "16:9",
         "Keep the on-screen subject visually consistent with the video's own "
         "frame. "
         f"{direction} "
-        "Absolutely no text, no words, no letters, no numbers, no typography, "
-        "no watermark, no logo, no UI overlay."
+        f"{no_text}"
     )
 
 
 def _llm_art_prompt(meta: Dict[str, Any], aspect_ratio: str,
-                    llm, variant: Optional[Dict[str, Any]] = None) -> Optional[str]:
+                    llm, variant: Optional[Dict[str, Any]] = None,
+                    forbid_text: bool = True,
+                    emotion: Optional[Dict[str, str]] = None) -> Optional[str]:
     """One LLM pass analysing the video context into a click-worthy art
     prompt. Returns the prompt string, or None when no usable prompt came
     back."""
@@ -721,9 +965,13 @@ def _llm_art_prompt(meta: Dict[str, Any], aspect_ratio: str,
     system_prompt = (
         "You are a senior YouTube thumbnail art director. Analyse the video's "
         "story and write a single detailed, high-converting, click-worthy image "
-        "generation prompt for the thumbnail art (any visible text overlay is "
-        "added separately — the art must contain NO text). Return ONLY valid "
-        "JSON of the form {\"art_prompt\": \"...\"}."
+        "generation prompt for the thumbnail"
+        + (" (any visible text overlay is added separately — the art must contain "
+           "NO text)." if forbid_text else
+           " — the hook text is rendered natively BY the model as part of the "
+           "image, so describe a composition that leaves a clean area for bold "
+           "legible text and DO NOT forbid text.")
+        + " Return ONLY valid JSON of the form {\"art_prompt\": \"...\"}."
     )
     user_prompt = (
             f"Video title: {title or '(unknown)'}\n"
@@ -731,17 +979,32 @@ def _llm_art_prompt(meta: Dict[str, Any], aspect_ratio: str,
             f"Hero scene art direction: {scene or '(none given)'}\n"
             f"{ctx}\n"
             f"Key facts / description:\n{desc or '(none)'}\n"
-            f"\nWrite ONE photorealistic, high-CTR image prompt for a {target}.\n"
-            f"Composition direction: {template_desc}.\n"
-            f"COLOR DIRECTION: {art_color} — bright, saturated, high-contrast palette that "
-            "pops in both light and dark YouTube mode.\n"
+             f"\nWrite ONE photorealistic, high-CTR image prompt for a {target}.\n"
+             f"Composition direction: {template_desc}.\n"
+             + (
+                 f"CORE EMOTION OF THE STORY: {emotion.get('emotion','')}. Reflect this "
+                 f"emotion in BOTH the subject's facial expression "
+                 f"({emotion.get('expression','')}) AND the scene / graphic elements "
+                 f"({emotion.get('elements','')}) — the whole frame must FEEL that "
+                 f"emotion, not just the face.\n"
+                 if emotion and emotion.get("emotion") else ""
+             )
+             + f"COLOR DIRECTION: {art_color} — bright, saturated, high-contrast palette that "
+            "pops in both light and dark YouTube mode; lean a notch more vivid than "
+            "reality but keep it believable, never neon.\n"
             f"{_art_direction_block(aspect_ratio, variant=v)}\n"
-            "Keep it SIMPLE — ONE focal subject, max 2-3 visual elements, minimal clutter, "
-            "sharp focus, instantly readable at small size. GENUINE EMOTION — one expressive "
-            "human face with a clear, authentic reaction (curiosity, focus, or a problem-to-solve), "
-            "never a blank stare, never a fake grin, never a plastic/over-smoothed face. Keep "
-            "subject identity consistent with the video's content. Absolutely no "
-            "text/words/letters/numbers/logos/watermarks/UI in the art."
+            "Keep it SIMPLE — ONE bold high-contrast focal subject with a clear graphic device "
+            "(arrow, water, split, or number) and a VIVID background that contrasts it; no "
+            "busy clutter, sharp focus, instantly readable at small size. GENUINE EMOTION — one expressive "
+            "human face with a CLEAR, engaged, authentic reaction (curiosity, focus, or a "
+            "problem-to-solve), the subject FACING THE VIEWER directly (frontal, eye-contact with "
+            "the camera), never a blank stare, never a fake grin, never a plastic/over-smoothed "
+            "face, and NEVER flat or 2D — give real dimensional depth. Keep subject identity "
+            "consistent with the video's content."
+            + (" Absolutely no text/words/letters/numbers/logos/watermarks/UI in the art."
+               if forbid_text else
+               " Leave a clean, uncluttered area for the bold hook text that the model will "
+               "render natively — do NOT add a separate text overlay instruction here.")
         )
     parsed = llm.generate_json(user_prompt, system_prompt=system_prompt, route="generate")
     art = (parsed or {}).get("art_prompt")
@@ -792,19 +1055,26 @@ def craft_ctr_hook(meta: Dict[str, Any], llm=None) -> str:
 
 
 def craft_thumbnail_prompt_from_metadata(meta: Dict[str, Any], aspect_ratio: str = "16:9",
-                                         llm=None, variant: Optional[Dict[str, Any]] = None) -> str:
+                                         llm=None, variant: Optional[Dict[str, Any]] = None,
+                                         forbid_text: bool = True) -> str:
     """Analyse video metadata (title/hook/description/hero scene) with the LLM
     and return a click-worthy art prompt. Falls back to the deterministic
     prompt when the LLM is unavailable or unusable. Never raises. `variant`
-    rotates the layout/palette across videos."""
-    fallback = _fallback_prompt_from_meta(meta, aspect_ratio, variant=variant)
+    rotates the layout/palette across videos. `forbid_text=False` drops the
+    'no text' guard so native in-image text can be requested. The story's
+    dominant core emotion (expression + scene elements) is derived and woven
+    into the art direction."""
+    emotion = classify_core_emotion(meta, llm=llm)
+    fallback = _fallback_prompt_from_meta(meta, aspect_ratio, variant=variant,
+                                          forbid_text=forbid_text, emotion=emotion)
     if not is_nano_banana_available():
         return fallback
     try:
         if llm is None:
             from src.engine.llm_client import LLMClient
             llm = LLMClient()
-        art = _llm_art_prompt(meta, aspect_ratio, llm, variant=variant)
+        art = _llm_art_prompt(meta, aspect_ratio, llm, variant=variant,
+                              forbid_text=forbid_text, emotion=emotion)
         return art if art else fallback
     except Exception as e:
         print(f"[NanoBanana] LLM art-prompt analysis failed; using fallback: {e}")
@@ -991,12 +1261,13 @@ def fetch_link_video_metadata(video_id: str) -> Dict[str, Any]:
 
 
 def _finalize_thumbnail(data: Optional[bytes], aspect_ratio: str, output_path: str,
-                        tag: str = "") -> Optional[str]:
+                        tag: str = "", no_post: bool = False) -> Optional[str]:
     """Run the compliance pass and write the final file (.jpg when the pass
-    emits JPEG). Returns the saved path or None."""
+    emits JPEG). Returns the saved path or None. `no_post=True` skips the
+    artistic grade (raw model image shipped)."""
     if data is None:
         return None
-    data, report = comply_thumbnail(data, aspect_ratio=aspect_ratio)
+    data, report = comply_thumbnail(data, aspect_ratio=aspect_ratio, no_post=no_post)
     if report.get("size_kb"):
         print(f"[NanoBanana] {tag}{aspect_ratio} compliance: "
               f"dims={report.get('dims_ok')}, mean_lum={report.get('mean_lum')}, "
@@ -1100,16 +1371,19 @@ def generate_baked_video_thumbnail(state, hero_scene: str = "", output_path: str
     variant = pick_thumbnail_variant(getattr(state, "pipeline_id", "") or meta.get("video_id", ""))
     meta["hook"] = craft_ctr_hook(meta, llm=llm)
     hook = _shorten_ctr_text(meta["hook"])
-    prompt = craft_thumbnail_prompt_from_metadata(meta, aspect_ratio="16:9", llm=llm, variant=variant)
+    native = _native_text_mode()
+    prompt = craft_thumbnail_prompt_from_metadata(
+        meta, aspect_ratio="16:9", llm=llm, variant=variant, forbid_text=not native)
+    if native:
+        # Model renders the hook text itself (no PIL burn, no post-grading).
+        prompt = prompt + _text_render_block(hook, "16:9", variant=variant)
     if reference_frame:
         prompt = prompt + " " + _ref_note()
-    # Art only (NO native model text — models render text badly); the hook is
-    # burned as crisp, Studio-grade typography by add_thumbnail_text below.
     data = generate_image(prompt, aspect_ratio="16:9", reference=reference_frame)
-    if data is not None:
+    if data is not None and not native:
         data = add_thumbnail_text(data, headline=hook, subtitle="",
                                   aspect_ratio="16:9", variant=variant)
-    return _finalize_thumbnail(data, "16:9", output_path, tag="baked-video-")
+    return _finalize_thumbnail(data, "16:9", output_path, tag="baked-video-", no_post=native)
 
 
 def generate_baked_shorts_cover(state, output_path: str = "",
@@ -1130,15 +1404,19 @@ def generate_baked_shorts_cover(state, output_path: str = "",
     variant = pick_thumbnail_variant(getattr(state, "pipeline_id", "") or meta.get("video_id", ""))
     meta["hook"] = craft_ctr_hook(meta, llm=llm)
     hook = _shorten_ctr_text(meta["hook"])
-    prompt = craft_thumbnail_prompt_from_metadata(meta, aspect_ratio="9:16", llm=llm, variant=variant)
+    native = _native_text_mode()
+    prompt = craft_thumbnail_prompt_from_metadata(
+        meta, aspect_ratio="9:16", llm=llm, variant=variant, forbid_text=not native)
+    if native:
+        prompt = prompt + _text_render_block(hook, "9:16", variant=variant)
     if reference_frame:
         prompt = prompt + " " + _ref_note()
     # Art only (NO native model text); hook burned as crisp typography after.
     data = generate_image(prompt, aspect_ratio="9:16", reference=reference_frame)
-    if data is not None:
+    if data is not None and not native:
         data = add_thumbnail_text(data, headline=hook, subtitle="",
                                   aspect_ratio="9:16", variant=variant)
-    return _finalize_thumbnail(data, "9:16", output_path, tag="baked-cover-")
+    return _finalize_thumbnail(data, "9:16", output_path, tag="baked-cover-", no_post=native)
 
 
 def generate_thumbnail_variants(state, hero_scene: str = "", output_dir: str = "",
