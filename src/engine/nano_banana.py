@@ -85,6 +85,20 @@ _THUMBNAIL_TEXT_STYLES = [
     {"id": "block", "desc": "bold letters on a high-contrast solid accent color block behind them"},
 ]
 
+# Consistent brand chip burned onto thumbnails for channel recognition in the
+# feed (research: recurring graphic components build a competitive advantage).
+THUMB_BRAND = (os.getenv("CSVG_THUMBNAIL_BRAND") or "LUMENLOOP").strip().upper() or "LUMENLOOP"
+
+
+def _enhanced_overlay() -> bool:
+    """Opt-in visual upgrades for the burned (non-native) thumbnail overlay:
+    background SCRIM (blur+darken the text region so the hook pops on ANY art
+    tone), a TRIANGLE accent (visual-tension / curiosity-gap pointer toward the
+    subject), and a consistent BRAND chip for channel recognition. All three are
+    additive to the existing accent block + outline + shadow. ON by default;
+    set CSVG_THUMB_ENHANCED_OVERLAY=0 to ship the plain accent-block overlay."""
+    return os.getenv("CSVG_THUMB_ENHANCED_OVERLAY", "1").strip().lower() in ("1", "true", "yes", "on")
+
 
 def _variant_index(seed: str, n: int) -> int:
     """Deterministic index in [0, n) from a string seed (stable per pipeline)."""
@@ -448,7 +462,16 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
     """Burn a ready-to-upload high-CTR text overlay onto generated art.
     16:9 -> hook in the upper-LEFT safe zone (timestamp-safe); 9:16 -> hook
     centered in the top two-thirds. Returns PNG bytes or None on any failure
-    (callers fall back to the plain art). `variant` supplies the accent color."""
+    (callers fall back to the plain art). `variant` supplies the accent color.
+
+    Overlay stack (all additive, never aborts the pipeline):
+      * background SCRIM — blur+darken the text region so the hook pops on ANY
+        art tone (research: background simplification is a top CTR lever).
+      * solid accent color block — classic pro CTR device (60-30-10 accent).
+      * ultra-bold white hook + thick dark outline + soft drop shadow.
+      * TRIANGLE accent — visual-tension / curiosity-gap pointer to the subject.
+      * BRAND chip — consistent motif for channel recognition in the feed.
+    Scrim/triangle/brand are gated by `_enhanced_overlay()` (default on)."""
     if not data:
         return None
     try:
@@ -487,8 +510,26 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
         v = variant or {}
         palette = v.get("palette") or {}
         accent = palette.get("accent") or (255, 59, 48)
+        enhanced = _enhanced_overlay()
 
-        # Solid high-contrast color block behind the hook — the classic pro
+        # (1) SCRIM — blur + darken ONLY the text region so the hook is legible
+        # on any art tone (the missing CTR lever vs. a flat accent block alone).
+        if enhanced:
+            m = max(int(fsize * 0.35), 18)
+            sx0, sy0 = max(0, x0 - pad_x - m), max(0, y0 - pad_y - m)
+            sx1, sy1 = min(W, x0 + tw + pad_x + m), min(H, y0 + th + pad_y + m)
+            region = base.crop((sx0, sy0, sx1, sy1)).filter(ImageFilter.GaussianBlur(10))
+            try:
+                strength = int(os.getenv("CSVG_THUMB_SCRIM_STRENGTH", "130") or 130)
+            except (TypeError, ValueError):
+                strength = 130
+            strength = max(0, min(255, strength))
+            mask = Image.new("L", region.size, strength)
+            dark = Image.new("RGBA", region.size, (0, 0, 0, 255))
+            region = Image.composite(region, dark, mask)
+            base.paste(region, (sx0, sy0))
+
+        # (2) Solid high-contrast color block behind the hook — the classic pro
         # CTR device — so the text pops on ANY art tone and stays readable at
         # mobile size. 60-30-10 rule: the block is the vivid 10% accent; white
         # text + thick dark outline + drop shadow keep it legible over it.
@@ -510,9 +551,9 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
 
         # Ultra-bold white hook with a thick dark outline for maximum contrast.
         d.text((x0, y0), hook, font=font, fill=(255, 255, 255, 255),
-                stroke_width=14, stroke_fill=(8, 10, 14, 255))
+               stroke_width=14, stroke_fill=(8, 10, 14, 255))
         d.text((x0, y0), hook, font=font, fill=(255, 255, 255, 255),
-                stroke_width=5, stroke_fill=(255, 255, 255, 255))
+               stroke_width=5, stroke_fill=(255, 255, 255, 255))
 
         if aspect_ratio == "16:9" and subtitle:
             sub = _re.sub(r"\s+", " ", str(subtitle).strip().upper())[:40]
@@ -520,6 +561,28 @@ def add_thumbnail_text(data: Optional[bytes], headline: str, subtitle: str = "",
                 sfont, _sf = _fit_bold_font(sub, font_path, max_width=int(W * 0.6), hi=38, lo=22)
                 d.text((x0 + 4, y0 + fsize + 16), sub, font=sfont,
                        fill=(255, 255, 255, 230), stroke_width=3, stroke_fill=(12, 14, 18, 255))
+
+        # (3) TRIANGLE accent — a small pointer that creates visual tension /
+        # curiosity gap toward the subject on the opposite side.
+        # (4) BRAND chip — a consistent motif for channel recognition.
+        if enhanced:
+            ts = max(int(fsize * 0.45), 24)
+            tx, ty = x0, y0 + th + int(pad_y * 0.9)
+            if ty + ts <= H and tx + ts <= W:
+                d.polygon([(tx, ty), (tx + ts, ty), (tx, ty + ts)], fill=accent + (255,))
+            cfont = ImageFont.truetype(font_path, max(int(fsize * 0.20), 15)) if font_path else ImageFont.load_default()
+            cl, ct, cr, cb = cfont.getbbox(THUMB_BRAND)
+            cw, ch = cr - cl, cb - ct
+            chip_h = int(fsize * 0.32)
+            chip_pad = 6
+            if y0 - pad_y - chip_h - chip_pad >= 0:
+                cy = y0 - pad_y - chip_h - chip_pad
+            else:
+                cy = ty + ts + chip_pad if (ty + ts <= H) else y0 + th + pad_y + chip_pad
+            cx = x0
+            d.rectangle([cx, cy, cx + cw + 8, cy + chip_h], fill=accent + (255,))
+            d.text((cx + 4, cy + max(0, (chip_h - ch) // 2)), THUMB_BRAND,
+                   font=cfont, fill=(255, 255, 255, 255))
 
         buf = BytesIO()
         base.convert("RGB").save(buf, format="PNG")
