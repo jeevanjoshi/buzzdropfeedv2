@@ -350,12 +350,6 @@
       </span>
       <span>Logs</span>
     </button>
-    <button class="tab" data-tab="analytics">
-      <span class="icon-wrap">
-        <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></svg>
-      </span>
-      <span>Stats</span>
-    </button>
     <button class="tab" data-tab="seeding">
       <span class="icon-wrap">
         <svg class="svg-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>
@@ -714,7 +708,7 @@ function structuredLines(){
   const logs = DATA.logs && DATA.logs.structured_logs || [];
   if(!logs.length) return '<div class="empty">No structured logs found.</div>';
   return `<div class="console"><div class="console-head"><div class="dots"><i></i><i></i><i></i></div><div class="console-title">${ICONS.terminal} csvg_execution.log · last ${logs.length}</div></div>
-    <div class="console-body">${logs.map(l=>esc(l)).join('\n')}</div></div>`;
+    <div class="console-body" id="structbody" data-keep-scroll>${logs.map(l=>esc(l)).join('\n')}</div></div>`;
 }
 
 function budgetPanel(){
@@ -1038,7 +1032,7 @@ function liveLogs(){
   const raw = (DATA.logs && DATA.logs.raw_logs) || '';
   return `<div class="console"><div class="console-head"><div class="dots"><i></i><i></i><i></i></div>
     <div class="console-title">${ICONS.terminal} pipeline_run.log · tail</div></div>
-    <div class="console-body" id="logbody">${raw?esc(raw):'<span class="empty">No log output yet.</span>'}</div></div>`;
+    <div class="console-body" id="logbody" data-keep-scroll>${raw?esc(raw):'<span class="empty">No log output yet.</span>'}</div></div>`;
 }
 
 function seedingPanel(){
@@ -1073,7 +1067,7 @@ function seedingPanel(){
       <div id="seed-feedback" style="margin-top: 12px; font-size: 12.5px; font-family: var(--mono); min-height: 18px;"></div>
       <div id="seeding-output" style="display:none; margin-top:14px;" class="console">
         <div class="console-head"><div class="dots"><i></i><i></i><i></i></div><div class="console-title">${ICONS.terminal} seeding_execution.log</div></div>
-        <pre class="console-body" id="seeding-log-body" style="white-space:pre-wrap; font-size:12px; margin:0; line-height:1.4; max-height:250px; overflow-y:auto; font-family:var(--mono); color:var(--text);"></pre>
+        <pre class="console-body" id="seeding-log-body" data-keep-scroll style="white-space:pre-wrap; font-size:12px; margin:0; line-height:1.4; max-height:250px; overflow-y:auto; font-family:var(--mono); color:var(--text);"></pre>
       </div>
     </div>`;
 
@@ -1457,6 +1451,7 @@ function renderOverview(){
     ${controlPanel()}
     ${statCards()}
     ${budgetPanel()}
+    ${publishedList()}
     ${usagePanel()}
     ${cleanupPanel()}
   `;
@@ -1652,6 +1647,11 @@ function paint(){
   const v = $('#view');
   if(!v) return;
 
+  // Preserve scroll position of any scrollable region across the re-render so
+  // polling (every 8s) doesn't yank the user back to the top of a long log.
+  const savedScroll = new Map();
+  v.querySelectorAll('[data-keep-scroll]').forEach(el => savedScroll.set(el.id, el.scrollTop));
+
   if (tab === 'overview') {
     v.innerHTML = renderOverview();
     bindControlEvents();
@@ -1715,6 +1715,12 @@ function paint(){
       }
     }
   }
+
+  // Restore scroll positions captured before the re-render.
+  savedScroll.forEach((top, id) => {
+    const el = document.getElementById(id);
+    if (el) el.scrollTop = top;
+  });
 }
 
 function getNextCronTime(cronStr) {

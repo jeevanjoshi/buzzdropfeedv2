@@ -166,22 +166,25 @@ fn parse_string(c: &mut Cursor) -> Option<String> {
     if c.next()? != b'"' {
         return None;
     }
-    let mut out = String::new();
+    // Buffer raw bytes and decode as UTF-8 at the end. Pushing each byte as a
+    // `char` would mangle multi-byte sequences (e.g. '’' = E2 80 99 would become
+    // three garbage codepoints — the classic mojibake seen in the dashboard).
+    let mut buf: Vec<u8> = Vec::new();
     loop {
         let ch = c.next()?;
         match ch {
             b'"' => break,
             b'\\' => {
                 let esc = c.next()?;
-                out.push(match esc {
-                    b'"' => '"',
-                    b'\\' => '\\',
-                    b'/' => '/',
-                    b'b' => '\u{0008}',
-                    b'f' => '\u{000C}',
-                    b'n' => '\n',
-                    b'r' => '\r',
-                    b't' => '\t',
+                match esc {
+                    b'"' => buf.push(b'"'),
+                    b'\\' => buf.push(b'\\'),
+                    b'/' => buf.push(b'/'),
+                    b'b' => buf.push(0x08),
+                    b'f' => buf.push(0x0C),
+                    b'n' => buf.push(b'\n'),
+                    b'r' => buf.push(b'\r'),
+                    b't' => buf.push(b'\t'),
                     b'u' => {
                         let hi = parse_hex(c, 4)?;
                         // handle surrogate pairs minimally
@@ -199,16 +202,19 @@ fn parse_string(c: &mut Cursor) -> Option<String> {
                         } else {
                             hi
                         };
-                        out.push(char::from_u32(cp)?);
+                        let ch = char::from_u32(cp)?;
+                        let mut tmp = [0u8; 4];
+                        let s = ch.encode_utf8(&mut tmp);
+                        buf.extend_from_slice(s.as_bytes());
                         continue;
                     }
                     _ => return None,
-                });
+                };
             }
-            _ => out.push(ch as char),
+            _ => buf.push(ch),
         }
     }
-    Some(out)
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn parse_hex(c: &mut Cursor, n: usize) -> Option<u32> {

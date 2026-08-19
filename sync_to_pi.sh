@@ -43,6 +43,9 @@ rsync -avz --delete \
 echo "Sync completed successfully!"
 
 # Rebuild Rust dashboard only when explicitly requested (to avoid killing dashboard during live runs)
+# NOTE: index.html is embedded into the binary via include_str!, so ANY change to
+# rust_dashboard/web/index.html OR rust_dashboard/src/*.rs (e.g. the JSON UTF-8
+# parser fix) requires a rebuild — run `./sync_to_pi.sh --dashboard` to ship it.
 if [[ " $* " == *" --dashboard "* ]] || [[ " $* " == *" --build "* ]] || [ "${CSVG_BUILD_DASHBOARD:-0}" = "1" ]; then
     echo "Rebuilding Rust dashboard and restarting services on Raspberry Pi 5..."
     ssh -o StrictHostKeyChecking=no "${PI5_USER}@${PI5_IP}" \
