@@ -10,11 +10,15 @@ from src.schemas.state import TopicCandidate
 # (``candidate.regional_revenue_usd``). Per the converged plan, "ad revenue in
 # the region has the HIGHEST weight" in the MONETISED phases:
 #   REVENUE/SCALE : index 7 holds the single largest weight.
-#   GROWTH        : DISCOVERY-LED — TVS (trend) + IDI (novelty) lead for
-#                   watch-time/subscriber growth, and regional revenue is
-#                   secondary (a pre-YPP channel earns $0 in ads; unlocking YPP
-#                   is the real bottleneck on the path to $2,000/month).
-TOPSIS_WEIGHTS_GROWTH  = [0.25, 0.05, 0.25, 0.10, 0.10, 0.05, 0.05, 0.15]
+# GROWTH        : DISCOVERY-LED — TVS (trend) + IDI (novelty) lead for
+#                   watch-time/subscriber growth. A pre-YPP channel earns $0 in
+#                   ads, so REGION_REV (index 7) is ZEROED: the unscaled revenue
+#                   forecast is fictional for an unmonetized channel and must not
+#                   steer selection. Shareability (SHM, index 4) and underserved
+#                   demand (VPH, index 5) are boosted to drive subscriber
+#                   conversion, and the saturation cost weight (SAT, index 6) is
+#                   raised so a small channel avoids crowded niches it cannot win.
+TOPSIS_WEIGHTS_GROWTH  = [0.25, 0.03, 0.25, 0.07, 0.15, 0.13, 0.12, 0.00]
 
 # REVENUE : REGION_REV leads; niche RPM (market ceiling) is the next-strongest.
 TOPSIS_WEIGHTS_REVENUE = [0.14, 0.20, 0.12, 0.05, 0.08, 0.08, 0.05, 0.28]

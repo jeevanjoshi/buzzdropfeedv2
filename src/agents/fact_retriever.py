@@ -17,6 +17,18 @@ from src.engine.youtube_topic_demand import youtube_topic_demand
 # (calibration script) without code edits.
 OPPORTUNITY_MIN_SCORE = float(os.getenv("OPPORTUNITY_MIN_SCORE", "0.5"))
 
+# Pre-YPP saturation floor (GROWTH phase only). A candidate with
+# ``sat_score >= SATURATION_FLOOR`` is in a fully-saturated niche (>=10 competing
+# videos) that a brand-new, unmonetized channel cannot realistically win. Culled
+# before ranking; the run aborts if the entire pool is oversaturated rather than
+# ship a topic with no path to traction. Tune via env.
+SATURATION_FLOOR = float(os.getenv("SATURATION_FLOOR", "1.0"))
+
+# Absolute TOPSIS quality floor. TOPSIS C* is RELATIVE (0.5 = mediocre
+# compromise, 1.0 = ideal profile). A winner below this means the whole candidate
+# pool is weak; refuse to publish a low-quality compromise. Tune via env.
+TOPSIS_MIN_SCORE = float(os.getenv("TOPSIS_MIN_SCORE", "0.6"))
+
 
 class FactRetrieverAgent:
     """
@@ -348,6 +360,36 @@ class FactRetrieverAgent:
         r = (region or "all").lower().strip()
         return _MARKET_ISO.get(r, "USA")
 
+    def _growth_score(self, cand: "TopicCandidate") -> float:
+        """
+        Pre-YPP (GROWTH) selection proxy.
+
+        The objective before YPP unlock is watch-time + subscriber growth, NOT ad
+        revenue (which is $0 for an unmonetized channel). This scores a candidate
+        by expected view-volume — the single quantity that drives BOTH watch-hours
+        and subscriber conversion — amplified by novelty (save/return likelihood)
+        and shareability (social spread → subscribers). Saturation is already
+        penalised inside ``estimate_predicted_views``, so crowded niches naturally
+        score low. Phantom ad revenue is intentionally NOT used.
+        """
+        try:
+            idi = max(0.0, float(getattr(cand, "idi_score", 0.0) or 0.0))
+            ctr = 0.08 + idi * 0.04
+            predicted_views = monetization_optimizer.estimate_predicted_views(
+                tvs_score=float(getattr(cand, "tvs_score", 0.0) or 0.0),
+                ctr_score=ctr,
+                idi_score=idi,
+                sat_score=float(getattr(cand, "sat_score", 0.0) or 0.0),
+            )
+            shm = max(0.5, float(getattr(cand, "shm_score", 1.0) or 1.0))
+            return float(predicted_views * (0.5 + idi) * shm)
+        except Exception:
+            # Safe fallback so selection never crashes: plain discovery proxy.
+            return float(
+                (getattr(cand, "tvs_score", 0.0) or 0.0)
+                + (getattr(cand, "idi_score", 0.0) or 0.0)
+            )
+
     def process(self, state: GlobalState, use_live_rss: bool = True, region: str = "all",
                 channel_phase: str = "REVENUE",
                 exclude_headlines: Optional[List[str]] = None) -> A2AMessage:
@@ -469,6 +511,27 @@ class FactRetrieverAgent:
                 )
             candidates = gated
 
+        # Pre-YPP saturation floor (GROWTH only). A brand-new, unmonetized
+        # channel cannot win a fully-saturated niche (sat_score >= SATURATION_FLOOR
+        # ≈ >=10 competing videos). Cull those before ranking so they can never be
+        # selected; abort the run if the entire pool is oversaturated rather than
+        # ship a topic the channel has no realistic path to traction in.
+        if channel_phase == "GROWTH":
+            sat_gated = [
+                c for c in candidates
+                if (getattr(c, "sat_score", 0.0) or 0.0) < SATURATION_FLOOR
+            ]
+            if not sat_gated:
+                raise ValueError(
+                    f"All {len(candidates)} candidate topics are fully saturated "
+                    f"(sat_score >= {SATURATION_FLOOR:.2f}). Refusing to select an "
+                    "oversaturated niche pre-YPP — the channel cannot compete in it."
+                )
+            culled = len(candidates) - len(sat_gated)
+            if culled:
+                print(f"[FactRetriever] Saturation floor culled {culled} fully-saturated (pre-YPP) topic(s).")
+            candidates = sat_gated
+
         # Rank candidates using phase-aware TOPSIS Decision Engine
         ranked_candidates = self.topsis_engine.rank_candidates(candidates, channel_phase=channel_phase)
 
@@ -530,10 +593,13 @@ class FactRetrieverAgent:
 
         # ── Winner selection (gates) ──────────────────────────────────────────────
         # The dynamic region decision was already made pre-TOPSIS (region_profiles)
-        # and TOPSIS was already ranked with the revenue-led 8th criterion. Here we
-        # only enforce the audience/niche/revenue/competitor gates, then pick the
-        # winner (in dynamic mode: the band candidate with the best revenue-led
-        # region score — the TOPSIS band keeps the ranking phase-aware).
+        # and TOPSIS was already ranked with the phase-aware weights. Here we only
+        # enforce the audience/niche/revenue/competitor gates, then pick the winner.
+        #   * REVENUE / SCALE : the band candidate with the best revenue-led region
+        #     score (the TOPSIS band keeps the ranking phase-aware).
+        #   * GROWTH (pre-YPP) : the band candidate with the best GROWTH score
+        #     (view-volume × novelty × shareability) — NEVER the phantom ad-revenue
+        #     score, which is $0 for an unmonetized channel.
         winner = None
         winner_market = "us"
         winner_region_score = -1.0
@@ -575,9 +641,18 @@ class FactRetrieverAgent:
                     if not gate["passes_revenue_gate"]:
                         continue
 
+            # ── Selection score ──────────────────────────────────────────────────
+            # GROWTH optimises for audience growth (view-volume × novelty ×
+            # shareability), NOT ad revenue (which is $0 pre-YPP). REVENUE/SCALE
+            # keep the revenue-led region score.
+            if channel_phase == "GROWTH":
+                select_score = self._growth_score(cand)
+            else:
+                select_score = region_score
+
             if dynamic_region:
-                if region_score > winner_region_score:
-                    winner, winner_market, winner_region_score = cand, cand_market or "us", region_score
+                if select_score > winner_region_score:
+                    winner, winner_market, winner_region_score = cand, cand_market or "us", select_score
             else:
                 winner = cand
                 break
@@ -585,8 +660,19 @@ class FactRetrieverAgent:
         if not winner:
             winner = ranked_candidates[0]
 
+        # ── Absolute TOPSIS quality floor ──────────────────────────────────────
+        # TOPSIS C* is RELATIVE (0.5 = mediocre compromise, 1.0 = ideal profile). A
+        # winner below the floor means the whole candidate pool is weak; refuse to
+        # publish a low-quality compromise rather than ship it. Tune via env.
+        if winner.topsis_score is not None and winner.topsis_score < TOPSIS_MIN_SCORE:
+            raise ValueError(
+                f"Selected topic '{winner.headline}' has TOPSIS score "
+                f"{winner.topsis_score:.4f} below the quality floor "
+                f"({TOPSIS_MIN_SCORE:.4f}). Refusing to publish a weak-compromise topic."
+            )
+
         # Re-label the winner's audience/niche via a single LLM verify call (corrects
-        # keyword misroutes; never re-selects or retries — falls back to keyword label).
+        # keyword misroutes; never re-selects or solves — falls back to keyword label).
         winner = self._verify_winner_audience(winner)
 
         # Persist the decided region so media producer / story designer / revenue

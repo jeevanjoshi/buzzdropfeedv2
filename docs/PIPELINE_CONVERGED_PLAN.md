@@ -61,10 +61,15 @@ score           = ALPHA·region_rev_norm + BETA·fit + GAMMA·window
 
 `src/engine/topic_topsis.py` — **8th criterion `REGIONAL_REV`** (benefit). In the MONETISED
 phases it holds the single highest weight: REVENUE `[0.14,0.20,0.12,0.05,0.08,0.08,0.05,0.28]`,
-SCALE `[0.15,0.18,0.12,0.05,0.10,0.07,0.05,0.28]`. GROWTH is discovery-led (TVS+IDI lead, revenue
-secondary): `[0.25,0.05,0.25,0.10,0.10,0.05,0.05,0.15]`.
-`TopicCandidate.regional_revenue_usd` carries each candidate's best-market forecast (or the
-fixed-region forecast in `--global`/`--india` mode).
+SCALE `[0.15,0.18,0.12,0.05,0.10,0.07,0.05,0.28]`. GROWTH is discovery-led and **revenue-free**:
+`[0.25,0.03,0.25,0.07,0.15,0.13,0.12,0.00]` — TVS+IDI lead for watch-time/subscriber growth,
+SHM (shareability) and VPH (underserved demand) are boosted to drive subscriber conversion,
+SAT (saturation, cost) is weighted up so a small channel avoids crowded niches, and
+**`REGION_REV` is zeroed** because an unmonetized channel earns $0 in ads, so the unscaled
+revenue forecast is fictional and must not steer selection.
+`TopicCandidate.regional_revenue_usd` still carries each candidate's best-market forecast (used
+only by the REVENUE/SCALE band selection + as a display field), but carries zero TOPSIS weight
+in GROWTH.
 
 ### 1.3 Selection order (fact retriever)
 
@@ -73,11 +78,19 @@ fixed-region forecast in `--global`/`--india` mode).
 3. **Storability gate** (cull direct news; ship-best-with-warning if all culled; optional LLM refine).
 4. Dynamic region profiles (projected publish = now + `DEFAULT_RUNTIME_MIN` 120).
 5. Fill `regional_revenue_usd` for all candidates.
-6. Opportunity hard gate (REVENUE/SCALE).
-7. TOPSIS (8 criteria, revenue-led).
-8. Precise shortlist; then audience/niche/revenue/competitor gates → winner.
-9. Persist `state.region` (l2) / `state.region_market` / `state.region_reason`; forecast for the
-   winner's market; A2A payload includes `regional_revenue_usd`.
+6. Opportunity hard gate (REVENUE/SCALE only).
+7. **Saturation floor** (GROWTH only): cull `sat_score >= SATURATION_FLOOR` (default 1.0 ≈ ≥10
+   competitors); abort if the whole pool is oversaturated — a pre-YPP channel cannot win a
+   crowded niche.
+8. TOPSIS (8 criteria, phase-aware weights; revenue-led in REVENUE/SCALE, revenue-free in GROWTH).
+9. Precise shortlist; then audience/niche/revenue/competitor gates → winner. **Band selection is
+   phase-aware**: REVENUE/SCALE pick the top-half candidate with the best revenue-led region
+   score; **GROWTH picks the top-half candidate with the best `_growth_score`** (view-volume ×
+   novelty × shareability, saturation already penalised) — never the phantom ad-revenue score.
+10. **TOPSIS quality floor**: refuse to publish a winner below `TOPSIS_MIN_SCORE` (default 0.6);
+    a low C* means the whole candidate pool is weak.
+11. Persist `state.region` (l2) / `state.region_market` / `state.region_reason`; forecast for the
+    winner's market; A2A payload includes `regional_revenue_usd`.
 
 ### 1.4 Revenue-goal alignment ($2,000/month — single source of truth)
 
@@ -101,8 +114,11 @@ REVENUE_GATE_MIN_USD       = 2000 / (2 × 30) = $33.33 per video    (REVENUE/SCA
 | Observer Gate 0b revenue check | evaluated with default region (US 1.0) | evaluated against the topic's selected market (`state.region_market`) |
 
 Note: the per-video revenue gate only binds in REVENUE/SCALE (post-YPP). During
-GROWTH the pipeline optimises watch-time/novelty with revenue still wired as the
-strongest TOPSIS criterion, so it is YPP-ready the moment the channel unlocks.
+GROWTH the pipeline optimises watch-time/novelty with **revenue fully removed from
+selection** (`REGION_REV` weight = 0, and the band winner is chosen by `_growth_score`
+rather than the revenue-led region score), so it builds the audience YPP needs
+without being steered by a $0 ad-revenue figure; it is YPP-ready the moment the
+channel unlocks.
 
 ### 1.5 GROWTH phase (pre-YPP)
 
@@ -116,10 +132,13 @@ it must convert viewers into subscribers + watch-hours to unlock YPP.
 - **Phase-aware pinned comment** — GROWTH pushes subscribe + watch-time; later phases keep
   the pure engagement question.
 - **Subscribe CTA in description** (GROWTH) — appends a subscribe/bell + daily-series line.
-- **GROWTH is discovery-led.** Pre-YPP the channel earns $0 in ads, so the GROWTH TOPSIS
-  vector leads with novelty + trend (IDI 0.25 / TVS 0.25) for watch-time/subscriber growth,
-  regional revenue secondary (0.15); REVENUE/SCALE keep regional revenue highest. Unlocks
-  YPP faster → monetizes sooner.
+- **GROWTH is discovery-led and revenue-free.** Pre-YPP the channel earns $0 in ads, so the
+  GROWTH TOPSIS vector leads with novelty + trend (IDI 0.25 / TVS 0.25) for watch-time/
+  subscriber growth, boosts shareability (SHM 0.15) and underserved demand (VPH 0.13),
+  weights saturation (SAT 0.12, cost) to avoid crowded niches, and **zeros regional revenue
+  (0.00)**; the band winner is then chosen by `_growth_score` (view-volume × novelty ×
+  shareability), never the phantom ad-revenue score. REVENUE/SCALE keep regional revenue
+  highest. Unlocks YPP faster → monetizes sooner.
 - **Region-optimized cron** (`cron_publish.sh`) — up to TWO publishes/day behind the $2,000/month
   goal; launch bands [11:00-12:20] & [13:30-14:30] UTC backed out of the ~1h50m runtime; guards
   (no double-run, `CSVG_MAX_DAILY_PUBLISHES=4`, cooldown 90) → up to 2/day; journal
