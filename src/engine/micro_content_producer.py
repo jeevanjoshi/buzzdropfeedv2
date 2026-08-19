@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import logging
 from typing import List, Optional
@@ -18,6 +19,40 @@ def _probe_duration(path: str) -> float:
         return v if v > 0 else 0.0
     except Exception:
         return 0.0
+
+
+def _probe_speech_end(video_path: str, start_s: float, max_dur: float,
+                      noise_db: float = -35.0, min_sil: float = 0.25) -> Optional[float]:
+    """Return the time (relative to `start_s`) of the last spoken audio inside the
+    window [start_s, start_s+max_dur], or None if it cannot be determined.
+
+    Used to end Shorts on a natural breath instead of mid-word. ffmpeg's
+    silencedetect timestamps are relative to the seeked (0-based) window because
+    `-ss` precedes `-i`.
+    """
+    try:
+        cmd = [
+            "ffmpeg", "-ss", f"{start_s:.2f}", "-i", video_path,
+            "-t", f"{max_dur:.2f}",
+            "-af", f"silencedetect=n={noise_db}:d={min_sil}",
+            "-f", "null", "-",
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                              text=True, timeout=90)
+        txt = proc.stderr or ""
+        silence_starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", txt)]
+        silence_ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", txt)]
+        last_ss = silence_starts[-1] if silence_starts else None
+        last_se = silence_ends[-1] if silence_ends else None
+        # Speech ends where the final silence begins (trailing silence, or silence
+        # that runs past the window end). Otherwise speech continues to max_dur.
+        if last_ss is not None and (last_se is None or last_ss >= last_se):
+            speech_end = min(max_dur, last_ss + 0.15)
+            if speech_end >= 2.0:
+                return speech_end
+        return max_dur
+    except Exception:
+        return None
 
 
 _COVER_ENABLED = os.getenv("CSVG_SHORTS_COVERS", "1").strip().lower() not in ("0", "false", "no")
@@ -219,18 +254,25 @@ class MicroContentProducer:
         cover_paths = []
         for clip_idx, (shot_idx, start_s, clip_dur) in enumerate(start_offsets, 1):
             out_clip = os.path.join(self.output_dir, f"short_{pipeline_id}_clip{clip_idx}.mp4")
-            # FFmpeg command to crop 16:9 to 9:16 center crop and trim clip.
-            # A short fade-out (video + audio) over the final ~0.8s makes the Short
-            # end naturally instead of cutting abruptly mid-breath.
-            fade_d = min(0.8, clip_dur * 0.25)
-            fade_st = max(0.0, clip_dur - fade_d)
+            # Speech-align the end so the Short never cuts mid-word: end at the
+            # last spoken sample inside the window (falling back to the fixed shot
+            # length if silencedetect is unavailable).
+            speech_end = _probe_speech_end(final_video, start_s, clip_dur)
+            trim_dur = speech_end if (speech_end and 2.0 <= speech_end <= clip_dur) else clip_dur
+            # FFmpeg command to crop 16:9 to 9:16 center crop and trim the clip.
+            # A short fade-IN (video + audio) smooths the hard cut from the 1s hook
+            # cover, and a ~1.0s fade-OUT ends the Short on a natural breath instead
+            # of cutting abruptly mid-word.
+            fade_in_d = 0.4
+            fade_out_d = min(1.0, trim_dur * 0.3)
+            fade_out_st = max(fade_in_d, trim_dur - fade_out_d)
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{start_s:.2f}",
                 "-i", final_video,
-                "-t", f"{clip_dur:.2f}",
-                "-vf", f"crop=ih*9/16:ih,scale=1080:1920,fade=t=out:st={fade_st:.2f}:d={fade_d:.2f}",
-                "-af", f"afade=t=out:st={fade_st:.2f}:d={fade_d:.2f}",
+                "-t", f"{trim_dur:.2f}",
+                "-vf", f"crop=ih*9/16:ih,scale=1080:1920,fade=t=in:st=0:d={fade_in_d:.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
+                "-af", f"afade=t=in:st=0:d={fade_in_d:.2f},afade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
                 out_clip
@@ -243,10 +285,10 @@ class MicroContentProducer:
                 # extracted clip will be far shorter than requested — never ship it.
                 if ok_trim:
                     _got = _probe_duration(out_clip)
-                    if _got < clip_dur * 0.9:
+                    if _got < trim_dur * 0.9:
                         logger.warning(
                             f"[MICRO_CONTENT] Short clip #{clip_idx} truncated "
-                            f"(got {_got:.1f}s of {clip_dur:.1f}s) — master likely "
+                            f"(got {_got:.1f}s of {trim_dur:.1f}s) — master likely "
                             f"missing data at start {start_s:.1f}s; skipping."
                         )
                         ok_trim = False

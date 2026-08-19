@@ -9,9 +9,9 @@ from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_ha
 from mcp_servers.audio_edge.server import synthesize_tts, align_subtitles_whisper, sanitize_tts_text, TTSRequest, WhisperRequest
 from mcp_servers.media_cloud.server import (
     generate_flux_image, apply_ken_burns_motion, assemble_ffmpeg_timeline,
-    render_playwright_svg_animation, generate_dynamic_chart, fetch_reaction_gif_clip,
+    render_playwright_svg_animation, generate_dynamic_chart,
     ImageGenRequest, KenBurnsRequest, TimelineAssemblyRequest,
-    PlaywrightSVGRequest, ChartRequest, GIFRequest
+    PlaywrightSVGRequest, ChartRequest
 )
 from src.engine.media_budget import media_budget
 from src.engine.run_budget import run_budget
@@ -780,42 +780,36 @@ def _generate_free_visual(shot, raw_visual_prompt: str, img_path: str, mp4_path:
     query_lower = raw_visual_prompt.lower()
     is_vector = any(kw in query_lower for kw in ["vector", "svg", "icon", "logo"])
     is_illustration = any(kw in query_lower for kw in ["illustration", "graphic", "clipart"])
-    is_video = any(kw in query_lower for kw in ["video", "footage", "b-roll", "timelapse", "motion"])
+    # The free fallback MUST stay image-only. The pipeline's visual language is
+    # cinematic Ken-Burns `standard_image` (see AGENTS.md: GIF/b-roll/video visuals
+    # are disabled). The old code keyed `is_video` off the generic FVD word "motion"
+    # (enriched into every Act-5 prompt), which pulled an off-topic, text-overlaid
+    # STOCK VIDEO into the long-form master whenever FLUX.1 failed or the image
+    # budget was exhausted (e.g. the "tea time" clip at ~3:32). Returning a still
+    # image keeps the fallback on-aesthetic: it flows through `apply_ken_burns_motion`
+    # like every other shot.
     img_type = "vector" if is_vector else ("illustration" if is_illustration else "photo")
 
     def _fetch_from(retriever, source_name: str):
-        """Attempt to fetch + download from one stock provider; raise on failure."""
+        """Attempt to fetch + download a still image from one stock provider; raise on failure."""
         nonlocal specialized
-        if is_video:
-            print(f"[FreeVisual] Searching stock video ({source_name}) for: '{clean_query}'")
-            results = retriever.search_videos(clean_query, limit=1)
-            if not results:
-                raise RuntimeError(f"No stock videos on {source_name}.")
-            res = requests.get(results[0]["video_url"], headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
-            if res.status_code != 200:
-                raise RuntimeError(f"{source_name} video HTTP {res.status_code}")
-            with open(mp4_path, 'wb') as f:
-                f.write(res.content)
-            print(f"[FreeVisual] Downloaded {source_name} stock video to {mp4_path}")
-            specialized = True
-        else:
-            print(f"[FreeVisual] Searching stock images ({img_type}, {source_name}) for: '{clean_query}'")
-            results = retriever.search_images(clean_query, image_type=img_type, limit=1)
-            if not results:
-                raise RuntimeError(f"No {img_type}s on {source_name}.")
-            res = requests.get(results[0]["largeImageURL"], headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
-            if res.status_code != 200:
-                raise RuntimeError(f"{source_name} image HTTP {res.status_code}")
-            with open(img_path, 'wb') as f:
-                f.write(res.content)
-            print(f"[FreeVisual] Downloaded {source_name} stock image to {img_path}")
+        print(f"[FreeVisual] Searching stock images ({img_type}, {source_name}) for: '{clean_query}'")
+        results = retriever.search_images(clean_query, image_type=img_type, limit=1)
+        if not results:
+            raise RuntimeError(f"No {img_type}s on {source_name}.")
+        res = requests.get(results[0]["largeImageURL"], headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+        if res.status_code != 200:
+            raise RuntimeError(f"{source_name} image HTTP {res.status_code}")
+        with open(img_path, 'wb') as f:
+            f.write(res.content)
+        print(f"[FreeVisual] Downloaded {source_name} stock image to {img_path}")
 
     try:
         # Check NASA Image & Video Library first for Space/Astronomy topics
         from src.engine.nasa_retriever import nasa_retriever
         is_space_query = any(k in clean_query.lower() or (anchors and any(k in str(a).lower() for a in anchors))
                              for k in ["space", "nasa", "eclipse", "moon", "sun", "solar", "astronomy", "jwst", "mars", "galaxy", "telescope", "orbit", "spacecraft", "apollo"])
-        if is_space_query and not is_video:
+        if is_space_query:
             nasa_url = nasa_retriever.search_image(clean_query)
             if nasa_url:
                 print(f"[FreeVisual] Found NASA Image Archive photo for '{clean_query}': {nasa_url}")
@@ -1245,19 +1239,13 @@ class MediaProducerAgent:
                     print(f"Warning: Stat chart render failed: {chart_err}. Falling through to normal flow.")
 
             # Check 1: Dynamic GIF visual asset retrieval
-            elif v_type in (VisualType.GIF_MEME, VisualType.GIF_STICKER) or "[gif:" in prompt_lower or "animated gif" in prompt_lower or "gif sticker" in prompt_lower:
-                match = re.search(r'\[gif:\s*([^\]]+)\]', prompt_lower)
-                gif_query = match.group(1).strip() if match else clean_narration[:40]
-                print(f"Processing AI dynamic GIF segment for {shot_key} (Query: '{gif_query}')")
-                try:
-                    await fetch_reaction_gif_clip(GIFRequest(
-                        query=gif_query,
-                        duration=shot_timeline_dur,
-                        output_mp4_path=mp4_path
-                    ))
-                    is_specialized = True
-                except Exception as gif_err:
-                    print(f"Warning: GIF generation failed: {gif_err}. Falling back to normal image rendering.")
+            # Check 1 (GIF / reaction-meme) is DISABLED on this documentary channel
+            # (see AGENTS.md). gif_meme / gif_sticker choices must never ship as
+            # off-topic, text-overlaid stock clips — they break the cinematic Ken-Burns
+            # aesthetic. Case in point: the "tea time" clip at ~3:32 of the 2026-08-18
+            # Meta run (shot_6 was tagged gif_meme and rendered as a real stock GIF).
+            # Intentional no-op: fall through so the shot renders as a standard FLUX
+            # still + Ken-Burns motion like every other shot.
 
             # Check 2: Dynamic Stock/Data Chart segment (only when the shot is actually
             #            grounded — never for scene descriptions that merely say

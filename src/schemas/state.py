@@ -1,6 +1,6 @@
 import datetime
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +112,17 @@ class ShotBeat(BaseModel):
     visual_type: VisualType = Field(default=VisualType.STANDARD_IMAGE)
     chart_notes: Optional[str] = Field(default=None, description="Chart spec notes for stat shots")
 
+    @model_validator(mode="after")
+    def _normalize_visual_type(self) -> "ShotBeat":
+        # Reaction GIF/meme visuals are disabled on this documentary channel
+        # (see AGENTS.md). Normalize any gif_meme/gif_sticker tag to a standard
+        # FLUX still so a stale tag in a persisted/resumed state can never ship
+        # as an off-topic stock clip (e.g. the "tea time" GIF at ~3:32 of the
+        # 2026-08-18 Meta run, shot_6).
+        if self.visual_type in (VisualType.GIF_MEME, VisualType.GIF_STICKER):
+            self.visual_type = VisualType.STANDARD_IMAGE
+        return self
+
 class ShotData(BaseModel):
     shot_id: int
     act_index: int = Field(..., ge=1, le=6, description="Act 1 to 6 in 6-Act dramatic model")
@@ -123,6 +134,17 @@ class ShotData(BaseModel):
     # {title, labels, values, unit, chart_type}. Values must come verbatim from
     # RAG verified facts (never fabricated). Backward-compatible (default None).
     chart_spec: Optional[Dict[str, Any]] = Field(default=None, description="Grounded bar/line chart data {title, labels, values, unit, chart_type}")
+
+    @model_validator(mode="after")
+    def _normalize_visual_type(self) -> "ShotData":
+        # Reaction GIF/meme visuals are disabled on this documentary channel
+        # (see AGENTS.md). Normalize any gif_meme/gif_sticker tag to a standard
+        # FLUX still so a stale tag in a persisted/resumed state can never ship
+        # as an off-topic stock clip (e.g. the "tea time" GIF at ~3:32 of the
+        # 2026-08-18 Meta run, shot_6).
+        if self.visual_type in (VisualType.GIF_MEME, VisualType.GIF_STICKER):
+            self.visual_type = VisualType.STANDARD_IMAGE
+        return self
 
 
 class ScriptData(BaseModel):

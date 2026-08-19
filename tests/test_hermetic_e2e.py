@@ -1516,14 +1516,25 @@ def case_media_producer_charts_and_thumbnails():
     scene = _build_thumbnail_scene(st)
     ok_scene = "Meta Muse Glimmer" in scene and "16:9" in scene
 
-    # 6. VisualType dispatch & enum coverage
-    for vt in (VisualType.STANDARD_IMAGE, VisualType.GIF_MEME, VisualType.GIF_STICKER, VisualType.MATPLOTLIB_CHART, VisualType.SVG_TICKER):
+    # 6. VisualType dispatch & enum coverage.
+    # NOTE: gif_meme / gif_sticker are disabled on this channel (AGENTS.md) and are
+    # normalized to STANDARD_IMAGE at construction — this also covers a stale tag in
+    # a persisted/resumed state (e.g. the "tea time" GIF at ~3:32 of the 2026-08-18
+    # Meta run, shot_6, which was tagged gif_meme). The other types must survive.
+    _expect = {
+        VisualType.STANDARD_IMAGE: VisualType.STANDARD_IMAGE,
+        VisualType.GIF_MEME: VisualType.STANDARD_IMAGE,
+        VisualType.GIF_STICKER: VisualType.STANDARD_IMAGE,
+        VisualType.MATPLOTLIB_CHART: VisualType.MATPLOTLIB_CHART,
+        VisualType.SVG_TICKER: VisualType.SVG_TICKER,
+    }
+    for vt, exp in _expect.items():
         test_shot = ShotData(
             shot_id=1, act_index=1, narration_text="Shot narration",
             visual_prompt="shot prompt", duration_estimate=5.0,
             visual_type=vt
         )
-        assert test_shot.visual_type == vt
+        assert test_shot.visual_type == exp, f"{vt} -> {test_shot.visual_type}, expected {exp}"
 
     passed = ok_nums and ok_theme_pos and ok_theme_neg and ok_spec and ok_narr_derive and ok_scene and ok_leak_guards and ok_title_guards
     record("MEDIA_PRODUCER_CHARTS_AND_THUMBNAILS", passed,
