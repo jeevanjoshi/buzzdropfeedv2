@@ -812,6 +812,9 @@ class StoryDesignerAgent:
         current_year = str(now_utc.year)
         current_month_year = now_utc.strftime("%B %Y")
         current_date_str = now_utc.strftime("%Y-%m-%d")
+        # Runtime / length control (recommendation: keep masters punchy, <=~9-12 min).
+        _target_shots = int(os.getenv("CSVG_TARGET_SHOTS", "15"))
+        _min_total_words = int(os.getenv("CSVG_MIN_TOTAL_WORDS", "1300"))
 
         headline = topic.headline
         summary = topic.summary
@@ -899,13 +902,13 @@ class StoryDesignerAgent:
                 prompt += """
 
                 Requirements:
-                 1. Exactly 18 shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict) — 3 shots per act.
+                 1. Exactly {_target_shots} shots spanning 6 Acts (Act 1 Hook, Act 2 History/Origins, Act 3 Deep Technical Mechanics, Act 4 Real-World Impact, Act 5 Critical Risks & Misconceptions, Act 6 Future Verdict) — distributed across the acts (roughly {max(2, _target_shots // 6)} per act).
                     - For Shot 1 (Act 1 Hook): Target 75-85 words. It MUST start with an immediate, high-stakes hook in the first 10 words (e.g. a specific anomaly, conflict, or metric) and strictly avoid generic cliches or slow metaphors (like 'In a world...', 'The landscape resembles...', 'The year is...').
                     - For all other body shots (2-17): Target 90-105 words deeply explaining facts from the RAG pack.
                     - For Shot 18 (Act 6 Outro): Target 75-85 words.
-                 2. Return a JSON object with key "shots" containing an array of 18 shot objects.
-                 3. Each shot object MUST contain:
-                    - "shot_id": integer 1 to 18
+                 2. Return a JSON object with key "shots" containing an array of {_target_shots} shot objects.
+                  3. Each shot object MUST contain:
+                    - "shot_id": integer 1 to {_target_shots}
                     - "act_index": integer 1 to 6
                     - "narration_text": string matching the word length targets specified in Requirement 1.
                     - "visual_prompt": string specifying "Cinematic 16:9 widescreen..." matching '{category}'
@@ -921,7 +924,8 @@ class StoryDesignerAgent:
                  7. VISUAL CONTINUITY: Each visual_prompt must describe a DISTINCT scene with a unique camera movement (dolly, pan, crane, macro, wide, ECU) and lighting setup.
                  8. TOPIC KEYWORD DENSITY: At least 2-3 specific keywords from the headline '{headline}' must appear in every shot's narration_text.
                  9. STORYTELLING INTEGRATION: Seamlessly blend real-world facts from the RAG pack into a single, cohesive narrative arc. Do not output raw scrapped snippets verbatim; rephrase them using rich, evocative English prose.
-                 10. CREATIVE CTA INTEGRATION: The final shot must conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like and subscribe to join the journey. Avoid stale, generic 'like and subscribe' phrasing.
+                 10. CREATIVE CTA INTEGRATION: The final shot MUST conclude with a highly creative, conversational, and integrated call-to-action (CTA). Ask the audience a thought-provoking question related to the topic, invite them to drop their answers in the comments, and smoothly guide them to like AND subscribe to join the journey. This verbal CTA is mandatory — the video must end by explicitly asking viewers to like, comment, and subscribe (never omit it). Avoid stale, generic phrasing but the subscribe/like/comment ask is non-negotiable.
+                 11. HUMAN STAKES (especially for policy / regulatory / explainer topics that lack an obvious villain): Act 5 must translate the abstract issue into a concrete human cost or personal stake — who wins, who loses, what it means for an ordinary viewer's money, privacy, job, or daily life. If the topic is a bureaucratic or policy shift, manufacture tension by contrasting corporate/political winners against the everyday person, and open Act 1 with that friction, not a date or a procedural summary.
                  STATISTIC-SHOT CHART SPEC (IMPORTANT):
                  For ANY shot whose narration makes a numeric/statistical claim (percentages, growth figures, valuations, market-cap shifts), set its "visual_type" to "matplotlib_chart" AND add a "chart_spec" object: {{"title": "<short title>", "labels": ["<desc1>","<desc2>",...], "values": [<number>,<number>,...], "unit": "%" or "$" or "₹" or "B" etc, "chart_type": "bar" or "line"}}. The numbers in "values" MUST be the real figures from the RAG pack — never invent or round-away numbers. Prefer "bar" for discrete comparisons (e.g. market share, YoY %), "line" for trends over time. Include 2-6 values. If a shot has no numeric claim, omit "chart_spec".
                  """
@@ -945,10 +949,10 @@ class StoryDesignerAgent:
                 if attempt > 1:
                     repair_hint = (
                         "\n\n⚠️ CRITICAL REPAIR INSTRUCTION (PREVIOUS DRAFT FAILED VALIDATION):\n"
-                        "Your previous draft did NOT meet the HARD requirements: it either contained fewer than 12 shots, "
-                        "had narration_text under 75 words, the total fell below 1,500 words, or the JSON was "
-                        "truncated/incomplete. Produce EXACTLY 18 shot objects. Shot 1 and Shot 18 must be 75-85 words, "
-                        "and all other shots between 90 and 105 words, so the script total exceeds 1,500 words. "
+                        f"Your previous draft did NOT meet the HARD requirements: it either contained fewer than 12 shots, "
+                        f"had narration_text under 75 words, the total fell below {_min_total_words} words, or the JSON was "
+                        f"truncated/incomplete. Produce EXACTLY {_target_shots} shot objects. Shot 1 and Shot {_target_shots} must be 75-85 words, "
+                        f"and all other shots between 90 and 105 words, so the script total exceeds {_min_total_words} words. "
                         "Return ONLY one complete, valid JSON object with a single 'shots' key. Do NOT truncate or omit any shot.\n"
                     )
                     prompt += repair_hint
@@ -1004,7 +1008,7 @@ class StoryDesignerAgent:
                             ))
 
                         total_words = sum(len(s.narration_text.split()) for s in shots)
-                        if total_words >= 1500 and len(shots) >= 12:
+                        if total_words >= _min_total_words and len(shots) >= 12:
                             self.last_llm_source = "LIVE_LLM"
                             # Fixes 2 & 3: strip raw [Tool: ...] tags and [...] scrape
                             # artifacts from the finished narration so it reads as clean prose.
@@ -1494,7 +1498,7 @@ class StoryDesignerAgent:
         the stashed RAG snippet pool (semantic TF-IDF selection). If the pool is
         exhausted the script is returned with its honest (recomputed) runtime.
         """
-        MIN_TOTAL_WORDS = 1500    # ~10.0 mins @ 150 wpm (Observer hard floor)
+        MIN_TOTAL_WORDS = int(os.getenv("CSVG_MIN_TOTAL_WORDS", "1300"))    # ~8.7 mins @ 150 wpm
         MIN_SHOT_WORDS = 75       # shorter shots (~90 words) so no still is held a full minute
         MIN_FINAL_SHOT_WORDS = 40
         headline = state.selected_topic.headline if state.selected_topic else script.title

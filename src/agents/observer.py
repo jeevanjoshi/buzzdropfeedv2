@@ -677,12 +677,14 @@ class ObserverAgent:
                     f"Switch to higher-RPM niche (Tech/AI/Finance/Health)."
                 )
 
-        # Runtime Check — 10.0 to 15.5 min is the target range
+        # Runtime Check — configurable; default 8.0 to 12.0 min (punchy, retention-friendly)
+        _max_runtime = float(os.getenv("CSVG_MAX_RUNTIME_MIN", "12.0"))
+        _min_runtime = float(os.getenv("CSVG_MIN_RUNTIME_MIN", "8.0"))
         runtime_min = script.estimated_runtime_seconds / 60.0
-        if runtime_min < 10.0 or runtime_min > 15.5:
+        if runtime_min < _min_runtime or runtime_min > _max_runtime:
             violations.append(
                 f"Runtime out of bounds: {runtime_min:.2f} mins "
-                f"(Target: 10.0 - 15.5 mins for YPP & mid-roll optimization)"
+                f"(Target: {_min_runtime:.1f} - {_max_runtime:.1f} mins)"
             )
 
         # Shot Count Check

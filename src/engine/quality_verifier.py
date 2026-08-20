@@ -42,14 +42,15 @@ class StageQualityVerifier:
         if not script or not script.shots:
             return False, ["Script has no shots."]
 
-        # 1. Word Count / Runtime Check (10-15 mins)
+        # 1. Word Count / Runtime Check (configurable floor; default ~8.7 mins)
+        _min_words = int(os.getenv("CSVG_MIN_TOTAL_WORDS", "1300"))
         total_words = sum(len(s.narration_text.split()) for s in script.shots)
         est_runtime_mins = total_words / 150.0
 
-        if total_words < 1500:
+        if total_words < _min_words:
             issues.append(
                 f"Gate 1 Fail: Script total word count is {total_words} words ({est_runtime_mins:.2f} mins). "
-                f"Must be >= 1,500 words for a 10-15 minute video."
+                f"Must be >= {_min_words} words for a ~{_min_words/150.0*60:.1f} minute video."
             )
 
         # 2. Topic Domain Semantic Alignment Check

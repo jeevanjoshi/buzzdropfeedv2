@@ -133,9 +133,14 @@ it must convert viewers into subscribers + watch-hours to unlock YPP.
   Shorts CTR on a sound-on mobile feed. `mcp_servers/youtube_cloud`
   `/tools/upload_short` (same OAuth resumable insert + `#Shorts` tag + EU-AI-act
   disclosure) uploads them in GROWTH phase (non-fatal, quota-shared) — the #1
-  discovery/subscriber lever pre-YPP (`UploadMetadata.shorts_video_id`). Tuning
-  envs: `CSVG_SHORTS_TRAILER` (default 1), `CSVG_SHORTS_SEGS` (beats/Short, 5),
-  `CSVG_SHORTS_SEG_LEN` (s/beat, 8), `CSVG_SHORTS_XFADE` (s, 0.35).
+   discovery/subscriber lever pre-YPP (`UploadMetadata.shorts_video_id`). Tuning
+   envs: `CSVG_SHORTS_TRAILER` (default 1), `CSVG_SHORTS_SEGS` (beats/Short, 5),
+   `CSVG_SHORTS_SEG_LEN` (s/beat, 8), `CSVG_SHORTS_XFADE` (s, 0.35).
+   - **Re-cut already-published Shorts** (e.g. old uploads that contain chart
+     frames): `python rebuild_shorts.py --last 3` regenerates the Short video
+     files locally from the on-disk master using the new montage logic
+     (`logs/shorts_recut/<pipeline_id>/`). YouTube can't replace a Short in
+     place, so uploading the new clips is a manual decision.
 - **Phase-aware pinned comment** — GROWTH pushes subscribe + watch-time; later phases keep
   the pure engagement question.
 - **Subscribe CTA in description** (GROWTH) — appends a subscribe/bell + daily-series line.
@@ -233,8 +238,17 @@ are absent, every gate falls back to the original TF-IDF/NLTK logic — no regre
 
 - **Soft approval** (`orchestrator.py`) — after the bounded 3-revision loop, style-class
   violations are **non-blocking** when `ALLOW_SOFT_APPROVAL=1` (default). Hard invariants
-  (fact/temporal audit, revenue/audience gate, runtime, shot count, quality gates 1–7) still
-  abort. Set `ALLOW_SOFT_APPROVAL=0` to restore all-or-nothing.
+   (fact/temporal audit, revenue/audience gate, runtime, shot count, quality gates 1–7) still
+   abort. Set `ALLOW_SOFT_APPROVAL=0` to restore all-or-nothing.
+ - **Master length / runtime caps** — `story_designer` targets `CSVG_TARGET_SHOTS`
+   (default 15; ~9 min @ 150 wpm) and a word floor `CSVG_MIN_TOTAL_WORDS` (default
+   1300). The Observer hard-aborts outside `CSVG_MIN_RUNTIME_MIN`–`CSVG_MAX_RUNTIME_MIN`
+   (default 8.0–12.0 min) and the quality verifier's Gate 1 floor tracks
+   `CSVG_MIN_TOTAL_WORDS`. Keeps documentaries punchy for pre-YPP retention.
+ - **Mandatory verbal CTA + human stakes** — the final Act-6 shot must explicitly
+   ask viewers to like/comment/subscribe (soft warning if the model omits it), and
+   policy/explainer topics must translate the issue into a concrete human cost in
+   Act 5 (per the `story_designer` prompt).
 - **Model persistence** — loads lazily on first use, stays resident for process lifetime;
   `release()` frees weights (~50 MB) but torch stays imported. Resident is the default
   (4–6 runs/day).

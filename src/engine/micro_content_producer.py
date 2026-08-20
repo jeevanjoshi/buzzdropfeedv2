@@ -82,18 +82,23 @@ _COVER_ENABLED = os.getenv("CSVG_SHORTS_COVERS", "1").strip().lower() not in ("0
 
 
 def _shorts_hook(state: GlobalState) -> str:
-    """Reuse the SEO thumbnail hook (<=3 words, never the video title) as the
-    Shorts cover text."""
-    brief = ""
-    if state.seo_metadata and state.seo_metadata.thumbnail_brief:
-        brief = state.seo_metadata.thumbnail_brief
+    """Shorts cover text = a short, tension/curiosity phrase that makes a scroller
+    stop. Prefer the SEO *title* (which is already written as a curiosity gap,
+    e.g. "Why the FCC Wants Your Internet to Stay Slow") over the bare keyword
+    `thumbnail_brief`, then the topic headline as fallback."""
+    hook = ""
+    seo = state.seo_metadata
+    if seo and seo.title:
+        hook = seo.title
     elif state.selected_topic and state.selected_topic.headline:
-        brief = state.selected_topic.headline
+        hook = state.selected_topic.headline
+    elif seo and seo.thumbnail_brief:
+        hook = seo.thumbnail_brief
     try:
         from mcp_servers.media_cloud.server import _shorten_thumbnail_text
-        return _shorten_thumbnail_text(brief or "WATCH THIS")
+        return _shorten_thumbnail_text(hook or "WATCH THIS")
     except Exception:
-        words = (brief or "WATCH THIS").split()[:3]
+        words = (hook or "WATCH THIS").split()[:4]
         return " ".join(words).upper() if words else "WATCH THIS"
 
 
@@ -325,6 +330,13 @@ class MicroContentProducer:
         for clip_idx in range(1, max_shorts + 1):
             if _TRAILER and timeline:
                 segs = _select_trailer_segments(timeline, max_shorts, clip_idx)
+                # Safety net: a chart/ticker frame must NEVER reach a Short.
+                _chart_leak = [s["act"] for s in segs if s["chart"]]
+                if _chart_leak:
+                    logger.error(
+                        f"[MICRO_CONTENT] Chart/ticker leak into Short #{clip_idx} "
+                        f"acts {_chart_leak} — excluding from montage.")
+                    segs = [s for s in segs if not s["chart"]]
                 base = self._build_montage(final_video, segs, pipeline_id, clip_idx)
             else:
                 base = None

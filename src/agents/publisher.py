@@ -165,7 +165,12 @@ class PublisherAgent:
         - Pins clear conversion CTAs (subscribe / bell / playlist)
         - Uses aesthetic clean formatting with line breaks
         """
-        phase = getattr(state, "channel_phase", "") or ""
+        # channel_phase is a read-only property that defaults to GROWTH; guard
+        # against a missing channel_stats so CTAs never silently degrade.
+        try:
+            phase = state.channel_phase or "GROWTH"
+        except Exception:
+            phase = "GROWTH"
         shots = state.script_data.shots if state.script_data else []
         act6_shots = [s for s in shots if getattr(s, "act_index", 0) == 6 or getattr(s, "shot_id", 0) >= 16]
         
@@ -182,6 +187,18 @@ class PublisherAgent:
         if not grounded_question:
             headline = state.selected_topic.headline if state.selected_topic else title
             grounded_question = f"What is your take on the shift happening with {headline}?"
+
+        # Soft CTA guard (recommendation #3): the final Act-6 shot must explicitly
+        # ask viewers to like/comment/subscribe. Warn (non-fatal) if the model
+        # omitted it — the pinned comment still carries the subscribe ask, but the
+        # video itself should close with one.
+        _cta_words = ("subscribe", "like", "comment", "bell", "join")
+        _final_act6 = act6_shots[-1] if act6_shots else None
+        if _final_act6 is not None:
+            _final_txt = getattr(_final_act6, "narration_text", "") or ""
+            if not any(w in _final_txt.lower() for w in _cta_words):
+                print("[Publisher] WARNING: final Act-6 shot lacks an explicit "
+                      "like/comment/subscribe CTA — the video should close with one.")
 
         lines = [f"📌 {grounded_question}"]
 
@@ -280,7 +297,12 @@ class PublisherAgent:
             seo.description = desc
             seo.chapter_timestamps = chapter_timestamps
 
-        phase = getattr(state, "channel_phase", "") or ""
+        # channel_phase is a read-only property that defaults to GROWTH; guard
+        # against a missing channel_stats so CTAs never silently degrade.
+        try:
+            phase = state.channel_phase or "GROWTH"
+        except Exception:
+            phase = "GROWTH"
         _GROWTH_DESC = (
             "\n\n🔔 Subscribe to the channel & turn on all notifications so you never "
             "miss an in-depth breakdown. New documentary every day at 17:00 UTC."
