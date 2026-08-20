@@ -357,7 +357,7 @@ placeholder audio (`src/agents/media_producer.py`):
   / `CSVG_END_CARD_SECONDS` appended a second 6s like/subscribe frame — a duplicate CTA that was
   removed). The outro CTA is baked onto the final shot only.
 - **Grounded Seed Comments & State Persistence:** `src/agents/publisher.py` automatically builds dynamic, topic-grounded seed comments from the video's Act 6 verdict questions, converts viewers with phase-aware CTAs (subscribe deep-link `YOUTUBE_SUBSCRIBE_URL`, default `https://www.youtube.com/@lumenloop-ai?sub_confirmation=1`), and attaches the comment text/ID to `UploadMetadata.pinned_comment_text` for real-time visibility on the Rust dashboard (`/api/runs`).
-- **YouTube Comment-Reply Bot:** `src/engine/youtube_engagement.py` queries top viewer comments and uses `LLMClient` to post fact-grounded replies via `/tools/reply_comment` to drive channel comment velocity and dwell time.
+- **YouTube Comment-Reply Bot:** `src/engine/youtube_engagement.py` queries top viewer comments and uses `LLMClient` to post fact-grounded replies via `/tools/reply_comment` to drive channel comment velocity and dwell time. It **skips the channel's own comments** (matched on `author_channel_id` vs `YOUTUBE_CHANNEL_ID`) so it never replies to the pinned seed comment and creates a self-conversation.
 
 ---
 

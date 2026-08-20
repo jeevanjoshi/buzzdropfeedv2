@@ -40,6 +40,9 @@ class YouTubeEngagementEngine:
             print(f"[YouTubeEngagement] Demo/hermetic video id ({video_id}); reply bot skipped.")
             return 0
 
+        # Channel's own ID so we never reply to our own pinned seed comment
+        own_channel_id = os.getenv("YOUTUBE_CHANNEL_ID", "").strip()
+
         replies_posted = 0
         try:
             res = await list_comments(ListCommentsRequest(video_id=video_id, max_results=15))
@@ -63,6 +66,11 @@ class YouTubeEngagementEngine:
                 author = comment.get("author", "")
 
                 if not cid or not text:
+                    continue
+
+                # Never reply to the channel's own comments (e.g. pinned seed
+                # comment), so we don't create a self-conversation with ourselves.
+                if own_channel_id and comment.get("author_channel_id") == own_channel_id:
                     continue
 
                 # Skip low-effort/spam or very short comments
