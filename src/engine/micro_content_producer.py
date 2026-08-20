@@ -2,10 +2,33 @@ import os
 import re
 import subprocess
 import logging
-from typing import List, Optional
-from src.schemas.state import GlobalState
+from typing import List, Optional, Dict, Any
+from src.schemas.state import GlobalState, VisualType
 
 logger = logging.getLogger("CSVG_PIPELINE")
+
+# Visual types that are deadly on Shorts (static data walls read as "boring" on
+# a vertical, sound-on, mobile-first feed and crater CTR). Never include them in
+# a Short — the trailer is built exclusively from cinematic / narrative beats.
+_CHART_TYPES = frozenset({VisualType.MATPLOTLIB_CHART, VisualType.SVG_TICKER})
+
+# Trailer tuning (all env-overridable).
+_SEG_LEN = float(os.getenv("CSVG_SHORTS_SEG_LEN", "8.0"))          # seconds per montage beat
+_MAX_SEGS = int(os.getenv("CSVG_SHORTS_SEGS", "5"))                # beats per Short
+_TRAILER = os.getenv("CSVG_SHORTS_TRAILER", "1").strip().lower() not in ("0", "false", "no")
+_XFADE = float(os.getenv("CSVG_SHORTS_XFADE", "0.35"))             # beat-to-beat dissolve
+
+# Per-act dramatic weight — a Shorts trailer should climb toward the Act 5
+# reveal / Act 6 verdict, not flatten the arc.
+_ACT_TENSION = {1: 0.9, 2: 0.55, 3: 0.85, 4: 0.9, 5: 1.0, 6: 0.8}
+
+# Narration signals that flag a "tension / hook" beat worth cutting into a trailer.
+_HOOK_WORDS = (
+    "secret", "shocking", "hidden", "never", "reveals", "what happens", "truth",
+    "exposed", "insane", "unbelievable", "crisis", "collapse", "surge", "warning",
+    "you won't believe", "this is what", "here's why", "the catch", "backfire",
+    "explosion", "meltdown", "betrayal", "winner", "loser",
+)
 
 
 def _probe_duration(path: str) -> float:
@@ -203,6 +226,60 @@ def _prepend_cover(clip: str, cover_mp4: str, out_mp4: str) -> bool:
         return False
 
 
+def _shot_timeline(state: GlobalState) -> List[Dict[str, Any]]:
+    """Map the master's real (ffprobe-measured) timeline into per-shot windows
+    with the visual type, so we can exclude chart/ticker frames from Shorts."""
+    shots = state.script_data.shots if state.script_data else []
+    durs = state.asset_paths.measured_durations if state.asset_paths else []
+    timeline: List[Dict[str, Any]] = []
+    t = 0.0
+    for idx, shot in enumerate(shots):
+        d = durs[idx] if idx < len(durs) else (shot.duration_estimate or 5.0)
+        d = max(float(d), 1.0)
+        timeline.append({
+            "idx": idx,
+            "start": t,
+            "end": t + d,
+            "dur": d,
+            "act": shot.act_index,
+            "chart": shot.visual_type in _CHART_TYPES,
+            "narration": (shot.narration_text or ""),
+        })
+        t += d
+    return timeline
+
+
+def _seg_score(seg: Dict[str, Any]) -> float:
+    """Dramatic-tension score for a candidate Short beat."""
+    s = _ACT_TENSION.get(seg["act"], 0.5)
+    n = seg["narration"].lower()
+    if any(w in n for w in _HOOK_WORDS):
+        s += 0.25
+    # Slightly favour longer, self-contained beats (more room for a hook line).
+    s += min(seg["dur"], 10.0) * 0.01
+    return s
+
+
+def _select_trailer_segments(timeline: List[Dict[str, Any]], max_shorts: int,
+                             clip_idx: int) -> List[Dict[str, Any]]:
+    """Pick the gripping, non-chart beats for Short `clip_idx`.
+
+    Beats are ranked by tension, then rotated per-Short so each published Short
+    is a different mini-trailer (Short 1 = top-ranked beats, Short 2 = next
+    band). Never returns chart/ticker shots.
+    """
+    cands = [s for s in timeline if (not s["chart"]) and s["dur"] >= 3.0]
+    if not cands:
+        # Degenerate: every beat is a chart — fall back to non-empty beats so we
+        # still ship *something* (better than a blank Short), but this is rare.
+        cands = [s for s in timeline if s["dur"] >= 3.0] or list(timeline)
+    ranked = sorted(cands, key=_seg_score, reverse=True)
+    offset = (clip_idx - 1) * max(1, _MAX_SEGS // max(1, max_shorts))
+    selected = ranked[offset:offset + _MAX_SEGS] or ranked[:_MAX_SEGS]
+    # A trailer plays in narrative order, not ranked order.
+    return sorted(selected, key=lambda s: s["start"])
+
+
 class MicroContentProducer:
     """
     Automated short-form micro-content producer.
@@ -220,10 +297,16 @@ class MicroContentProducer:
 
     def generate_shorts(self, state: GlobalState, max_shorts: int = 2) -> List[str]:
         """
-        Extracts up to `max_shorts` vertical 9:16 video clips from the master video,
-        each prefixed by a 1-second burned-in hook cover frame when the master exists.
+        Build up to `max_shorts` vertical 9:16 Shorts that read as tension-gripping
+        *trailers* of the long-form master — not a flat crop of one act.
+
+        Each Short is a montage of the most dramatic, non-chart narrative beats
+        (Act 1 hook → Act 5 reveal → Act 6 verdict) cut together with quick
+        xfade dissolves and a burned-in hook cover at the very front. Chart /
+        ticker frames are never selected, because static data walls crater Shorts
+        CTR on a sound-on, mobile-first feed.
         """
-        generated_clips = []
+        generated_clips: List[str] = []
         pipeline_id = state.pipeline_id or "run"
         final_video = state.asset_paths.final_video if state.asset_paths else None
 
@@ -234,116 +317,32 @@ class MicroContentProducer:
                 generated_clips.append(mock_path)
             return generated_clips
 
-        # Identify candidate start times from shots (e.g. Act 1 hook & Act 3 revelation)
-        shots = state.script_data.shots if state.script_data else []
-        durs = state.asset_paths.measured_durations if state.asset_paths else []
-
-        start_offsets = []
-        running_time = 0.0
-        for idx, shot in enumerate(shots):
-            dur = durs[idx] if idx < len(durs) else shot.duration_estimate
-            # Pick start of Act 1 (shot 0) and Act 3 (shot index where act_index == 3)
-            if shot.act_index in (1, 3) and len(start_offsets) < max_shorts:
-                start_offsets.append((idx, running_time, min(dur, 45.0)))
-            running_time += dur
-
-        if not start_offsets:
-            start_offsets = [(0, 0.0, 30.0)]
-
+        timeline = _shot_timeline(state)
         hook = _shorts_hook(state)
-        cover_paths = []
-        for clip_idx, (shot_idx, start_s, clip_dur) in enumerate(start_offsets, 1):
-            out_clip = os.path.join(self.output_dir, f"short_{pipeline_id}_clip{clip_idx}.mp4")
-            # Speech-align the end so the Short never cuts mid-word: end at the
-            # last spoken sample inside the window (falling back to the fixed shot
-            # length if silencedetect is unavailable).
-            speech_end = _probe_speech_end(final_video, start_s, clip_dur)
-            trim_dur = speech_end if (speech_end and 2.0 <= speech_end <= clip_dur) else clip_dur
-            # FFmpeg command to crop 16:9 to 9:16 center crop and trim the clip.
-            # A short fade-IN (video + audio) smooths the hard cut from the 1s hook
-            # cover, and a ~1.0s fade-OUT ends the Short on a natural breath instead
-            # of cutting abruptly mid-word.
-            fade_in_d = 0.4
-            fade_out_d = min(1.0, trim_dur * 0.3)
-            fade_out_st = max(fade_in_d, trim_dur - fade_out_d)
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", f"{start_s:.2f}",
-                "-i", final_video,
-                "-t", f"{trim_dur:.2f}",
-                "-vf", f"crop=ih*9/16:ih,scale=1080:1920,fade=t=in:st=0:d={fade_in_d:.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
-                "-af", f"afade=t=in:st=0:d={fade_in_d:.2f},afade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-                out_clip
-            ]
-            ok_trim = False
-            try:
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
-                ok_trim = os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000
-                # Guard: if the master was truncated/short at this start time the
-                # extracted clip will be far shorter than requested — never ship it.
-                if ok_trim:
-                    _got = _probe_duration(out_clip)
-                    if _got < trim_dur * 0.9:
-                        logger.warning(
-                            f"[MICRO_CONTENT] Short clip #{clip_idx} truncated "
-                            f"(got {_got:.1f}s of {trim_dur:.1f}s) — master likely "
-                            f"missing data at start {start_s:.1f}s; skipping."
-                        )
-                        ok_trim = False
-                    else:
-                        logger.info(f"[MICRO_CONTENT] Rendered 9:16 Short clip #{clip_idx}: {out_clip}")
-                else:
-                    logger.warning(f"[MICRO_CONTENT] Trimmed clip #{clip_idx} empty: {out_clip}")
-            except Exception as e:
-                logger.warning(f"[MICRO_CONTENT] FFmpeg crop failed for clip #{clip_idx}: {e}")
+        cover_paths: List[str] = []
+        segs: List[Dict[str, Any]] = []
 
-            base_clip = out_clip if ok_trim else None
+        for clip_idx in range(1, max_shorts + 1):
+            if _TRAILER and timeline:
+                segs = _select_trailer_segments(timeline, max_shorts, clip_idx)
+                base = self._build_montage(final_video, segs, pipeline_id, clip_idx)
+            else:
+                base = None
 
-            # Burn in the 1s hook cover frame at the start (custom-frame rule).
-            if _COVER_ENABLED and base_clip:
-                cover_png = os.path.join(self.output_dir, f"short_{pipeline_id}_cover{clip_idx}.png")
-                try:
-                    cover_mp4 = os.path.join(self.output_dir, f"short_{pipeline_id}_cover{clip_idx}.mp4")
-                    with_cover = os.path.join(self.output_dir, f"short_{pipeline_id}_clip{clip_idx}_cover.mp4")
-                    _framed = _extract_short_frame(final_video, start_s, cover_png)
-                    _used_baked = False
-                    # Option B (preferred): full thematic native-text cover —
-                    # thematic hook + design-rules art + model-rendered text +
-                    # compliance, then prepended as the first frame.
-                    try:
-                        from src.engine.nano_banana import generate_baked_shorts_cover
-                        ref_bytes = None
-                        if _framed and os.path.getsize(cover_png) > 500:
-                            with open(cover_png, "rb") as _rf:
-                                ref_bytes = _rf.read()
-                        baked_out = os.path.join(self.output_dir, f"short_{pipeline_id}_baked{clip_idx}.jpg")
-                        if generate_baked_shorts_cover(state, output_path=baked_out,
-                                                       reference_frame=ref_bytes):
-                            cover_png = baked_out
-                            _framed = True
-                            _used_baked = True
-                    except Exception as e:
-                        logger.warning(f"[MICRO_CONTENT] nano-banana baked cover skipped ({e}); using frame.")
-                    # Fallback: nano-banana art (PIL hook burned below) over the frame.
-                    if not _used_baked:
-                        try:
-                            from src.engine.nano_banana import generate_shorts_cover_art
-                            if generate_shorts_cover_art(state, output_path=cover_png):
-                                _framed = True
-                        except Exception as e:
-                            logger.warning(f"[MICRO_CONTENT] nano-banana Shorts cover skipped ({e}); using frame.")
-                    if _framed:
-                        if not _used_baked:
-                            _compose_shorts_cover(cover_png, cover_png, hook)
-                        cover_paths.append(cover_png)
-                    if _framed and _cover_to_video(cover_png, cover_mp4) and _prepend_cover(base_clip, cover_mp4, with_cover):
-                        out_clip = with_cover
-                        logger.info(f"[MICRO_CONTENT] Prefixed 1s hook cover -> {with_cover}")
-                except Exception as e:
-                    logger.warning(f"[MICRO_CONTENT] Shorts cover burn skipped ({e}); using plain clip.")
-            generated_clips.append(out_clip)
+            if base and os.path.exists(base) and os.path.getsize(base) > 1000:
+                out_clip = self._apply_cover(final_video, base, segs[0]["start"],
+                                            clip_idx, hook, cover_paths, pipeline_id, state)
+            else:
+                # Fallback: a single contiguous, speech-aligned crop from the
+                # strongest non-chart beat (never a chart) so a publish never dies.
+                fb_start = timeline[0]["start"] if timeline else 0.0
+                logger.warning(f"[MICRO_CONTENT] Trailer montage for clip #{clip_idx} "
+                               f"failed; falling back to single contiguous crop.")
+                out_clip = self._render_single_clip(final_video, fb_start, 30.0,
+                                                   clip_idx, hook, cover_paths,
+                                                   pipeline_id, state)
+            if out_clip:
+                generated_clips.append(out_clip)
 
         # Record the 9:16 cover PNGs (parallel to `shorts`) so the publisher can
         # upload them as Shorts thumbnails via youtube.thumbnails.set.
@@ -354,6 +353,173 @@ class MicroContentProducer:
             pass
 
         return generated_clips
+
+    def _trim_segment(self, final_video: str, start_s: float, dur: float,
+                      pipeline_id: str, clip_idx: int, seg_idx: int) -> Optional[str]:
+        """Crop one non-chart beat from the master to a 9:16, 25fps, speech-aligned
+        clip with soft in/out fades. Returns the path or None."""
+        out = os.path.join(self.output_dir, f"short_{pipeline_id}_m{clip_idx}_s{seg_idx}.mp4")
+        # End on the last spoken word (never mid-syllable) when detectable.
+        speech_end = _probe_speech_end(final_video, start_s, dur)
+        dur = speech_end if (speech_end and 2.0 <= speech_end <= dur) else dur
+        dur = max(dur, 3.0)
+        fade_in_d = 0.3
+        fade_out_d = min(0.5, dur * 0.4)
+        fade_out_st = max(fade_in_d, dur - fade_out_d)
+        cmd = [
+            "ffmpeg", "-y", "-ss", f"{start_s:.2f}", "-i", final_video,
+            "-t", f"{dur:.2f}",
+            "-vf", f"crop=ih*9/16:ih,scale=1080:1920:flags=lanczos,"
+                   f"fade=t=in:st=0:d={fade_in_d:.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
+            "-af", f"afade=t=in:st=0:d={fade_in_d:.2f},afade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
+            "-r", "25", "-pix_fmt", "yuv420p", "-ar", "44100",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out,
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=True, timeout=120)
+            if os.path.exists(out) and os.path.getsize(out) > 1000:
+                return out
+        except Exception as e:
+            logger.warning(f"[MICRO_CONTENT] Segment trim failed ({e}); skipping beat.")
+        return None
+
+    def _build_montage(self, final_video: str, segs: List[Dict[str, Any]],
+                       pipeline_id: str, clip_idx: int) -> Optional[str]:
+        """Assemble a tension-gripping trailer from the chosen beats: trim each
+        beat, then xfade them into one 9:16 Short. Returns the path or None."""
+        if not segs:
+            return None
+        seg_paths: List[str] = []
+        for si, seg in enumerate(segs, 1):
+            seg_len = min(seg["dur"], _SEG_LEN)
+            p = self._trim_segment(final_video, seg["start"], seg_len, pipeline_id, clip_idx, si)
+            if p:
+                seg_paths.append(p)
+        if not seg_paths:
+            return None
+        if len(seg_paths) == 1:
+            out = os.path.join(self.output_dir, f"short_{pipeline_id}_montage{clip_idx}.mp4")
+            try:
+                subprocess.run(["ffmpeg", "-y", "-i", seg_paths[0], "-c", "copy", out],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               check=True, timeout=120)
+                if os.path.exists(out) and os.path.getsize(out) > 1000:
+                    return out
+            except Exception:
+                pass
+            return seg_paths[0]
+        return self._concat_xfade(seg_paths,
+                                  os.path.join(self.output_dir, f"short_{pipeline_id}_montage{clip_idx}.mp4"))
+
+    def _concat_xfade(self, clips: List[str], out_path: str, xf: float = 0.35) -> Optional[str]:
+        """Concatenate equally-sized 9:16 / 25fps / 44.1k clips with crossfades."""
+        try:
+            durs = [_probe_duration(c) for c in clips]
+            if any(d <= 0 for d in durs):
+                raise ValueError("unable to probe one or more clip durations")
+            vlabel = "[0:v]"
+            alabel = "[0:a]"
+            parts: List[str] = []
+            for i in range(1, len(clips)):
+                cum = sum(durs[:i]) - i * xf
+                parts.append(f"{vlabel}[{i}:v]xfade=transition=fade:duration={xf:.2f}:offset={cum:.3f}[v{i}]")
+                parts.append(f"{alabel}[{i}:a]acrossfade=d={xf:.2f}[a{i}]")
+                vlabel = f"[v{i}]"
+                alabel = f"[a{i}]"
+            cmd = ["ffmpeg", "-y"]
+            for c in clips:
+                cmd += ["-i", c]
+            cmd += ["-filter_complex", ";".join(parts),
+                    "-map", vlabel, "-map", alabel,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_path]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=True, timeout=240)
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                return out_path
+        except Exception as e:
+            logger.warning(f"[MICRO_CONTENT] xfade concat failed ({e}); using first beat only.")
+        return clips[0] if clips else None
+
+    def _apply_cover(self, final_video: str, base_clip: str, start_s: float,
+                     clip_idx: int, hook: str, cover_paths: List[str],
+                     pipeline_id: str, state: GlobalState) -> str:
+        """Burn the 1s hook cover onto the front of `base_clip` (custom-frame
+        rule for Shorts covers). Falls back to the plain clip on any failure."""
+        if not (_COVER_ENABLED and base_clip):
+            return base_clip
+        try:
+            cover_png = os.path.join(self.output_dir, f"short_{pipeline_id}_cover{clip_idx}.png")
+            cover_mp4 = os.path.join(self.output_dir, f"short_{pipeline_id}_cover{clip_idx}.mp4")
+            with_cover = os.path.join(self.output_dir, f"short_{pipeline_id}_clip{clip_idx}_cover.mp4")
+            _framed = _extract_short_frame(final_video, start_s, cover_png)
+            _used_baked = False
+            # Preferred: full thematic native-text cover art (model-rendered text +
+            # compliance), prepended as the first frame.
+            try:
+                from src.engine.nano_banana import generate_baked_shorts_cover
+                ref_bytes = None
+                if _framed and os.path.getsize(cover_png) > 500:
+                    with open(cover_png, "rb") as _rf:
+                        ref_bytes = _rf.read()
+                baked_out = os.path.join(self.output_dir, f"short_{pipeline_id}_baked{clip_idx}.jpg")
+                if generate_baked_shorts_cover(state, output_path=baked_out,
+                                               reference_frame=ref_bytes):
+                    cover_png = baked_out
+                    _framed = True
+                    _used_baked = True
+            except Exception as e:
+                logger.warning(f"[MICRO_CONTENT] nano-banana baked cover skipped ({e}); using frame.")
+            # Fallback: nano-banana art (PIL hook burned below) over the frame.
+            if not _used_baked:
+                try:
+                    from src.engine.nano_banana import generate_shorts_cover_art
+                    if generate_shorts_cover_art(state, output_path=cover_png):
+                        _framed = True
+                except Exception as e:
+                    logger.warning(f"[MICRO_CONTENT] nano-banana Shorts cover skipped ({e}); using frame.")
+            if _framed:
+                if not _used_baked:
+                    _compose_shorts_cover(cover_png, cover_png, hook)
+                cover_paths.append(cover_png)
+            if _framed and _cover_to_video(cover_png, cover_mp4) and _prepend_cover(base_clip, cover_mp4, with_cover):
+                logger.info(f"[MICRO_CONTENT] Prefixed 1s hook cover -> {with_cover}")
+                return with_cover
+        except Exception as e:
+            logger.warning(f"[MICRO_CONTENT] Shorts cover burn skipped ({e}); using plain clip.")
+        return base_clip
+
+    def _render_single_clip(self, final_video: str, start_s: float, clip_dur: float,
+                            clip_idx: int, hook: str, cover_paths: List[str],
+                            pipeline_id: str, state: GlobalState) -> Optional[str]:
+        """Legacy single contiguous crop (used only as a trailer-montage fallback)."""
+        out = os.path.join(self.output_dir, f"short_{pipeline_id}_clip{clip_idx}.mp4")
+        speech_end = _probe_speech_end(final_video, start_s, clip_dur)
+        trim = speech_end if (speech_end and 2.0 <= speech_end <= clip_dur) else clip_dur
+        fade_in_d = 0.4
+        fade_out_d = min(1.0, trim * 0.3)
+        fade_out_st = max(fade_in_d, trim - fade_out_d)
+        cmd = [
+            "ffmpeg", "-y", "-ss", f"{start_s:.2f}", "-i", final_video,
+            "-t", f"{trim:.2f}",
+            "-vf", f"crop=ih*9/16:ih,scale=1080:1920:flags=lanczos,"
+                   f"fade=t=in:st=0:d={fade_in_d:.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
+            "-af", f"afade=t=in:st=0:d={fade_in_d:.2f},afade=t=out:st={fade_out_st:.2f}:d={fade_out_d:.2f}",
+            "-r", "25", "-pix_fmt", "yuv420p", "-ar", "44100",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out,
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=True, timeout=120)
+            if os.path.exists(out) and os.path.getsize(out) > 1000:
+                return self._apply_cover(final_video, out, start_s, clip_idx, hook,
+                                         cover_paths, pipeline_id, state)
+        except Exception as e:
+            logger.warning(f"[MICRO_CONTENT] Single-crop fallback failed for clip #{clip_idx}: {e}")
+        return None
 
 
 micro_content_producer = MicroContentProducer()

@@ -125,10 +125,17 @@ channel unlocks.
 The channel goal is $2,000/month (REVENUE phase), but GROWTH is the step before:
 it must convert viewers into subscribers + watch-hours to unlock YPP.
 
-- **Shorts published** — `micro_content_producer` cuts 9:16 vertical 30-45s clips;
-  `mcp_servers/youtube_cloud` `/tools/upload_short` (same OAuth resumable insert +
-  `#Shorts` tag + EU-AI-act disclosure) uploads them in GROWTH phase (non-fatal,
-  quota-shared) — the #1 discovery/subscriber lever pre-YPP (`UploadMetadata.shorts_video_id`).
+- **Shorts published as tension-gripping trailers** — `micro_content_producer`
+  builds each 9:16 Short as a **montage trailer** of the master's most dramatic
+  non-chart beats (Act 1 hook → Act 5 reveal → Act 6 verdict), xfade-dissolved
+  together with a burned-in hook cover frame at the front. Chart/ticker frames
+  (`matplotlib_chart`, `svg_ticker`) are **excluded** — static data walls crater
+  Shorts CTR on a sound-on mobile feed. `mcp_servers/youtube_cloud`
+  `/tools/upload_short` (same OAuth resumable insert + `#Shorts` tag + EU-AI-act
+  disclosure) uploads them in GROWTH phase (non-fatal, quota-shared) — the #1
+  discovery/subscriber lever pre-YPP (`UploadMetadata.shorts_video_id`). Tuning
+  envs: `CSVG_SHORTS_TRAILER` (default 1), `CSVG_SHORTS_SEGS` (beats/Short, 5),
+  `CSVG_SHORTS_SEG_LEN` (s/beat, 8), `CSVG_SHORTS_XFADE` (s, 0.35).
 - **Phase-aware pinned comment** — GROWTH pushes subscribe + watch-time; later phases keep
   the pure engagement question.
 - **Subscribe CTA in description** (GROWTH) — appends a subscribe/bell + daily-series line.
@@ -156,9 +163,11 @@ Post-publish distribution to seed early traffic, boost CTR and jumpstart YT reco
 
 1. **Instant Pinned Comment** — `/tools/insert_pinned_comment` right after publication
    (GROWTH variant pushes subscribe + watch-time).
-2. **Micro-Content Clips** — extracts 30-60s acts, crops to 9:16
-   (`crop=ih*9/16:ih`), renders independent Clips for Shorts/Reels/TikTok; in GROWTH phase
-   published as YouTube Shorts (`/tools/upload_short`, `#Shorts`).
+  2. **Micro-Content Clips** — `micro_content_producer.generate_shorts` cuts
+    tension-gripping 9:16 trailer montages (non-chart narrative beats, xfade-joined)
+    from the master, crops to 9:16 (`crop=ih*9/16:ih`), burns a hook cover at the
+    front; renders independent Clips for Shorts/Reels/TikTok; in GROWTH phase
+    published as YouTube Shorts (`/tools/upload_short`, `#Shorts`).
 3. **SeedDistributor** — tailored draft templates for Reddit, HN, LinkedIn, X, TikTok, Instagram,
    Pinterest, Telegram, Medium grounded in the run's verified facts (never canned filler);
    dispatches a rich embed to Slack/Discord webhooks with copyable markdown.
@@ -403,8 +412,9 @@ nice-to-have.
   text) then burns the hook via `add_thumbnail_text`, applies the compliance pass; used as
   `asset_paths.thumbnail` and uploaded via `youtube.thumbnails.set` at publish time
   (`_resumable_upload`, jpeg mimetype). Works.
-- **Shorts (SHIPPED):** `generate_baked_shorts_cover` renders the 9:16 art (no native text),
-  burns the hook via `add_thumbnail_text`, then `micro_content_producer.generate_shorts`
+- **Shorts (SHIPPED):** `micro_content_producer.generate_shorts` builds a tension-gripping
+  trailer montage (non-chart beats, xfade-joined) and `generate_baked_shorts_cover` renders the
+  9:16 art (no native text), burns the hook via `add_thumbnail_text`, then generate_shorts
   **prepends a 1s cover clip** so the cover IS the Short's first frame at upload. YouTube ignores
   `thumbnails.set` for Shorts (Google Issue #381127084: 200-OK but never applied) — verified by
   experiment; baking the first frame is the only way YouTube honors a Shorts cover.

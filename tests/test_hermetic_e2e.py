@@ -1914,6 +1914,61 @@ def case_api_usage():
 # ---------------------------------------------------------------------------
 # Case 21 — Codebase static analysis (0 undefined names, unbound variables, enum integrity)
 # ---------------------------------------------------------------------------
+def _build_shorts_test_state():
+    from src.schemas.state import (
+        GlobalState, ScriptData, ShotData, AssetPaths, VisualType,
+    )
+    visuals = [
+        VisualType.STANDARD_IMAGE,       # Act 1 hook
+        VisualType.MATPLOTLIB_CHART,     # Act 2 chart — must be excluded
+        VisualType.STANDARD_IMAGE,       # Act 3
+        VisualType.SVG_TICKER,           # Act 4 ticker — must be excluded
+        VisualType.STANDARD_IMAGE,       # Act 5 reveal
+        VisualType.STANDARD_IMAGE,       # Act 6 verdict
+    ]
+    narr = [
+        "this secret will shock you", "a boring chart", "what happens next is wild",
+        "ticker numbers", "the truth is exposed", "here is the verdict you won't believe",
+    ]
+    shots = [
+        ShotData(shot_id=i, act_index=i + 1, narration_text=narr[i],
+                 visual_prompt="x", visual_type=visuals[i], duration_estimate=8.0)
+        for i in range(6)
+    ]
+    sd = ScriptData(title="T", target_shots=6, shots=shots, estimated_runtime_seconds=48)
+    ap = AssetPaths(measured_durations=[8.0] * 6, final_video="/tmp/none.mp4")
+    return GlobalState(pipeline_id="shorts_test", timestamp="2026-01-01T00:00:00Z",
+                       script_data=sd, asset_paths=ap)
+
+
+def case_shorts_trailer_selection_real():
+    from src.engine.micro_content_producer import _shot_timeline, _select_trailer_segments
+
+    st = _build_shorts_test_state()
+    tl = _shot_timeline(st)
+    chart_flags = [s["chart"] for s in tl]
+    s1 = _select_trailer_segments(tl, 2, 1)
+    s2 = _select_trailer_segments(tl, 2, 2)
+
+    no_chart = not any(s["chart"] for s in s1 + s2)
+    # chronological order within each Short
+    chrono = all(
+        [s["start"] for s in seg] == sorted(s["start"] for s in seg)
+        for seg in (s1, s2)
+    )
+    # distinct per-Short selection
+    distinct = [s["act"] for s in s1] != [s["act"] for s in s2]
+    # chart shots are the right ones excluded
+    excluded_correct = (chart_flags == [False, True, False, True, False, False])
+
+    passed = no_chart and chrono and distinct and excluded_correct
+    record("SHORTS_TRAILER_SELECTION",
+           passed,
+           f"no_chart={no_chart}, chrono={chrono}, distinct={distinct}, "
+           f"excluded_correct={excluded_correct}")
+    return passed
+
+
 def case_codebase_static_analysis():
     import subprocess
     import ast
@@ -2154,6 +2209,7 @@ def main():
     case_api_usage()
     case_publisher_and_seed_distribution()
     case_playlists_and_analytics_feedback()
+    case_shorts_trailer_selection_real()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)
