@@ -859,6 +859,21 @@ class ObserverAgent:
         # since references are no longer included in the audio/video, only in the description.
         pass
 
+        # ── Gate: mandatory final-shot verbal CTA ──────────────────────────
+        # The closing Act-6 shot MUST ask viewers to like / comment / subscribe.
+        # Deterministic keyword check (no LLM) so omissions like the FCC episode
+        # are hard-aborted and fixed by the revision loop, never shipped.
+        _CTA_WORDS = ("subscribe", "like", "comment", "bell", "join", "sub")
+        if script.shots:
+            _final = script.shots[-1]
+            _ftxt = (_final.narration_text or "").lower()
+            if not any(w in _ftxt for w in _CTA_WORDS):
+                violations.append(
+                    f"CTA Gate FAIL: final shot #{_final.shot_id} has no explicit "
+                    f"like/comment/subscribe call-to-action. The video must close by "
+                    f"asking viewers to like, comment, and subscribe."
+                )
+
         # Anti-Hallucination Audit — against verified facts + full RAG fact corpus
         if verified_facts:
             fact_violations = self.audit_fact_grounding(script, verified_facts, topic=topic, crawled_content=crawled_content)

@@ -201,6 +201,11 @@ def _narr(i):
         f"which lets confident startups join the experiment. Regulators are already "
         f"asking the biggest lenders to report their quantum readiness each year. "
     )
+    # The final (Act-6 outro) shot must carry a verbal like/comment/subscribe CTA,
+    # matching the observer's CTA Gate and real-pipeline requirement.
+    if i == 18:
+        base += (" Subscribe for more in-depth breakdowns, and tell us your take in "
+                 "the comments below.")
     return base
 
 
@@ -1969,6 +1974,46 @@ def case_shorts_trailer_selection_real():
     return passed
 
 
+def case_observer_cta_gate():
+    """The observer must hard-reject a script whose final Act-6 shot lacks an
+    explicit like/comment/subscribe CTA, and clear it once the CTA is present."""
+    import copy
+    from src.agents.observer import ObserverAgent
+    from src.schemas.state import GlobalState
+
+    base = copy.deepcopy(SCRIPT_JSON)
+    for s in base["shots"]:
+        if s["shot_id"] == 18:
+            s["narration_text"] = (
+                "For shot number 18, the story closes on a quiet note as the "
+                "industry ponders what comes next."
+            )
+    sd_neg = _script_from_json(base)
+    obs = ObserverAgent()
+    st = GlobalState(pipeline_id="cta-gate", timestamp="0")
+    st.selected_topic = TOPIC
+    st.verified_facts = list(VERIFIED_FACTS)
+    st.crawled_content = _canonical_corpus()
+    _, viol_neg = obs.evaluate_script(
+        sd_neg, st.verified_facts, topic=st.selected_topic,
+        channel_phase="GROWTH", crawled_content=st.crawled_content)
+    cta_neg = [v for v in viol_neg if "CTA Gate FAIL" in v]
+
+    for s in base["shots"]:
+        if s["shot_id"] == 18:
+            s["narration_text"] += " Subscribe for more and comment your take below."
+    sd_pos = _script_from_json(base)
+    _, viol_pos = obs.evaluate_script(
+        sd_pos, st.verified_facts, topic=st.selected_topic,
+        channel_phase="GROWTH", crawled_content=st.crawled_content)
+    cta_pos = [v for v in viol_pos if "CTA Gate FAIL" in v]
+
+    passed = len(cta_neg) == 1 and len(cta_pos) == 0
+    record("OBSERVER_CTA_GATE", passed,
+           f"neg_cta_violations={len(cta_neg)}, pos_cta_violations={len(cta_pos)}")
+    return passed
+
+
 def case_codebase_static_analysis():
     import subprocess
     import ast
@@ -2210,6 +2255,7 @@ def main():
     case_publisher_and_seed_distribution()
     case_playlists_and_analytics_feedback()
     case_shorts_trailer_selection_real()
+    case_observer_cta_gate()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

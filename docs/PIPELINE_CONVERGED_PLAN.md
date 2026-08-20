@@ -245,10 +245,14 @@ are absent, every gate falls back to the original TF-IDF/NLTK logic — no regre
    1300). The Observer hard-aborts outside `CSVG_MIN_RUNTIME_MIN`–`CSVG_MAX_RUNTIME_MIN`
    (default 8.0–12.0 min) and the quality verifier's Gate 1 floor tracks
    `CSVG_MIN_TOTAL_WORDS`. Keeps documentaries punchy for pre-YPP retention.
- - **Mandatory verbal CTA + human stakes** — the final Act-6 shot must explicitly
-   ask viewers to like/comment/subscribe (soft warning if the model omits it), and
-   policy/explainer topics must translate the issue into a concrete human cost in
-   Act 5 (per the `story_designer` prompt).
+  - **Mandatory verbal CTA + human stakes** — the final Act-6 shot must explicitly
+    ask viewers to like/comment/subscribe. The Observer now **hard-aborts** (deterministic
+    keyword gate, no LLM) when the closing shot lacks a subscribe/like/comment/bell/join
+    call — the revision loop fixes omissions so a video never ships without it
+    (previously only a soft `publisher.py` warning, which let the FCC episode slip).
+    Policy/explainer topics must translate the issue into a concrete human cost in
+    Act 5 (per the `story_designer` prompt; prompt-level, deterministic validation not
+    feasible).
 - **Model persistence** — loads lazily on first use, stays resident for process lifetime;
   `release()` frees weights (~50 MB) but torch stays imported. Resident is the default
   (4–6 runs/day).
