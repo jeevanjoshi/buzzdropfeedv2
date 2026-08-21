@@ -12,6 +12,7 @@ from src.agents.fact_retriever import FactRetrieverAgent
 from src.agents.story_designer import StoryDesignerAgent
 from src.agents.observer import ObserverAgent, is_soft_violation, observer_quality_score
 from src.agents.media_producer import MediaProducerAgent
+from src.agents.short_producer import ShortProducerAgent
 from src.agents.publisher import PublisherAgent, _is_real_video_id
 from src.engine.quality_verifier import quality_verifier
 from src.engine.video_quality_metrics import video_quality_metrics
@@ -54,6 +55,7 @@ class OrchestratorAgent:
         story_designer: Optional[StoryDesignerAgent] = None,
         observer: Optional[ObserverAgent] = None,
         media_producer: Optional[MediaProducerAgent] = None,
+        short_producer: Optional[ShortProducerAgent] = None,
         publisher: Optional[PublisherAgent] = None,
         logs_dir: str = "logs"
     ):
@@ -61,6 +63,7 @@ class OrchestratorAgent:
         self.story_designer = story_designer or StoryDesignerAgent()
         self.observer = observer or ObserverAgent()
         self.media_producer = media_producer or MediaProducerAgent()
+        self.short_producer = short_producer or ShortProducerAgent()
         self.publisher = publisher or PublisherAgent()
         self.logs_dir = logs_dir
         os.makedirs(self.logs_dir, exist_ok=True)
@@ -599,6 +602,20 @@ class OrchestratorAgent:
 
             tracer.record_step(state, "QUALITY_GATES_PASSED")
             run_budget.set_stage("QUALITY_GATES_PASSED")
+
+            # 4c. Dedicated Short-Form Native Producer (vertical 9:16, short-native
+            # script + media). ON by default; set CSVG_SHORTS_PRODUCER=0 to fall back
+            # to the legacy crop path (micro_content_producer) in the publisher.
+            # Non-fatal: a Short failure never blocks the long-form publish.
+            if os.getenv("CSVG_SHORTS_PRODUCER", "1").strip().lower() not in ("0", "false", "no"):
+                try:
+                    logger.info("PHASE_3C_SHORTS", "Producing short-native vertical Shorts...", pipeline_id=p_id, component="SHORT_PRODUCER")
+                    await self.short_producer.process(state, dummy_frames=dummy_frames)
+                    if state.asset_paths.shorts:
+                        logger.info("PHASE_3C_SHORTS", f"Short-native clip(s) produced: {state.asset_paths.shorts}", pipeline_id=p_id, component="SHORT_PRODUCER")
+                    tracer.record_step(state, "SHORTS_PRODUCED")
+                except Exception as e:
+                    logger.warning("PHASE_3C_SHORTS", f"Short production failed (non-fatal): {e}", pipeline_id=p_id, component="SHORT_PRODUCER")
 
             # 5. YouTube Publishing
             if publish:

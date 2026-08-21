@@ -347,6 +347,44 @@ class StubPublisher:
             payload={"video_id": "hermetic-video-123"}, timestamp="0")
 
 
+class StubShortProducer:
+    """Hermetic stand-in for ShortProducerAgent — records the call and writes a
+    synthetic short clip into state so the orchestrator wiring is exercised
+    without touching TTS/ffmpeg/FLUX."""
+    def __init__(self, name="StubShortProducer"):
+        self.name = name
+        self.calls = 0
+
+    async def process(self, state, dummy_frames=False):
+        self.calls += 1
+        from src.schemas.state import AssetPaths
+        base = "/tmp/csvg_hermetic_shorts"
+        os.makedirs(base, exist_ok=True)
+        if state.short_script is None:
+            from src.schemas.state import ShortScript, ShortBeat
+            state.short_script = ShortScript(
+                title="Stub Short", hook_line="stub hook",
+                beats=[ShortBeat(beat_id=1, is_hook=True, narration_text="stub beat",
+                                 visual_prompt="x", duration_estimate=4.0)])
+        # Honour CSVG_SHORTS_VARIANTS so the orchestrator wiring is exercised end-to-end.
+        variants_on = os.getenv("CSVG_SHORTS_VARIANTS", "0").strip().lower() in ("1", "true", "yes")
+        modes = [""] if not variants_on else ["", "_hook_led", "_hero_object", "_text_led"]
+        paths = []
+        for m in modes:
+            sp = os.path.join(base, f"short{m}.mp4")
+            with open(sp, "wb") as f:
+                f.write(b"\x00\x00\x00\x18ftypmp42" + b"0" * 64)
+            paths.append(sp)
+        ap = state.asset_paths
+        ap.shorts = paths
+        ap.shorts_covers = [p.replace(".mp4", "_cover.png") for p in paths]
+        state.asset_paths = ap
+        return A2AMessage(
+            message_id="m4b", sender=AgentRole.MEDIA_PRODUCER,
+            target=AgentRole.ORCHESTRATOR, intent=AgentIntent.MEDIA_READY,
+            payload={"short_video": paths[0]}, timestamp="0")
+
+
 # ---------------------------------------------------------------------------
 # Patching of the genuinely-external singletons (network / binaries).
 # ---------------------------------------------------------------------------
@@ -2014,6 +2052,294 @@ def case_observer_cta_gate():
     return passed
 
 
+def case_short_producer_helpers():
+    """Unit-tests the ShortProducerAgent pure helpers (MediaProducer-testing
+    invariant analogue: every short-producing helper is covered)."""
+    from src.agents.short_producer import (
+        build_short_script_prompt, parse_short_script, generate_synthetic_vertical_png,
+        reframe_16_9_to_9_16, _is_portrait, _classify_short_mood, _short_music_bed,
+        _style_mobile_ass, _beat_motion, _build_ken_burns_vf, _render_vertical_clip,
+    )
+    from src.schemas.state import GlobalState, ShortScript
+
+    st = _build_shorts_test_state()
+    # build_short_script_prompt grounds on the selected topic; give the state one.
+    if TOPIC is not None:
+        st.selected_topic = TOPIC
+    prompt = build_short_script_prompt(st)
+    has_topic = bool(st.selected_topic) and (st.selected_topic.headline in prompt)
+
+    raw = {
+        "hook_line": "The truth about X",
+        "title": "Why X matters",
+        "beats": [
+            {"is_hook": True, "narration_text": "This will shock you",
+             "visual_prompt": "vertical scene", "duration_estimate": 4.0},
+            {"narration_text": "And then this", "visual_prompt": "v2", "duration_estimate": 5.0},
+        ],
+    }
+    sc = parse_short_script(raw, st)
+    ok_parse = (isinstance(sc, ShortScript) and len(sc.beats) == 2
+                and sc.beats[0].is_hook and sc.hook_line == "The truth about X")
+
+    # Defensive: empty payload must never yield an empty Short.
+    sc2 = parse_short_script({}, st)
+    ok_defensive = isinstance(sc2, ShortScript) and len(sc2.beats) == 1
+
+    # Synthetic 9:16 PNG path is returned (PIL may be absent in CI; still a path).
+    png = generate_synthetic_vertical_png("/tmp/csvg_sp_test/cover.png", "Title", "sub")
+    ok_png = isinstance(png, str) and png.endswith(".png")
+
+    # Subject reframe: 16:9 source -> 9:16 crop; _is_portrait reports landscape.
+    ok_reframe = True
+    try:
+        from PIL import Image  # only if PIL is installed in the test env
+        land = "/tmp/csvg_sp_test/landscape.png"
+        Image.new("RGB", (1920, 1080), color=(20, 30, 40)).save(land, "PNG")
+        portrait_out = "/tmp/csvg_sp_test/reframed.png"
+        reframe_16_9_to_9_16(land, portrait_out)
+        ok_reframe = (isinstance(portrait_out, str)
+                      and os.path.exists(portrait_out)
+                      and _is_portrait(portrait_out) is True)
+    except ImportError:
+        # PIL absent: reframe must still return a path without raising.
+        out = reframe_16_9_to_9_16("/tmp/csvg_sp_test/landscape.png",
+                                   "/tmp/csvg_sp_test/reframed.png")
+        ok_reframe = isinstance(out, str)
+
+    # Short-native music bed: mood classification + resolution (no local track /
+    # no env -> falls back to the master bgm.mp3, never silence).
+    mood_cur = _classify_short_mood(
+        parse_short_script({"hook_line": "the secret is revealed", "title": "t",
+                            "beats": [{"narration_text": "x", "visual_prompt": "v"}]}, st),
+        st)
+    mood_tense = _classify_short_mood(
+        parse_short_script({"hook_line": "war crisis collapses market", "title": "t",
+                            "beats": [{"narration_text": "x", "visual_prompt": "v"}]}, st),
+        st)
+    prev_base = os.environ.pop("CSVG_SHORTS_MUSIC_BASE_URL", None)
+    bed = _short_music_bed("/tmp/csvg_sp_test", "upbeat_discovery")
+    if prev_base is not None:
+        os.environ["CSVG_SHORTS_MUSIC_BASE_URL"] = prev_base
+    ok_mood = mood_cur == "curiosity" and mood_tense == "tense"
+    ok_bed = isinstance(bed, str) and os.path.exists(bed) and os.path.getsize(bed) > 1000
+
+    # Short-specific caption styling: 16:9 master .ass -> 9:16 mobile style.
+    sample_ass = "/tmp/csvg_sp_test/master_subtitles.ass"
+    with open(sample_ass, "w") as f:
+        f.write(
+            "[Script Info]\nTitle: x\nPlayResX: 1920\nPlayResY: 1080\n\n"
+            "[V4+ Styles]\nFormat: Name, Fontname, Fontsize\n"
+            "Style: Default,Montserrat,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
+            "-1,0,0,0,100,100,0,0,1,3,2,2,660,660,50,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, "
+            "MarginV, Effect, Text\n"
+            "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,50,,Hello world\n"
+        )
+    styled = _style_mobile_ass(sample_ass, "/tmp/csvg_sp_test/mobile_subtitles.ass")
+    with open(styled) as f:
+        scontent = f.read()
+    ok_caption = ("PlayResX: 1080" in scontent and "PlayResY: 1920" in scontent
+                  and ",20," in scontent
+                  and "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,80,80,220,,Hello world"
+                  in scontent)
+
+    # Per-beat visual diversity / motion: deterministic pan+zoom variety, opener punch.
+    m1, m2, m3 = _beat_motion(1), _beat_motion(2), _beat_motion(3, is_opener=True)
+    ok_motion = (m1["zoom_dir"] == "in" and m1["pan"] == "up"
+                 and m2["zoom_dir"] == "out" and m2["pan"] == "down"
+                 and m3.get("punch") is True)
+    vf_in = _build_ken_burns_vf({"zoom_dir": "in", "pan": "center"}, 100)
+    vf_out = _build_ken_burns_vf({"zoom_dir": "out", "punch": True, "pan": "left"}, 100)
+    ok_vf = ("min(1.0000+" in vf_in and "1.3500" in vf_in
+             and "max(" in vf_out and "1.6000" in vf_out and "(-0.35)" in vf_out)
+    # Render smoke: must return the requested path and never raise, with or without
+    # ffmpeg (the motion/vf correctness is covered by ok_motion/ok_vf above).
+    rend = _render_vertical_clip("/tmp/csvg_sp_test/noimg.png", None, 2.0,
+                                 "/tmp/csvg_sp_test/beat.mp4")
+    ok_render = rend.endswith("beat.mp4")
+
+    passed = (has_topic and ok_parse and ok_defensive and ok_png and ok_reframe
+              and ok_mood and ok_bed and ok_caption and ok_motion and ok_vf and ok_render)
+    record("SHORT_PRODUCER_HELPERS", passed,
+           f"has_topic={has_topic}, ok_parse={ok_parse}, ok_defensive={ok_defensive}, "
+           f"ok_png={ok_png}, ok_reframe={ok_reframe}, ok_mood={ok_mood}, ok_bed={ok_bed}, "
+           f"ok_caption={ok_caption}, ok_motion={ok_motion}, ok_vf={ok_vf}, ok_render={ok_render}")
+    return passed
+
+
+def case_short_producer_authoring():
+    """Exercises ShortProducerAgent.author_short_script with a scripted LLM."""
+    from src.agents.short_producer import ShortProducerAgent
+
+    class _FakeShortLLM:
+        def is_available(self):
+            return True
+
+        def generate_json(self, prompt, system_prompt="", route=None, thinking=None):
+            return {
+                "hook_line": "The secret behind X",
+                "title": "X explained",
+                "beats": [
+                    {"is_hook": True, "narration_text": "You won't believe X",
+                     "visual_prompt": "vertical reveal", "duration_estimate": 4.0},
+                    {"narration_text": "Here is what happened", "visual_prompt": "v2",
+                     "duration_estimate": 6.0},
+                ],
+            }
+
+    st = _build_shorts_test_state()
+    agent = ShortProducerAgent(llm_client=_FakeShortLLM())
+    sc = agent.author_short_script(st)
+    ok = (sc is not None and len(sc.beats) == 2 and sc.beats[0].is_hook
+          and sc.hook_line == "The secret behind X")
+    record("SHORT_PRODUCER_AUTHORING", ok, f"beats={len(sc.beats) if sc else 0}")
+    return ok
+
+
+def case_short_producer_pipeline():
+    """End-to-end: the dedicated short producer runs in the orchestrator (env-gated)
+    and populates state.asset_paths.shorts instead of the legacy crop path."""
+    from src.agents.orchestrator import OrchestratorAgent
+    from src.agents.story_designer import StoryDesignerAgent
+
+    prev = os.environ.get("CSVG_SHORTS_PRODUCER")
+    os.environ["CSVG_SHORTS_PRODUCER"] = "1"
+    try:
+        patch_externals()
+        fake = FakeLLMClient()
+        orch = OrchestratorAgent(
+            fact_retriever=StubFactRetriever(),
+            story_designer=StoryDesignerAgent(llm_client=fake),
+            observer=StubObserverPass(approve=True),
+            media_producer=StubMediaProducer(),
+            short_producer=StubShortProducer(),
+            publisher=StubPublisher(),
+            logs_dir="/tmp/csvg_hermetic_logs",
+        )
+        state = asyncio.run(orch.run_pipeline(
+            use_live_rss=False, region="global", publish=True))
+        ok = (state.short_script is not None and len(state.asset_paths.shorts) >= 1)
+        record("SHORT_PRODUCER_PIPELINE", ok,
+               f"short_script={state.short_script is not None}, "
+               f"shorts={len(state.asset_paths.shorts)}")
+        return ok
+    finally:
+        if prev is None:
+            os.environ.pop("CSVG_SHORTS_PRODUCER", None)
+        else:
+            os.environ["CSVG_SHORTS_PRODUCER"] = prev
+
+
+def case_short_producer_variants():
+    """A/B variant set: helper specs + manifest, and orchestrator wiring (env-gated
+    by CSVG_SHORTS_VARIANTS) yields a primary + 3 experiment Short paths."""
+    from src.agents.orchestrator import OrchestratorAgent
+    from src.agents.story_designer import StoryDesignerAgent
+    from src.agents.short_producer import (
+        short_variants_enabled, short_variant_specs, _write_short_variants_manifest,
+    )
+
+    # 1. Determinism + lever-correctness of the spec table.
+    specs = short_variant_specs("pid-xyz")
+    ok_specs = (len(specs) == 4
+                and [s["mode"] for s in specs] == ["primary", "hook_led", "hero_object", "text_led"]
+                and specs[0]["role"] == "primary"
+                and all(s["role"] == "variant" for s in specs[1:])
+                and specs[1]["cover_seconds"] == 1.8
+                and specs[2]["lead_beat"] == 1
+                and specs[3]["caption_margin_v"] == 170)
+
+    # 2. Manifest round-trips with primary + variant paths.
+    paths = [f"/tmp/csvg_sp_var/short_{s['mode']}.mp4" for s in specs]
+    man = _write_short_variants_manifest("/tmp/csvg_sp_var", "pid-xyz", specs, paths)
+    with open(man) as f:
+        data = json.load(f)
+    ok_manifest = (data["primary"] == paths[0]
+                   and len(data["variants"]) == 4
+                   and data["variants"][0]["mode"] == "primary")
+
+    # 3. Disabled by default when env unset.
+    prev_var = os.environ.pop("CSVG_SHORTS_VARIANTS", None)
+    ok_default_off = (short_variants_enabled() is False)
+
+    # 4. End-to-end: with CSVG_SHORTS_VARIANTS=1 the orchestrator produces 4 paths.
+    prev_prod = os.environ.get("CSVG_SHORTS_PRODUCER")
+    os.environ["CSVG_SHORTS_PRODUCER"] = "1"
+    os.environ["CSVG_SHORTS_VARIANTS"] = "1"
+    ok_wire = False
+    try:
+        patch_externals()
+        fake = FakeLLMClient()
+        orch = OrchestratorAgent(
+            fact_retriever=StubFactRetriever(),
+            story_designer=StoryDesignerAgent(llm_client=fake),
+            observer=StubObserverPass(approve=True),
+            media_producer=StubMediaProducer(),
+            short_producer=StubShortProducer(),
+            publisher=StubPublisher(),
+            logs_dir="/tmp/csvg_hermetic_logs_var",
+        )
+        state = asyncio.run(orch.run_pipeline(
+            use_live_rss=False, region="global", publish=True))
+        ok_wire = (state.short_script is not None
+                   and len(state.asset_paths.shorts) == 4
+                   and state.asset_paths.shorts[0].endswith("short.mp4"))
+    finally:
+        os.environ.pop("CSVG_SHORTS_VARIANTS", None)
+        if prev_var is not None:
+            os.environ["CSVG_SHORTS_VARIANTS"] = prev_var
+        if prev_prod is None:
+            os.environ.pop("CSVG_SHORTS_PRODUCER", None)
+        else:
+            os.environ["CSVG_SHORTS_PRODUCER"] = prev_prod
+
+    passed = ok_specs and ok_manifest and ok_default_off and ok_wire
+    record("SHORT_PRODUCER_VARIANTS", passed,
+           f"specs={ok_specs}, manifest={ok_manifest}, default_off={ok_default_off}, "
+           f"wire={ok_wire}")
+    return passed
+
+
+def case_short_producer_wiring():
+    """Real agent wiring: process() must write the produced clips onto
+    state.asset_paths (the field the publisher reads). A prior bug returned the
+    clips only in the A2A payload, so the legacy crop silently won even after a
+    successful short-native render. Verified by stubbing the ffmpeg/TTS render."""
+    from src.agents.short_producer import ShortProducerAgent
+    from src.schemas.state import AssetPaths
+
+    class _FakeShortLLM:
+        def is_available(self):
+            return True
+
+        def generate_json(self, prompt, system_prompt="", route=None, thinking=None):
+            return {"hook_line": "h", "title": "t",
+                    "beats": [{"is_hook": True, "narration_text": "x",
+                               "visual_prompt": "v", "duration_estimate": 4.0}]}
+
+    async def _fake_media(state, short_script, spec=None, suffix=""):
+        ap = AssetPaths()
+        ap.shorts = [f"/tmp/csvg_wire/short{suffix}.mp4"]
+        ap.shorts_covers = [f"/tmp/csvg_wire/short{suffix}_cover.png"]
+        ap.final_video = ap.shorts[0]
+        ap.storage_dir = "/tmp/csvg_wire"
+        return ap
+
+    st = _build_shorts_test_state()
+    agent = ShortProducerAgent(llm_client=_FakeShortLLM())
+    agent.produce_short_media = _fake_media  # hermetic: skip ffmpeg/TTS
+    asyncio.run(agent.process(st))
+    ok = (st.short_script is not None
+          and st.asset_paths.shorts == ["/tmp/csvg_wire/short.mp4"]
+          and st.asset_paths.shorts_covers == ["/tmp/csvg_wire/short_cover.png"]
+          and st.asset_paths.final_video == "/tmp/csvg_wire/short.mp4")
+    record("SHORT_PRODUCER_WIRING", ok,
+           f"short_script={st.short_script is not None}, "
+           f"shorts={getattr(st.asset_paths, 'shorts', None)}")
+    return ok
+
+
 def case_codebase_static_analysis():
     import subprocess
     import ast
@@ -2256,6 +2582,11 @@ def main():
     case_playlists_and_analytics_feedback()
     case_shorts_trailer_selection_real()
     case_observer_cta_gate()
+    case_short_producer_helpers()
+    case_short_producer_authoring()
+    case_short_producer_pipeline()
+    case_short_producer_variants()
+    case_short_producer_wiring()
 
     passed = sum(1 for _, ok, _ in CASE_RESULTS if ok)
     failed = sum(1 for _, ok, _ in CASE_RESULTS if not ok)

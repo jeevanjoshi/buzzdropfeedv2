@@ -402,9 +402,18 @@ class PublisherAgent:
         state.execution_stage = "PUBLISHED_SUCCESS"
 
         # 4. Generate Short-Form 9:16 Micro-Content Clips (Shorts / Reels / TikTok)
+        # Prefer the dedicated short-native producer's output (state.asset_paths.shorts,
+        # populated by ShortProducerAgent when CSVG_SHORTS_PRODUCER=1). Fall back to
+        # the legacy center-crop path (micro_content_producer) for backwards compat.
+        # Exactly ONE Short is produced/published per run (product decision).
+        short_paths = list(getattr(state.asset_paths, "shorts", []) or [])
+        # When CSVG_SHORTS_VARIANTS=1, short_paths may hold a primary + experiment
+        # variants; only the primary (index 0) is published as the YouTube Short —
+        # the rest are left for manual Studio "test & compare" experiments.
         try:
-            from src.engine.micro_content_producer import micro_content_producer
-            short_paths = micro_content_producer.generate_shorts(state, max_shorts=2)
+            if not short_paths:
+                from src.engine.micro_content_producer import micro_content_producer
+                short_paths = micro_content_producer.generate_shorts(state, max_shorts=1)
             if hasattr(state.asset_paths, "shorts"):
                 state.asset_paths.shorts = short_paths
         except Exception as e:

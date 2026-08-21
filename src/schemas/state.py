@@ -154,6 +154,33 @@ class ScriptData(BaseModel):
     estimated_runtime_seconds: float = 0.0
 
 
+class ShortBeat(BaseModel):
+    """A single vertical-native beat for a professional YouTube Short.
+
+    Distinct from the long-form ``ShotData``: a Short is a FIRST-CLASS, mobile-first
+    deliverable with its own hook/retention arc — NOT a crop of the master. Beats
+    carry shorter, punchier narration and a 9:16 visual brief rather than a 16:9
+    cinematic prompt (see docs/SHORTS_PRODUCER_DESIGN.md)."""
+    beat_id: int
+    is_hook: bool = Field(default=False, description="True for the opening pattern-interrupt beat (1-3s)")
+    narration_text: str = Field(..., description="Punchy, self-contained mobile narration (<=18 words)")
+    visual_prompt: str = Field(..., description="9:16 vertical cinematic visual brief")
+    duration_estimate: float = Field(default=5.0, description="Estimated beat duration (seconds)")
+    caption_style: str = Field(default="mobile", description="Subtitle style: 'mobile' = large centered high-contrast")
+
+
+class ShortScript(BaseModel):
+    """Short-native script authored by ShortProducerAgent (short_producer.py).
+
+    One Short per pipeline run (per product decision): a single, retention-optimised
+    9:16 video with its own hook -> payoff arc, independent of the master timeline."""
+    title: str
+    hook_line: str = Field(..., description="The 1-3s pattern-interrupt hook (curiosity gap / tension)")
+    beats: List[ShortBeat]
+    estimated_runtime_seconds: float = 0.0
+    music_bed: str = Field(default="upbeat_discovery", description="Short-specific BGM bed tag (TODO: short-native bed)")
+
+
 class AssetPaths(BaseModel):
     audio: Dict[str, str] = Field(default_factory=dict, description="Map of shot_id -> wav path")
     subtitles: Dict[str, str] = Field(default_factory=dict, description="Map of shot_id -> ass path")
@@ -208,6 +235,9 @@ class GlobalState(BaseModel):
     verified_facts: List[VerifiedFact] = Field(default_factory=list)
     crawled_content: str = ""
     script_data: Optional[ScriptData] = None
+    # Short-native deliverable (separate producer, docs/SHORTS_PRODUCER_DESIGN.md).
+    short_script: Optional[ShortScript] = None
+    short_asset_paths: AssetPaths = Field(default_factory=AssetPaths)
     asset_paths: AssetPaths = Field(default_factory=AssetPaths)
     upload_metadata: UploadMetadata = Field(default_factory=UploadMetadata)
     # Phase-aware monetisation fields

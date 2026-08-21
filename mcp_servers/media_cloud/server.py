@@ -21,7 +21,8 @@ def _record_visual(provider: str, images: int = 1) -> None:
 
 class ImageGenRequest(BaseModel):
     prompt: str
-    image_size: str = "landscape_16_9"
+    image_size: str = "landscape_16_9"   # fal image_size (kept for explicit callers)
+    aspect: str = "16:9"                 # ratio hint: "16:9" (landscape) or "9:16" (portrait)
     output_image_path: str
 
 
@@ -223,7 +224,8 @@ async def generate_flux_image(req: ImageGenRequest):
                 "fal-ai/flux/schnell",
                 arguments={
                     "prompt": req.prompt,
-                    "image_size": "landscape_16_9",
+                    "image_size": ("portrait_16_9" if str(req.aspect).replace(" ", "") == "9:16"
+                                   else req.image_size),
                     "num_inference_steps": 4,
                     "enable_safety_checker": True
                 }
@@ -251,7 +253,7 @@ async def generate_flux_image(req: ImageGenRequest):
             body = {
                 "input": {
                     "prompt": req.prompt,
-                    "aspect_ratio": "16:9",
+                    "aspect_ratio": req.aspect,
                     "output_format": "png"
                 }
             }
