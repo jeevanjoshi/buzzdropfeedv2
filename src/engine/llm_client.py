@@ -520,10 +520,15 @@ class LLMClient:
         elif preferred_provider == "gemini":
             result = try_gemini_api() or try_vertex_api() or try_cloud_api() or try_local_llama_cpp()
         elif preferred_provider == "cloud":
-            result = try_cloud_api() or try_vertex_api() or try_gemini_api() or try_local_llama_cpp()
+            # OpenRouter only. Vertex is hard-blocked for text LLM — it is reserved
+            # for the grounded-search RAG path. Gemini AI Studio (GEMINI_API_KEY) is
+            # kept as a non-Vertex safety net.
+            result = try_cloud_api() or try_gemini_api() or try_local_llama_cpp()
         else:
-            # Default: try local llama.cpp first, fallback to Vertex AI, then native Gemini AI Studio, then cloud OpenRouter
-            result = try_local_llama_cpp() or try_vertex_api() or try_gemini_api() or try_cloud_api()
+            # Default: local llama.cpp, then OpenRouter, then native Gemini AI Studio.
+            # Vertex is intentionally excluded so a missing/mis-set provider can
+            # never silently bill Vertex AI (which is reserved for grounded search).
+            result = try_local_llama_cpp() or try_cloud_api() or try_gemini_api()
 
         # A real (paid/local) LLM response was produced — bill it to the run budget.
         if result is not None:
