@@ -86,7 +86,7 @@
 
 **L3 — `media_budget.py:36-41`** read-modify-write not atomic: use `tmp + os.replace`.
 
-**L4 — Swallowed `except Exception` in `nano_banana`** (`add_thumbnail_text:448`, `craft_ctr_hook:789`, `comply_thumbnail:526`, `fetch_link_video_metadata:983`): add `exc_info=True`.
+**L4 — Swallowed `except Exception` in `nano_banana`** (`add_thumbnail_text:448`, `craft_ctr_hook:1133`, `comply_thumbnail:526`, `fetch_link_video_metadata:983`): add `exc_info=True`.
 
 **L5 — Fragile `"ydl" in dir()`** (`nano_banana.extract_video_frames:914`): capture filename explicitly inside the `with` block.
 

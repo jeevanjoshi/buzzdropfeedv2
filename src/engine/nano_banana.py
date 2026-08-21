@@ -737,10 +737,14 @@ def _meta_from_state(state) -> Dict[str, Any]:
     description = facts
     if narration:
         description = (description + "\n\nTRANSCRIPT:\n" + narration) if description else narration
+    audience = ""
+    if state.selected_topic:
+        audience = getattr(state.selected_topic, "audience_type", "") or ""
     return {
         "video_id": getattr(state, "pipeline_id", ""),
         "title": _headline(state),
         "hook": _hook(state),
+        "audience_type": audience,
         "hero_scene": "",
         "description": description,
         "context": f"Act structure: {acts}",
@@ -1078,29 +1082,101 @@ def _llm_art_prompt(meta: Dict[str, Any], aspect_ratio: str,
     return None
 
 
-def craft_ctr_hook(meta: Dict[str, Any], llm=None) -> str:
+# Tautological word-pairs that cancel the curiosity gap (e.g. "HIDDEN ... EXPOSED"
+# says it is both hidden and shown). Hooks containing BOTH words are rejected.
+_TAUTOLOGY_PAIRS = (
+    ("HIDDEN", "EXPOSED"), ("SECRET", "REVEALED"), ("HIDDEN", "REVEALED"),
+    ("SECRET", "EXPOSED"), ("BURIED", "REVEALED"), ("UNKNOWN", "DISCOVERED"),
+    ("HIDDEN", "UNCOVERED"), ("SECRET", "UNCOVERED"),
+)
+
+# Curated, 2-3 word high-CTR curiosity-gap hooks for SCIENCE / RESEARCH exposé
+# content. All are <=3 words so _shorten_ctr_text never truncates them mid-thought.
+# Deterministic pick (stable per video) is used only when the LLM returns a
+# weak/tautological hook for a knowledge niche.
+_CURATED_SCIENCE_HOOKS = (
+    "WHAT THEY HID",
+    "THE INVISIBLE FORCE",
+    "SCIENCE'S SECRET",
+    "THE ATOM'S SECRET",
+    "FORBIDDEN PHYSICS",
+    "THEY LIED TO YOU",
+    "THE HIDDEN TRUTH",
+    "A SECRET EXPERIMENT",
+)
+
+_KNOWLEDGE_NICHES = (
+    "science", "tech", "space", "history", "health", "research", "physics",
+    "biology", "chemistry", "ai", "innovation", "general", "",
+)
+
+
+def _hook_is_tautological(hook: str) -> bool:
+    """True when the hook cancels its own curiosity with a tautological pair."""
+    h = (hook or "").upper()
+    return any(a in h and b in h for a, b in _TAUTOLOGY_PAIRS)
+
+
+def _is_knowledge_audience(audience_type: str) -> bool:
+    aud = (audience_type or "").strip().lower()
+    return any(k in aud for k in _KNOWLEDGE_NICHES)
+
+
+def _curated_science_hook(meta: Dict[str, Any], audience_type: str) -> str:
+    """Deterministic, stable-per-video curated science hook (never truncates)."""
+    seed = ((meta or {}).get("title") or (meta or {}).get("hook")
+            or (meta or {}).get("video_id") or "science")
+    idx = abs(hash(seed)) % len(_CURATED_SCIENCE_HOOKS)
+    return _CURATED_SCIENCE_HOOKS[idx]
+
+
+def craft_ctr_hook(meta: Dict[str, Any], llm=None, audience_type: str = "") -> str:
     """Derive a 2-3 word THEMATIC, curiosity-driven on-image hook from the
     video's actual content (title + description/transcript) — not the title
     verbatim. Falls back to the first 3 words of the title when the LLM is
-    unavailable. Never raises."""
-    fallback = _shorten_ctr_text((meta or {}).get("hook") or (meta or {}).get("title") or "")
+    unavailable, returns a weak hook, or produces a tautology. Never raises.
+
+    For SCIENCE / RESEARCH / explainer niches the hook is steered toward
+    proven curiosity-gap frames (e.g. 'WHAT THEY HID', 'THE ATOM'S SECRET')
+    and explicitly forbidden from tautological 'HIDDEN ... EXPOSED' phrasing
+    or dry lab-jargon nouns that read like a textbook."""
+    meta = meta or {}
+    audience = audience_type or meta.get("audience_type") or ""
+    is_knowledge = _is_knowledge_audience(audience)
+    fallback = _shorten_ctr_text(meta.get("hook") or meta.get("title") or "")
     if not is_nano_banana_available():
         return fallback
     try:
         if llm is None:
             from src.engine.llm_client import LLMClient
             llm = LLMClient()
-        title = _shorten((meta or {}).get("title") or "", 160)
-        desc = _shorten((meta or {}).get("description") or "", 1500)
+        title = _shorten(meta.get("title") or "", 160)
+        desc = _shorten(meta.get("description") or "", 1500)
+
+        steer = ""
+        guard = ""
+        if is_knowledge:
+            steer = (
+                "This is a SCIENCE / RESEARCH explainer or exposé. Favor a CURIOSITY-GAP hook "
+                "that makes a layperson click — frames like 'THE {X} SECRET', 'WHAT THEY HID', "
+                "'SCIENCE'S SECRET', 'THE TRUTH ABOUT {X}', or a startling verified fact. "
+            )
+            guard = (
+                " DO NOT use tautological pairs (e.g. 'HIDDEN ... EXPOSED', 'SECRET ... "
+                "REVEALED') — they cancel the curiosity. DO NOT use a dry lab-jargon noun "
+                "alone (e.g. 'ATOMIC FORCE', 'NUCLEUS STUDY') that reads like a textbook, "
+                "not a click."
+            )
+
         system_prompt = (
             "You craft high-CTR on-image YouTube thumbnail hooks. Return ONLY valid JSON of "
-            "the form {\"hook\": \"...\"}. The hook must be 3-5 words, UPPERCASE, a thematic, "
-            "curiosity-driven, engaging phrase that captures the video's CORE THEME and "
-            "makes people want to click (for example \"SILENT PAY CUT\", \"WHO REALLY WINS?\", "
+            "the form {\"hook\": \"...\"}. The hook must be 2-3 words (UPPERCASE), a thematic, "
+            "curiosity-driven, engaging phrase that captures the video's CORE THEME and makes "
+            "people want to click (for example \"SILENT PAY CUT\", \"WHO REALLY WINS?\", "
             "\"YOUR MONEY SHRINKS\"). Make it emotionally engaging (shock, curiosity, or a "
             "clear problem-to-solve) but never the video title verbatim and never a lie that "
-            "contradicts the content. Keep it short — 3 to 5 words max. No punctuation except "
-            "an optional trailing question mark."
+            "contradicts the content. No punctuation except an optional trailing question mark."
+            + steer + guard
         )
         user_prompt = (
             f"Video title: {title or '(unknown)'}\n"
@@ -1110,10 +1186,19 @@ def craft_ctr_hook(meta: Dict[str, Any], llm=None) -> str:
         parsed = llm.generate_json(user_prompt, system_prompt=system_prompt, route="generate")
         hook = (parsed or {}).get("hook")
         if hook and isinstance(hook, str):
-            cleaned = _shorten_ctr_text(hook)
-            if cleaned and cleaned != "WATCH THIS":
+            raw = (hook or "").strip()
+            cleaned = _shorten_ctr_text(raw)
+            # Check tautology on the RAW hook too — _shorten_ctr_text can strip
+            # one half of a "HIDDEN ... EXPOSED" pair and hide the redundancy.
+            taut = _hook_is_tautological(raw) or _hook_is_tautological(cleaned)
+            if cleaned and cleaned != "WATCH THIS" and not taut:
                 print(f"[NanoBanana] thematic hook: {cleaned}")
                 return cleaned
+            # LLM returned a hook but it is tautological for a knowledge niche
+            if is_knowledge and taut:
+                curated = _curated_science_hook(meta, audience)
+                print(f"[NanoBanana] hook rejected ({cleaned}); using curated: {curated}")
+                return curated
     except Exception as e:
         print(f"[NanoBanana] hook craft failed; using fallback: {e}")
     return fallback

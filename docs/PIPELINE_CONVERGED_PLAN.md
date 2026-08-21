@@ -424,8 +424,13 @@ producer uploads the primary via `thumbnails.set`; the operator finishes the exp
 YouTube Studio → Analytics → Test & Compare with the other two. Non-fatal; thumbnails are a
 nice-to-have.
 
-- **Thematic hook:** `craft_ctr_hook` derives a 3-5 word curiosity-driven hook from the video's
-  transcript/narration + facts (never the title verbatim).
+- **Thematic hook:** `craft_ctr_hook` derives a 2-3 word curiosity-driven hook from the video's
+  transcript/narration + facts (never the title verbatim). For SCIENCE / RESEARCH / explainer
+  niches it steers toward curiosity-gap frames (e.g. `WHAT THEY HID`, `THE ATOM'S SECRET`,
+  `SCIENCE'S SECRET`) and rejects tautological phrasing like "HIDDEN … EXPOSED" / "SECRET …
+  REVEALED" (which cancel the curiosity) and dry lab-jargon nouns (e.g. "ATOMIC FORCE"). A
+  tautological hook for a knowledge niche deterministically falls back to a curated high-CTR
+  hook so the rendered text is never truncated mid-thought.
 - **Regular video (SHIPPED):** `generate_baked_video_thumbnail` renders the 16:9 art (no native
   text) then burns the hook via `add_thumbnail_text`, applies the compliance pass; used as
   `asset_paths.thumbnail` and uploaded via `youtube.thumbnails.set` at publish time
