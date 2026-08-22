@@ -29,6 +29,34 @@ from src.engine.api_usage import api_usage
 # revision loop can repair ONLY the failing shots (Point 2 surgical revision).
 _RE_SHOT_ID = re.compile(r"Shot #(\d+)")
 
+# Mandatory verbal CTA words (mirrors the Observer's CTA gate in observer.py).
+_CTA_WORDS = ("subscribe", "like", "comment", "bell", "join", "sub")
+
+
+def _inject_cta(script) -> "object":
+    """Deterministically guarantee the final shot carries a like/comment/
+    subscribe CTA. The Observer's CTA gate is a HARD invariant, but the LLM
+    polish/repair pass has repeatedly failed to add one (the run then exhausts
+    its 5 revisions on a missing-CTA). Injecting it guarantees convergence
+    without burning another LLM call that may again omit it. Returns the
+    (possibly mutated) ScriptData.
+    """
+    if not getattr(script, "shots", None):
+        return script
+    final = script.shots[-1]
+    ftxt = (final.narration_text or "").lower()
+    if any(w in ftxt for w in _CTA_WORDS):
+        return script
+    cta = (
+        " If you found this eye-opening, like the video, drop your take in the "
+        "comments, and subscribe for more science that changes how you see the world."
+    )
+    base = (final.narration_text or "").rstrip()
+    if base.endswith((".", "!", "?")):
+        base = base[:-1]
+    final.narration_text = base + cta
+    return script
+
 
 def _bucket_violations(violations: List[str]) -> Tuple[Dict[int, List[str]], List[str]]:
     by_shot: Dict[int, List[str]] = {}
@@ -282,24 +310,44 @@ class OrchestratorAgent:
 
             # 2. Story Script Generation
             APPROVED_SCRIPT_STAGES = {"SCRIPT_APPROVED", "MEDIA_PRODUCED", "MEDIA_READY", "QUALITY_VERIFIED", "PUBLISHED_SUCCESS"}
-            if not state.script_data or state.execution_stage not in APPROVED_SCRIPT_STAGES:
-                if state.execution_stage not in APPROVED_SCRIPT_STAGES and state.script_data:
-                    logger.info("PHASE_2_SCRIPT_DESIGN", f"Found unapproved/failed script from a previous run (Stage: {state.execution_stage}). Clearing and re-generating...", pipeline_id=p_id, component="STORY_DESIGNER")
-                    state.script_data = None
-                logger.info("PHASE_2_SCRIPT_DESIGN", "Generating 10-15 Min 6-Act dramatic arc narrative script...", pipeline_id=p_id, component="STORY_DESIGNER")
-                msg_script = self.story_designer.process(state, region=state.region)
-                
-                if not state.script_data:
-                    raise RuntimeError("Script generation failed.")
+            REVISION_STAGE = "SCRIPT_REVISION_REQUIRED"
+            script_ok = bool(state.script_data and getattr(state.script_data, "shots", None))
 
-                logger.info(
-                    "PHASE_2_SCRIPT_DESIGN",
-                    f"Script Generated: '{state.script_data.title}' ({state.script_data.target_shots} shots, {state.script_data.estimated_runtime_seconds/60:.2f} mins)",
-                    pipeline_id=p_id, component="STORY_DESIGNER"
-                )
-                tracer.record_step(state, "SCRIPT_GENERATED", message=msg_script)
+            if state.execution_stage in APPROVED_SCRIPT_STAGES:
+                # Script already approved in a prior run; skip generation + re-audit.
+                logger.info("PHASE_2_SCRIPT_DESIGN", f"Resuming: Using existing approved script: '{state.script_data.title}'", pipeline_id=p_id, component="STORY_DESIGNER")
+            else:
+                # Decide whether we must generate from scratch or can repair the
+                # existing draft in place. Resuming at the revision stage with a
+                # real (if unapproved) script means the draft is still recoverable —
+                # discarding it and regenerating re-hits the same flaky model and
+                # loops the pipeline. Re-audit + surgical-repair it instead.
+                if state.execution_stage == REVISION_STAGE and script_ok:
+                    logger.info(
+                        "PHASE_2_SCRIPT_DESIGN",
+                        "Resuming at SCRIPT_REVISION_REQUIRED with an existing script; "
+                        "re-auditing for surgical repair instead of full re-generation.",
+                        pipeline_id=p_id, component="STORY_DESIGNER",
+                    )
+                else:
+                    if state.script_data:
+                        logger.info("PHASE_2_SCRIPT_DESIGN", f"Found unapproved/failed script from a previous run (Stage: {state.execution_stage}). Clearing and re-generating...", pipeline_id=p_id, component="STORY_DESIGNER")
+                        state.script_data = None
+                    logger.info("PHASE_2_SCRIPT_DESIGN", "Generating 10-15 Min 6-Act dramatic arc narrative script...", pipeline_id=p_id, component="STORY_DESIGNER")
+                    msg_script = self.story_designer.process(state, region=state.region)
 
-                # 3. Observer Audit & Quality Gate
+                    if not state.script_data:
+                        raise RuntimeError("Script generation failed.")
+
+                    logger.info(
+                        "PHASE_2_SCRIPT_DESIGN",
+                        f"Script Generated: '{state.script_data.title}' ({state.script_data.target_shots} shots, {state.script_data.estimated_runtime_seconds/60:.2f} mins)",
+                        pipeline_id=p_id, component="STORY_DESIGNER"
+                    )
+                    tracer.record_step(state, "SCRIPT_GENERATED", message=msg_script)
+
+                # 3. Observer Audit & Quality Gate (runs on the freshly generated OR
+                # the resumed existing script)
                 logger.info("PHASE_2_OBSERVER_AUDIT", "Running Observer Fact Audit and Visual Quality Check...", pipeline_id=p_id, component="OBSERVER")
                 msg_obs = self.observer.process(state)
 
@@ -397,6 +445,12 @@ class OrchestratorAgent:
                             )
                             if polished is not None:
                                 state.script_data = polished
+                            # The CTA gate is a HARD invariant the LLM polish pass has
+                            # repeatedly failed to satisfy; inject it deterministically
+                            # so the revision loop converges instead of exhausting its
+                            # attempts on a missing like/comment/subscribe ask.
+                            if any("CTA Gate FAIL" in v for v in global_v):
+                                state.script_data = _inject_cta(state.script_data)
                         # Keep the BEST draft: fewest hard violations, then highest
                         # paraphrase-diversity (was diversity-only).
                         hard_now = [v for v in violations if not is_soft_violation(v)]
@@ -499,8 +553,6 @@ class OrchestratorAgent:
                     logger.info("PHASE_2_OBSERVER_AUDIT", f"Saved formatted script Markdown to {script_md_path}", pipeline_id=p_id)
                 except Exception as e:
                     logger.warning("PHASE_2_OBSERVER_AUDIT", f"Failed to save script Markdown: {e}", pipeline_id=p_id)
-            else:
-                logger.info("PHASE_2_SCRIPT_DESIGN", f"Resuming: Using existing approved script: '{state.script_data.title}'", pipeline_id=p_id, component="STORY_DESIGNER")
 
             # 4. Media Production (Audio, Visuals, FFmpeg Assembly)
             video_exists = False

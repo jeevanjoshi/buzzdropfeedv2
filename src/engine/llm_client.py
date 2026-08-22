@@ -123,6 +123,56 @@ class LLMClient:
         """
         return self.is_local_llm_available() or self.is_cloud_llm_available()
 
+    # Valid JSON escapes: \" \\ \/ \b \f \n \r \t \uXXXX. Any other backslash
+    # (e.g. "\a", "\_", a lone trailing backslash) is invalid and makes
+    # json.loads raise "Invalid \escape". This rewrites runs of backslashes so
+    # that complete "\\" pairs stay valid and any dangling backslash is escaped
+    # to a literal "\\".
+    _VALID_ESCAPE = set('"\\/bfnrtu')
+
+    @classmethod
+    def _repair_invalid_escapes(cls, text: str) -> str:
+        if "\\" not in text:
+            return text
+        out: List[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch != "\\":
+                out.append(ch)
+                i += 1
+                continue
+            # Count the run of consecutive backslashes.
+            j = i
+            while j < n and text[j] == "\\":
+                j += 1
+            run = j - i
+            pairs = run // 2
+            out.append("\\\\" * pairs)
+            if run % 2 == 0:
+                i = j
+                continue
+            # One dangling backslash escapes text[j].
+            if j < n:
+                nxt = text[j]
+                if nxt in cls._VALID_ESCAPE:
+                    out.append("\\" + nxt)
+                    i = j + 1
+                    if nxt == "u" and j + 5 <= n and all(
+                        c in "0123456789abcdefABCDEF" for c in text[j + 1:j + 5]
+                    ):
+                        out.append(text[j + 1:j + 5])
+                        i = j + 5
+                else:
+                    # Invalid escape: keep the char, escape the backslash.
+                    out.append("\\\\" + nxt)
+                    i = j + 1
+            else:
+                out.append("\\\\")
+                i = j
+        return "".join(out)
+
     def _clean_and_parse_json(self, content: str) -> Optional[Dict[str, Any]]:
         if not content:
             return None
@@ -134,6 +184,7 @@ class LLMClient:
         if content_clean.endswith("```"):
             content_clean = content_clean[:-3]
         content_clean = content_clean.strip()
+        content_clean = self._repair_invalid_escapes(content_clean)
         try:
             return json.loads(content_clean, strict=False)
         except Exception as e1:
@@ -232,7 +283,11 @@ class LLMClient:
                 res = requests.post(url, json=payload, timeout=timeout)
                 print(f"[LLMClient] Local v1/chat/completions response status: {res.status_code}")
                 if res.status_code == 200:
-                    content = res.json()["choices"][0]["message"]["content"]
+                    content = (res.json().get("choices") or [{}])[0].get("message", {}).get("content")
+                    if content is None or content == "":
+                        print(f"[LLMClient] Local v1/chat/completions returned empty content")
+                        return None
+                    content = str(content)
                     print(f"[LLMClient] Local v1/chat/completions content length: {len(content)}")
                     return content
                 else:
@@ -251,7 +306,11 @@ class LLMClient:
                 res_native = requests.post(url_native, json=payload_native, timeout=timeout)
                 print(f"[LLMClient] Local /completion response status: {res_native.status_code}")
                 if res_native.status_code == 200:
-                    content = res_native.json().get("content", "")
+                    content = res_native.json().get("content")
+                    if content is None or content == "":
+                        print(f"[LLMClient] Local /completion returned empty content")
+                        return None
+                    content = str(content)
                     print(f"[LLMClient] Local /completion content length: {len(content)}")
                     return content
                 else:
@@ -338,7 +397,25 @@ class LLMClient:
 
                         choice = data["choices"][0]
                         finish_reason = choice.get("finish_reason")
-                        content = choice.get("message", {}).get("content", "")
+                        # Some providers (e.g. deepseek on OpenRouter) return the
+                        # content key present-but-None for empty/refusal responses.
+                        # `.get("content", "")` would then yield None, and the
+                        # later `len(content)` log call would raise
+                        # "TypeError: object of type 'NoneType' has no len()".
+                        # Treat None/empty as a transient failure to retry, and
+                        # coerce any non-string content to str for safety.
+                        content = (choice.get("message") or {}).get("content")
+                        if content is None or content == "":
+                            logger.warning(
+                                "LLM_CALL",
+                                f"Empty/null content from '{model}' (finish_reason={finish_reason})",
+                                component="LLM_CLIENT",
+                                extra_data={"model": model, "finish_reason": finish_reason,
+                                            "response": _trunc(raw_text, 1000)},
+                            )
+                            time.sleep(backoff)
+                            continue
+                        content = str(content)
 
                         if choice.get("error") or finish_reason == "error":
                             logger.warning("LLM_CALL", f"Model error from '{model}' (finish_reason=error)",
