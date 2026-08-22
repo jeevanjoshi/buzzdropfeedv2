@@ -361,6 +361,12 @@ class ObserverAgent:
             for num in shot_numbers:
                 if num not in gt_numbers:
                     cleaned_num = re.sub(r'[^\d.]', '', num)
+                    # Years (1900-2099) are temporal references, not quantitative
+                    # claims — they are governed by the Temporal Audit below, not
+                    # the Fact Audit, so a bare historical year (e.g. "Back in 2023")
+                    # must not be hard-flagged as an unverified numerical claim.
+                    if re.fullmatch(r'(?:19|20)\d{2}', cleaned_num):
+                        continue
                     if cleaned_num and float(cleaned_num) > 10 and cleaned_num not in [current_year, "100"]:
                         # A3: a narration number that is a valid truncation / rounding
                         # of a corpus number (e.g. "19" vs "19.29%", "41" vs "41.11",
@@ -392,21 +398,27 @@ class ObserverAgent:
             for past_y in past_years:
                 if past_y not in narration_lower:
                     continue
-                if past_y not in ground_truth_corpus:
-                    flagged_sentences_info.append((
-                        shot.shot_id,
-                        f"Outdated year '{past_y}' in: {shot.narration_text}",
-                        "Temporal Audit"
-                    ))
-                    continue
                 for _sent in [s.strip() for s in re.split(r'[.!?]', shot.narration_text) if len(s.strip()) > 15]:
                     _sl = _sent.lower()
                     if past_y not in _sl:
                         continue
-                    # Self-dated historical framing -> accepted by construction.
+                    # Self-dated historical framing -> accepted by construction,
+                    # REGARDLESS of whether the year appears in the corpus. A
+                    # sentence that NAMES its own past year ("back in 2023",
+                    # "in 2024", "2023,") can never read as a current-2026 event,
+                    # so it must never be hard-flagged as an outdated anchor.
                     if (f"in {past_y}" in _sl or f"during {past_y}" in _sl
                             or f"since {past_y}" in _sl or f"back in {past_y}" in _sl
                             or f"{past_y}," in _sl):
+                        continue
+                    # Non-self-dated past-year reference with no corpus anchor is a
+                    # fabricated/outdated anchor -> hard flag.
+                    if past_y not in ground_truth_corpus:
+                        flagged_sentences_info.append((
+                            shot.shot_id,
+                            f"Outdated year '{past_y}' in: {_sent}",
+                            "Temporal Audit"
+                        ))
                         continue
                     # Ambiguous tense: old figure phrased as current -> critic.
                     if any(c in _sl for c in _CURRENT_TIME_WORDS):

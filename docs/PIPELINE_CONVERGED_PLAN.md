@@ -273,7 +273,21 @@ are absent, every gate falls back to the original TF-IDF/NLTK logic — no regre
   threshold, protecting proper nouns/numbers/dates/currency; a no-op when WordNet or the
   semantic backend is unavailable (never fails/hangs, never hits the network).
   Net effect: the validator stops flagging fact-dense rephrases (27→13 live) and true copies
-  dissolve, so the 3-revision loop converges (was 25→27→32).
+   dissolve, so the 3-revision loop converges (was 25→27→32).
+ - **Historical-year audit false positives (`observer.py`)** — two gates wrongly
+   rejected legitimate historical framing, aborting good runs (e.g. *"Back in
+   2023, AI chatbots were glorified autocomplete…"* tripped both):
+   (1) **Fact Audit** treated the bare year `2023` as an unverified *numerical
+   claim* (4-digit number > 10 not in the RAG corpus). Fix: 4-digit years in
+   1900–2099 are skipped by the numerical-grounding check — they are temporal,
+   already governed by the Temporal Audit, not quantitative claims.
+   (2) **Temporal Audit** hard-flagged `Outdated year '2023'` whenever the year
+   was absent from the corpus, *before* the self-dated exception ran. Fix: a
+   self-dated past-year reference (`"in 2023"`, `"back in 2024"`, `"2023,"`,
+   `"during/since 2023"`) is accepted by construction **regardless of corpus
+   membership** — a sentence that names its own past year can never read as a
+   current-2026 event, so it must never be flagged as an outdated anchor.
+   Non-self-dated past-year references with no corpus anchor are still hard-flagged.
 
 ### 1.8 Fail-fast TTS & subtitle integrity
 

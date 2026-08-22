@@ -365,7 +365,12 @@ class OrchestratorAgent:
                     gate6_result = quality_verifier.verify_gate6_anti_slop_entropy(state.script_data)
                     if not gate6_result["passes"]:
                         issues.extend([f"Gate 6 Fail (Anti-Slop): {issue}" for issue in gate6_result["issues"]])
-                    
+
+                    # Title Shape Gate: a dangling-fragment title must never ship.
+                    title_pass, title_issues = quality_verifier.verify_title_shape(state.script_data)
+                    if not title_pass:
+                        issues.extend([f"Title Shape Gate FAIL: {issue}" for issue in title_issues])
+
                     return len(issues) == 0, issues
 
                 quality_pass, quality_errors = run_script_quality_checks()
@@ -408,6 +413,21 @@ class OrchestratorAgent:
                             pipeline_id=p_id, component="OBSERVER"
                         )
                         by_shot, global_v = _bucket_violations(violations)
+                        # Title-shape fix is independent of shot/global repairs: a
+                        # dangling-fragment title is cheaply re-crafted in place (no
+                        # full re-generation), so the Title Shape Gate can pass.
+                        _title_ok, _title_reason = quality_verifier.verify_title_shape(state.script_data)
+                        if not _title_ok:
+                            logger.warning(
+                                "PHASE_2_OBSERVER_AUDIT",
+                                f"Revision attempt {attempt}: re-crafting malformed title ({_title_reason}).",
+                                pipeline_id=p_id, component="OBSERVER"
+                            )
+                            _headline = state.selected_topic.headline if state.selected_topic else state.script_data.title
+                            _niche = getattr(state.selected_topic, "niche_category", "") if state.selected_topic else ""
+                            state.script_data.title = self.story_designer._finalize_script_title(
+                                state.script_data, _headline, _niche
+                            )
                         # Dispatch the REVISE_SCRIPT message for real: the fix is
                         # driven by the Observer's message (with state_hash) rather
                         # than a second ad-hoc generation path.

@@ -5,6 +5,7 @@ import json
 import subprocess
 from typing import Dict, Any, List, Tuple
 from src.schemas.state import GlobalState, ScriptData, TopicCandidate
+from src.agents.story_designer import validate_script_title
 
 
 class StageQualityVerifier:
@@ -75,6 +76,23 @@ class StageQualityVerifier:
 
         is_valid = len(issues) == 0
         return is_valid, issues
+
+    def verify_title_shape(self, script: ScriptData) -> Tuple[bool, List[str]]:
+        """
+        Title Shape Gate: the published script/video title must be a complete,
+        bounded phrase — never a dangling sentence fragment (e.g. "The Real
+        Reason Behind This weight-loss hormone may"). The story designer already
+        auto-fixes malformed titles via _finalize_script_title; this gate is the
+        defense-in-depth check surfaced to the Observer revision loop.
+        """
+        issues: List[str] = []
+        if not script or not getattr(script, "title", None):
+            issues.append("Title Shape Gate FAIL: script title is missing.")
+            return False, issues
+        ok, reason = validate_script_title(script.title)
+        if not ok:
+            issues.append(f"Title Shape Gate FAIL ({reason}): '{script.title}'")
+        return (len(issues) == 0), issues
 
     def verify_gate2_script_to_tts(
         self, state: GlobalState

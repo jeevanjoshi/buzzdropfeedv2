@@ -4,7 +4,7 @@ import uuid
 import time
 import datetime
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from src.schemas.state import GlobalState, ScriptData, ShotData, ShotBeat, TopicCandidate, VerifiedFact, SEOMetadata, VisualType
 from src.schemas.a2a import A2AMessage, AgentRole, AgentIntent, compute_state_hash
 from src.engine.llm_client import LLMClient
@@ -191,6 +191,51 @@ def _tension_fallback_title(headline: str, current_month_year: str) -> str:
     hl = _truncate_at_word(headline, 35)
     idx = hash(headline) % len(_TENSION_FALLBACK_TEMPLATES)
     return _TENSION_FALLBACK_TEMPLATES[idx].format(hl=hl)
+
+
+# --- Title shape validation + high-CTR improvement -------------------------
+# The LLM occasionally emits a dangling sentence fragment as the script title
+# (e.g. "The Real Reason Behind This weight-loss hormone may"). A published
+# title must be a complete, bounded phrase. These rules power both the
+# title-shape quality gate (quality_verifier.verify_title_shape) and the
+# auto-fix that re-crafts a high-CTR title from the script's own hook.
+_TITLE_DANGLING_RE = re.compile(
+    r"(?i)\b(may|might|could|can|will|would|should|is|are|was|were|has|have|had|"
+    r"do|does|did|without|and|or|but|that|which|because|since|although|though|"
+    r"the|a|an|to|of|for|with|from|on|in|at|by|as|if|than|while|who|what|how|"
+    r"shields?|protects?|helps?|reveals?|shows?|explains?|changes?)\s*[\.\!\?]?$"
+)
+_TITLE_DISALLOWED_CHARS = set("{}[]`\\")
+
+
+def validate_script_title(title: Optional[str]) -> Tuple[bool, str]:
+    """Return (ok, reason). A valid title is a complete, bounded phrase that
+    reads as a finished YouTube title — not a trailing sentence fragment."""
+    if not title or not isinstance(title, str):
+        return False, "title is empty/missing"
+    t = title.strip()
+    if len(t) < 8:
+        return False, "title too short (<8 chars)"
+    if len(t) > 100:
+        return False, "title too long (>100 chars)"
+    words = t.split()
+    if len(words) < 3:
+        return False, "title too short (<3 words)"
+    if len(words) > 16:
+        return False, "title too long (>16 words)"
+    if t.endswith((",", ";", "…", "...")):
+        return False, "title ends with dangling punctuation"
+    if any(ch in t for ch in _TITLE_DISALLOWED_CHARS):
+        return False, "title contains disallowed characters"
+    if _TITLE_DANGLING_RE.search(t):
+        return False, "title ends with a dangling verb/fragment"
+    return True, ""
+
+
+def _strip_title_markup(title: str) -> str:
+    t = str(title).strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    return t.strip("\"'")
 
 
 # Observer's per-shot narration cap (see observer.py:331/393). The story designer
@@ -1022,12 +1067,18 @@ class StoryDesignerAgent:
                             # enforcement can re-pad short shots deterministically.
                             self._last_rag_snippets = raw_snippets
                             self._last_used_snips = _used_snips
-                            return ScriptData(
+                            script = ScriptData(
                                 title=llm_result.get("title", _tension_fallback_title(headline, current_month_year)),
                                 target_shots=len(shots),
                                 shots=shots,
                                 estimated_runtime_seconds=round(runtime, 1)
                             )
+                            # Guarantee a well-formed, high-CTR title before the
+                            # Observer audits it (fixes dangling-fragment titles).
+                            script.title = self._finalize_script_title(
+                                script, headline, category, current_month_year
+                            )
+                            return script
                         logger.warning(
                             "SCRIPT_DESIGN",
                             f"LLM draft attempt {attempt}/{LLM_MAX_ATTEMPTS} failed gate: {len(shots)} shots, {total_words} words (<12 shots or <1500 words).",
@@ -1609,18 +1660,21 @@ class StoryDesignerAgent:
             logger.info("SCRIPT_DESIGN", f"Post-polish ceiling: {total_words} words total after capping shots.", component="STORY_DESIGNER")
         return script
 
-    def _generate_ctr_title(self, headline: str, niche_category: str = "") -> Optional[str]:
+    def _generate_ctr_title(self, headline: str, niche_category: str = "", hook: str = "") -> Optional[str]:
         """
         Best-effort LLM generation of a high-CTR YouTube title (<=65 chars) using
-        numbers, curiosity/urgency, or a question. Falls back to None (caller uses
-        the headline truncation) when the LLM is unavailable or the output is
+        numbers, curiosity/urgency, or a question. When ``hook`` (the script's own
+        opening lines) is supplied it is woven in so the title reflects the real
+        content, not just the headline. Falls back to None (caller uses the
+        headline truncation) when the LLM is unavailable or the output is
         unusable, so SEO generation never breaks on a single small call.
         """
         if not self.llm_client.is_available():
             return None
+        hook_clause = f"\nOpening hook from the script: \"{re.sub(r'\\s+', ' ', hook).strip()[:500]}\"\n" if hook else ""
         prompt = (
             f"Write ONE high-CTR YouTube title, max 65 characters, for an 11-14 minute "
-            f"infotainment documentary. Topic headline: '{headline}'. Niche: '{niche_category}'. "
+            f"infotainment documentary. Topic headline: '{headline}'. Niche: '{niche_category}'.{hook_clause}"
             f"Use a number, a curiosity/urgency angle, or a question. Avoid clickbait that "
             f"contradicts the facts. Return ONLY a JSON object with the key 'title'."
         )
@@ -1641,21 +1695,23 @@ class StoryDesignerAgent:
                 return title
         return None
 
-    def _generate_tension_title(self, headline: str, niche_category: str = "") -> Optional[str]:
+    def _generate_tension_title(self, headline: str, niche_category: str = "", hook: str = "") -> Optional[str]:
         """
         Best-effort LLM generation of a CONTRARIAN / tension YouTube title.
 
         Competitor faceless finance/AI channels (e.g. Finance Bureau) win CTR
         with tension framing ("Not a bubble... it's WORSE", "What they won't
         admit"). This prompt forces that angle while staying factually honest
-        (no fabricated claims). Falls back to None so the caller can fall back
-        to the softer CTR title / headline truncation.
+        (no fabricated claims). When ``hook`` is supplied it is woven in so the
+        title reflects the real content. Falls back to None so the caller can
+        fall back to the softer CTR title / headline truncation.
         """
         if not self.llm_client.is_available():
             return None
+        hook_clause = f"\nOpening hook from the script: \"{re.sub(r'\\s+', ' ', hook).strip()[:500]}\"\n" if hook else ""
         prompt = (
             f"Write ONE high-CTR YouTube title, MAX 65 characters, for an 11-14 minute "
-            f"infotainment documentary. Topic headline: '{headline}'. Niche: '{niche_category}'.\n\n"
+            f"infotainment documentary. Topic headline: '{headline}'. Niche: '{niche_category}'.{hook_clause}\n\n"
             f"The title MUST use a CONTRARIAN / TENSION angle that makes a scroller stop. "
             f"Adapt ONE of these patterns (do not copy verbatim):\n"
             f"  - 'Not X... it's Y'   (e.g. 'Not a Bubble... It's WORSE')\n"
@@ -1682,6 +1738,124 @@ class StoryDesignerAgent:
             if 10 <= len(title) <= 70:
                 return title
         return None
+
+    def _improve_script_title_for_ctr(
+        self,
+        script: "ScriptData",
+        headline: str,
+        niche_category: str = "",
+        current_month_year: str = "",
+    ) -> Optional[str]:
+        """
+        Re-craft the narrative script title into a complete, high-CTR YouTube
+        title grounded in the script's OWN hook + key facts (not just the
+        headline), so it reads as a finished, click-worthy phrase. Returns None
+        when the LLM is unavailable or the result is malformed, so the caller can
+        fall back deterministically.
+        """
+        if not self.llm_client.is_available() or not script or not script.shots:
+            return None
+        hook = " ".join(s.narration_text for s in script.shots[:2])
+        hook = re.sub(r"\s+", " ", hook).strip()[:600]
+        prompt = (
+            f"Write ONE complete, high-CTR YouTube title, MAX 70 characters, for an 11-14 minute "
+            f"documentary. The title MUST be a FINISHED phrase — never a sentence fragment that "
+            f"trails off with words like 'may', 'without', 'because', or 'and'.\n"
+            f"Topic headline: '{headline}'. Niche: '{niche_category}'.\n"
+            f"Opening hook from the script: \"{hook}\"\n\n"
+            f"Maximize click-through with an INFORMATION-GAP / curiosity framing and a concrete "
+            f"urgency word (e.g. 'the truth behind', 'hidden', 'secret', 'revealed', 'why', "
+            f"'never', 'shocking', 'what they won\\'t admit'). Use a specific number/statistic if "
+            f"one is implied, or a second-person ('you/your') angle. Vary vocabulary (avoid "
+            f"repetition) so the phrase feels substantive, not clickbait. Stay HONEST — never "
+            f"claim something the hook contradicts, and avoid fabricating. Return ONLY a JSON "
+            f"object with the key 'title'."
+        )
+        try:
+            result = self.llm_client.generate_json(
+                prompt,
+                "You craft concise, honest, complete high-CTR YouTube titles. Return valid JSON only.",
+                route="generate",
+            )
+        except Exception:
+            result = None
+        if result and result.get("title"):
+            t = _strip_title_markup(result["title"])
+            if 12 <= len(t) <= 75 and validate_script_title(t)[0]:
+                return t
+        return None
+
+    def _finalize_script_title(
+        self,
+        script: "ScriptData",
+        headline: str,
+        niche_category: str = "",
+        current_month_year: str = "",
+    ) -> str:
+        """
+        Guarantee script.title is well-formed AND high-CTR per the repo's CTR
+        guidelines (src/engine/ctr_predictor.py): urgency keywords, information-
+        gap phrasing, vocabulary entropy, and an IRM anti-clickbait quality score.
+        If the LLM title is malformed, or CTR optimization is enabled
+        (CSVG_OPTIMIZE_TITLE_CTR, default 1), generate hook-grounded candidates —
+        including a TENSION/contrarian variant (per docs/COMPETITOR_GAPS.md) — and
+        select the one with the highest predicted CTR among non-deceptive
+        (IRM >= 0.5) candidates. Never ship a dangling fragment.
+        """
+        optimize = os.getenv("CSVG_OPTIMIZE_TITLE_CTR", "1").strip().lower() in ("1", "true", "yes")
+        current = (getattr(script, "title", "") or "").strip()
+        ok, _ = validate_script_title(current)
+        if ok and not optimize:
+            return current
+
+        hook = ""
+        if script and getattr(script, "shots", None):
+            hook = " ".join(s.narration_text for s in script.shots[:2])
+
+        candidates: List[str] = []
+        if ok:
+            candidates.append(current)
+        # Hook-grounded, CTR-optimized candidates.
+        improved = self._improve_script_title_for_ctr(script, headline, niche_category, current_month_year)
+        if improved and validate_script_title(improved)[0]:
+            candidates.append(improved)
+        # Tension/contrarian variant (competitor CTR guideline).
+        tension = self._generate_tension_title(headline, niche_category, hook)
+        if tension and validate_script_title(tension)[0]:
+            candidates.append(tension)
+        # Deterministic last resort.
+        candidates.append(_tension_fallback_title(headline, current_month_year))
+
+        best = self._select_best_title_by_ctr(candidates, headline)
+        return best
+
+    def _select_best_title_by_ctr(self, candidates: List[str], summary: str) -> str:
+        """
+        Score each candidate with the repo's CTR predictor and return the
+        highest-CTR title among non-deceptive (IRM quality >= 0.5) candidates.
+        Falls back to the highest-CTR candidate overall if every candidate is
+        flagged as deceptive clickbait, and to the last candidate on any error.
+        """
+        from src.engine.ctr_predictor import ctr_predictor
+
+        scored = []  # (ctr, irm, title)
+        for t in candidates:
+            if not validate_script_title(t)[0]:
+                continue
+            try:
+                r = ctr_predictor.predict_ctr(t, summary)
+            except Exception:
+                r = {"predicted_ctr_pct": 0.0, "irm_quality_score": 0.0}
+            scored.append((float(r.get("predicted_ctr_pct", 0.0)), float(r.get("irm_quality_score", 0.0)), t))
+
+        if not scored:
+            return candidates[-1] if candidates else ""
+
+        clean = [(c, i, t) for (c, i, t) in scored if i >= 0.5]
+        pool = clean if clean else scored
+        # Maximize predicted CTR; tie-break on IRM quality (less deceptive).
+        pool.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return pool[0][2]
 
     def _generate_act_titles(self, script: ScriptData) -> Optional[List[str]]:
         """
@@ -1736,12 +1910,17 @@ class StoryDesignerAgent:
         Generates high-CTR SEO metadata (Title, Description, Tags, Thumbnail Brief) alongside the script.
         """
         headline = topic.headline
+        # Build a short hook from the script's opening shots so the SEO/CTR title
+        # reflects the real content, not just the headline.
+        _hook = ""
+        if script and getattr(script, "shots", None):
+            _hook = " ".join(s.narration_text for s in script.shots[:2])
         # Prefer a contrarian/tension title (the high-CTR angle faceless
         # finance/AI competitors use); fall back to the softer CTR title, then
         # a plain headline truncation. The tension title also feeds the
         # thumbnail hook below (via ctr_title/clean_title).
-        tension_title = self._generate_tension_title(headline, getattr(topic, "niche_category", ""))
-        ctr_title = tension_title or self._generate_ctr_title(headline, getattr(topic, "niche_category", ""))
+        tension_title = self._generate_tension_title(headline, getattr(topic, "niche_category", ""), _hook)
+        ctr_title = tension_title or self._generate_ctr_title(headline, getattr(topic, "niche_category", ""), _hook)
         clean_title = ctr_title if ctr_title else _truncate_at_word(headline, 65)
         tags = [t.strip().lower() for t in topic.keywords if len(t.strip()) > 2][:10]
         tags.extend(["infotainment", "documentary", "2026", "analysis", "explained"])
