@@ -65,7 +65,7 @@ _RAW_JUNK_IN_NARR_RE = re.compile(
     r'|\bRetrieved\b'
     r'|[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?'
     r'|[A-Z][a-z]+,\s+[A-Z][a-z]+\s+[\(\[]\s*' + _DATE_PAT + r'\s*,?\s+\d{4}\s*[\)\]]\.?'
-    r'|\bBy[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+'
+    r'|(?-i:By[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)'
     r'|You\'?re\s+currently\s+following\s+this\s+(?:author|writer)'
     r'|\b(?:Subscribe|Sign)\s+(?:to\s+continue|for\s+(?:updates|more))'
     r'|\bAdd\s+us\s+on\b'
@@ -119,6 +119,39 @@ def _looks_like_tool_citation(sentence: str) -> bool:
             "reported by jina", "as duckduckgo", "duckduckgo reports", "from duckduckgo",
         )
     )
+
+
+def _extract_entity_tokens(text: str) -> "set[str]":
+    """Return lowercased tokens that are part of named entities / frequently
+    recurring multi-word phrases in ``text``. Used to keep the keyword
+    over-repetition gate from flagging unavoidable subject-matter terms — e.g.
+    'factor' inside 'growth differentiation factor 15' — as filler.
+
+    Two signals: (1) Capitalized multi-word entity spans (proper nouns); and
+    (2) lowercase multi-word phrases that recur (>= 2x) in the corpus, which
+    catches entities written in lower case. Over-excluding is safe here: the
+    gate exists to catch genuine filler, not to police the topic's own
+    vocabulary.
+    """
+    import collections
+    toks: "set[str]" = set()
+    if not text:
+        return toks
+    # (1) Capitalized multi-word entity spans (2-5 words).
+    for m in re.finditer(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){1,4})\b", text):
+        for tk in m.group(1).lower().split():
+            if len(tk) >= 3:
+                toks.add(tk)
+    # (2) Frequent recurring lowercase multi-word phrases (2-3 words).
+    norm = re.sub(r"\s+", " ", text.lower())
+    phrases = re.findall(r"\b([a-z][a-z0-9-]+(?:\s+[a-z][a-z0-9-]+){1,2})\b", norm)
+    pc = collections.Counter(phrases)
+    for ph, cnt in pc.items():
+        if cnt >= 2:
+            for tk in ph.split():
+                if len(tk) >= 4:
+                    toks.add(tk)
+    return toks
 
 
 def is_soft_violation(violation: str) -> bool:
@@ -242,7 +275,11 @@ class ObserverAgent:
         ground_truth_corpus = " ".join([f"{f.headline} {f.summary}" for f in verified_facts]).lower()
         if crawled_content:
             ground_truth_corpus += " " + crawled_content.lower()
-        gt_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', ground_truth_corpus))
+        # Entity-aware number extraction: a digit attached to a letter or hyphen
+        # is part of a proper-noun/entity name (e.g. "interleukin-33", "GDF15",
+        # "FGF21"), NOT a standalone statistic, so it must not be grounded-checked.
+        _NUM_RE = r'(?<![A-Za-z0-9-])\$?\d+(?:\.\d+)?[kmb%]?(?![A-Za-z])'
+        gt_numbers = set(re.findall(_NUM_RE, ground_truth_corpus))
 
         # Verbatim source-copy check: narration must not reproduce the RAG corpus
         # (reads as pasted slop rather than creative narrative). Only an
@@ -318,7 +355,7 @@ class ObserverAgent:
 
         for shot in script.shots:
             narration_lower = shot.narration_text.lower()
-            shot_numbers = set(re.findall(r'\$?\b\d+(?:\.\d+)?[kmb%]?\b', narration_lower))
+            shot_numbers = set(re.findall(_NUM_RE, narration_lower))
 
             # 1. Numerical Grounding Check
             for num in shot_numbers:
@@ -451,52 +488,77 @@ class ObserverAgent:
                 FLAGGED CLAIMS:
                 {flagged_list_str}
                 
-                Requirements:
-                1. For EACH flagged claim, first classify it as one of:
-                   - STYLE: metaphor, analogy, rhetorical question, opinion, subjective
-                     judgement, engagement/call-to-action, narrative color, or a logical
-                     deduction/extrapolation from the facts.
-                   - ASSERTION: a hard, checkable factual claim (specific statistics,
-                     names, dates, places, events, numbers).
-                2. STYLE claims MUST be APPROVED (never rejected) — even if they are not in
-                   the corpus, because they are not assertions of fact.
-                3. Only reject ASSERTIONS that are unsupported by, or contradict, the
-                   verified facts corpus (e.g. wrong statistics, false names, incorrect
-                   dates, fabricated events).
-                4. TEMPORAL RULE: APPROVE pre-2026 data whenever the sentence itself
-                   names the year with a temporal preposition ('in 2023', 'during 2024',
-                   'since 2020', 'back in 2025') or is explicitly dated (e.g. 'a 2023
-                   Christmas dinner'). Such self-dated sentences are historical by
-                   construction and must NEVER be rejected. Only reject an ASSERTION
-                   that presents pre-2026 data as a current {current_year} event when
-                   the sentence uses a CURRENT tense without any year anchoring (e.g.
-                   'this month the industry is $5 billion' where the corpus only dates
-                   it to 2023).
-                5. Return a JSON object with a single key "violations" containing an array
-                   of strings. Each string is the EXACT text of a REJECTED assertion followed
-                   by the reason it fails. Return an empty array if all flagged claims are
-                   STYLE or supported.
-                """
+                 Requirements:
+                 1. For EACH flagged claim, first classify it as one of:
+                    - STYLE: metaphor, analogy, rhetorical question, opinion, subjective
+                      judgement, engagement/call-to-action, narrative color, or a logical
+                      deduction/extrapolation from the facts.
+                    - ASSERTION: a hard, checkable factual claim (specific statistics,
+                      names, dates, places, events, numbers).
+                 2. STYLE claims MUST be APPROVED (never rejected) — even if they are not in
+                    the corpus, because they are not assertions of fact. EXAMPLES of STYLE
+                    that you MUST APPROVE (do NOT reject) include metaphors about the body
+                    "waiting for permission to recover", "keys to unlocking" latent capacity,
+                    "immune modulator"/"metabolic architect" framing, "rewriting medicine's
+                    relationship with complexity", rhetorical questions, and any subjective
+                    or normative commentary. These are narrative color, not assertions.
+                 3. Only reject ASSERTIONS that are unsupported by, or contradict, the
+                    verified facts corpus (e.g. wrong statistics, false names, incorrect
+                    dates, fabricated events, or anatomical/mechanistic specifics the
+                    corpus never states).
+                 4. TEMPORAL RULE: APPROVE pre-2026 data whenever the sentence itself
+                    names the year with a temporal preposition ('in 2023', 'during 2024',
+                    'since 2020', 'back in 2025') or is explicitly dated (e.g. 'a 2023
+                    Christmas dinner'). Such self-dated sentences are historical by
+                    construction and must NEVER be rejected. Only reject an ASSERTION
+                    that presents pre-2026 data as a current {current_year} event when
+                    the sentence uses a CURRENT tense without any year anchoring (e.g.
+                    'this month the industry is $5 billion' where the corpus only dates
+                    it to 2023).
+                 5. Return a JSON object with a single key "violations" containing an array
+                    of objects, one per REJECTED claim ONLY. Each object MUST have:
+                       - "claim": the EXACT text of the rejected claim (verbatim from the
+                         FLAGGED CLAIMS list, including any "Shot #N" prefix if present),
+                       - "type": "ASSERTION" (rejected claims are always assertions),
+                       - "reason": a short explanation of why it is unsupported.
+                    Do NOT include STYLE claims or supported assertions in the array.
+                    Return an empty array if all flagged claims are STYLE or supported.
+                 """
                 system_prompt = "You are a precise, objective facts verification critic. Return valid JSON only."
                 try:
                     critic_result = llm_client.generate_json(prompt, system_prompt, route="critic", thinking="high")
                     if critic_result and "violations" in critic_result:
                         rejected_claims = critic_result["violations"]
                         for violation in rejected_claims:
+                            # The critic returns structured objects {"claim","type","reason"}.
+                            # Only ASSERTION rejections are real violations; STYLE claims are
+                            # narrative color the critic was told to approve, and any other
+                            # shape (e.g. a bare string from a non-conforming model) is
+                            # dropped to avoid false-positive hard aborts.
+                            if isinstance(violation, dict):
+                                if (violation.get("type") or "").upper() != "ASSERTION":
+                                    continue
+                                vtext = violation.get("claim") or violation.get("reason") or ""
+                                if not vtext:
+                                    continue
+                            else:
+                                # Legacy/string shape: keep only if it explicitly reads as
+                                # an assertion rejection; drop ambiguous STYLE rejections.
+                                vtext = str(violation)
                             # Map the violation string back to a flagged shot ID
                             matched_sid = None
-                            m = re.search(r"Shot #?(\d+)", violation)
+                            m = re.search(r"Shot #?(\d+)", vtext)
                             if m:
                                 matched_sid = int(m.group(1))
                             else:
                                 for sid, sentence, itype in flagged_sentences_info:
-                                    if sentence in violation or violation in sentence:
+                                    if sentence in vtext or vtext in sentence:
                                         matched_sid = sid
                                         break
                             if matched_sid is not None:
-                                violations.append(f"Shot #{matched_sid} fact audit violation: {violation}")
+                                violations.append(f"Shot #{matched_sid} fact audit violation: {vtext}")
                             else:
-                                violations.append(violation)
+                                violations.append(vtext)
                         return violations
                 except Exception as critic_err:
                     print(f"Warning: Critic call failed: {critic_err}. Defaulting to local validation flags.")
@@ -769,6 +831,7 @@ class ObserverAgent:
             "without", "around", "however", "people", "thing", "things",
         }
         _topic_tokens = set()
+        _recur_phrase_tokens: "set[str]" = set()
         if topic is not None:
             for kw in (getattr(topic, "keywords", None) or []):
                 _topic_tokens.add(re.sub(r"[^a-z0-9-]", "", str(kw).lower()))
@@ -806,10 +869,46 @@ class ObserverAgent:
                     if re.search(rf"\b{_abbrev}\b", _txt.lower()):
                         _topic_tokens.add(_name)
                         _topic_tokens.add(_name.split()[-1])
+            # Also exclude tokens that are part of the topic's named entities as
+            # they appear in the RAG fact corpus (e.g. 'factor' inside
+            # 'growth differentiation factor 15'), so the repetition gate does
+            # not flag unavoidable subject-matter terms as filler.
+            if crawled_content:
+                _topic_tokens.update(_extract_entity_tokens(crawled_content))
+            _topic_tokens.update(
+                _extract_entity_tokens((getattr(topic, "headline", "") or "") + " " + summary)
+            )
+            # Exempt tokens that are components of a multi-word phrase recurring
+            # across many shots (e.g. "growth differentiation factor", hammered as
+            # the topic's own named entity). Counting such components as filler
+            # over-flags unavoidable subject vocabulary; a token that always travels
+            # with the same neighbour is a coherent concept, not filler.
+            try:
+                from collections import Counter as _Counter
+                _seqs = []
+                for _s in script.shots:
+                    # NOTE: deliberately do NOT drop _topic_tokens here — a recurring
+                    # phrase like "growth differentiation factor" may contain tokens
+                    # that are individually whitelisted; we need the whole phrase to
+                    # detect that "differentiation" is a component of it.
+                    _seq = [t for t in re.findall(r'\b[a-zA-Z][a-zA-Z0-9-]{4,}\b', _s.narration_text.lower())
+                            if t not in _STOP and not t.isdigit()]
+                    _seqs.append(_seq)
+                _bg = _Counter()
+                for _seq in _seqs:
+                    for _a, _b in zip(_seq, _seq[1:]):
+                        _bg[(_a, _b)] += 1
+                _bg_thresh = max(2, int(0.4 * len(_seqs)))
+                for (_a, _b), _c in _bg.items():
+                    if _c >= _bg_thresh:
+                        _recur_phrase_tokens.add(_a)
+                        _recur_phrase_tokens.add(_b)
+            except Exception:
+                pass
         _tok_freq: Dict[str, int] = {}
         for s in script.shots:
             for t in set(re.findall(r'\b[a-zA-Z][a-zA-Z0-9-]{4,}\b', s.narration_text.lower())):
-                if t in _topic_tokens or t in _STOP or t.isdigit():
+                if t in _topic_tokens or t in _STOP or t in _recur_phrase_tokens or t.isdigit():
                     continue
                 _tok_freq[t] = _tok_freq.get(t, 0) + 1
 
