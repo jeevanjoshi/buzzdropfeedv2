@@ -26,6 +26,7 @@ import os
 import subprocess
 import shutil
 import json
+import asyncio
 
 from typing import Dict, Any, Optional, List
 
@@ -390,6 +391,81 @@ def reframe_16_9_to_9_16(src_path: str, dst_path: str, anchor: str = "center") -
     return dst_path
 
 
+async def _synthesize_short_tts(text: str, wav_path: str, ass_path: str,
+                                region: str, speed: float) -> None:
+    """
+    Synthesize short-native TTS + word-aligned subtitles.
+
+    Routes to the Pi audio-edge over HTTP when AUDIO_EDGE_URL is set (the
+    production path — Kokoro lives on the Pi, not the master), mirroring
+    media_producer's long-form path. Only falls back to a *local* Kokoro call
+    when the edge URL is unset (dev / hermetic). Raises RuntimeError if only
+    synthetic "toner" audio is available, so we never ship fake audio.
+    """
+    audio_edge_url = os.getenv("AUDIO_EDGE_URL")
+    if audio_edge_url:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                # 1. Synthesize TTS remotely on the Pi edge.
+                async with session.post(f"{audio_edge_url}/tools/synthesize_tts", json={
+                    "text": text, "output_path": wav_path,
+                    "region": region, "speed": speed
+                }, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"Short TTS over HTTP failed: {await resp.text()}")
+                    tts_json = await resp.json()
+                    if tts_json.get("engine") == "synthetic_wav_fallback":
+                        raise RuntimeError(
+                            f"Edge TTS degraded to synthetic_wav_fallback for {wav_path}: "
+                            f"Pi edge has no Kokoro model. Aborting rather than shipping fake audio.")
+                # 2. Download the synthesized wav with retries.
+                for attempt in range(3):
+                    try:
+                        async with session.get(f"{audio_edge_url}/files", params={"path": wav_path},
+                                               timeout=aiohttp.ClientTimeout(total=300)) as fr:
+                            if fr.status == 200:
+                                with open(wav_path, "wb") as f:
+                                    f.write(await fr.read())
+                                break
+                            raise RuntimeError(f"HTTP status {fr.status}")
+                    except Exception as ge:
+                        if attempt == 2:
+                            raise RuntimeError(f"Failed to download short wav after 3 attempts: {ge}")
+                        await asyncio.sleep(1.0)
+                # 3. Align subtitles remotely on the Pi edge.
+                async with session.post(f"{audio_edge_url}/tools/align_subtitles_whisper", json={
+                    "audio_path": wav_path, "output_ass_path": ass_path, "original_text": text
+                }, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"Short subtitle alignment over HTTP failed: {await resp.text()}")
+                # 4. Download the aligned .ass with retries.
+                for attempt in range(3):
+                    try:
+                        async with session.get(f"{audio_edge_url}/files", params={"path": ass_path},
+                                               timeout=aiohttp.ClientTimeout(total=300)) as fr:
+                            if fr.status == 200:
+                                with open(ass_path, "wb") as f:
+                                    f.write(await fr.read())
+                                break
+                            raise RuntimeError(f"HTTP status {fr.status}")
+                    except Exception as ge:
+                        if attempt == 2:
+                            raise RuntimeError(f"Failed to download short ass after 3 attempts: {ge}")
+                        await asyncio.sleep(1.0)
+            return
+        except Exception as e:
+            print(f"[ShortProducer] Edge audio failed ({e}); falling back to local synthesis.")
+    # Local fallback (dev / hermetic): requires kokoro_onnx on the master.
+    tts_res = await synthesize_tts(TTSRequest(text=text, output_path=wav_path, speed=speed))
+    if isinstance(tts_res, dict) and tts_res.get("engine") == "synthetic_wav_fallback":
+        raise RuntimeError(
+            f"Short TTS degraded to synthetic_wav_fallback for {wav_path}; "
+            f"aborting rather than shipping fake audio.")
+    await align_subtitles_whisper(WhisperRequest(
+        audio_path=wav_path, output_ass_path=ass_path, original_text=text))
+
+
 # ── Agent ──────────────────────────────────────────────────────────────────────
 class ShortProducerAgent:
     """Stage 4c: dedicated professional Shorts producer.
@@ -507,14 +583,10 @@ class ShortProducerAgent:
                 if _is_portrait(img) is False:
                     reframe_16_9_to_9_16(img, img)
 
-                tts_res = await synthesize_tts(TTSRequest(
-                    text=beat.narration_text, output_path=wav, speed=SHORT_TTS_SPEED))
-                if isinstance(tts_res, dict) and tts_res.get("engine") == "synthetic_wav_fallback":
-                    raise RuntimeError(
-                        f"Short TTS degraded to synthetic_wav_fallback for {beat_key}; "
-                        f"aborting rather than shipping fake audio.")
-                await align_subtitles_whisper(WhisperRequest(
-                    audio_path=wav, output_ass_path=ass, original_text=beat.narration_text))
+                _region = (state.selected_topic.region
+                           if (state.selected_topic and hasattr(state.selected_topic, "region"))
+                           else "all")
+                await _synthesize_short_tts(beat.narration_text, wav, ass, _region, SHORT_TTS_SPEED)
 
                 audio_dur = _probe_wav_duration(wav) or beat.duration_estimate
                 clip_dur = max(audio_dur + SHORT_PAD_AFTER, 2.0)
